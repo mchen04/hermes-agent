@@ -177,6 +177,9 @@ hermes -z "What's the capital of France?"
 
 # Parent scripts can cleanly capture the response:
 answer=$(hermes -z "summarize this" < /path/to/file.txt)
+
+# Pass - as the prompt to read it verbatim from stdin (empty input exits 2):
+answer=$(hermes -z - < /path/to/prompt.txt)
 ```
 
 Per-run overrides (no mutation to `~/.hermes/config.yaml`):
