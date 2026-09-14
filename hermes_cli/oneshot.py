@@ -180,13 +180,10 @@ def run_oneshot(
     if prompt == "-":
         try:
             prompt = sys.stdin.read()
+            input_error = None if prompt.strip() else "prompt from stdin is empty"
         except OSError as exc:
             input_error = f"cannot read prompt from stdin: {exc}"
-            _write_usage_file(usage_file, {}, failure=input_error)
-            sys.stderr.write(f"hermes -z: {input_error}\n")
-            return 2
-        if not prompt.strip():
-            input_error = "prompt from stdin is empty"
+        if input_error:
             _write_usage_file(usage_file, {}, failure=input_error)
             sys.stderr.write(f"hermes -z: {input_error}\n")
             return 2
