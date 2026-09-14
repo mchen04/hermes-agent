@@ -22,6 +22,8 @@ DEFAULT_CONFIG = {
     "model": "",
     "providers": {},
     "fallback_providers": [],
+    # Per-primary daily-quota fallback; never applies to authentication or minute throttles.
+    "quota_fallbacks": [],
     "credential_pool_strategies": {},
     "toolsets": ["hermes-cli"],
     # journal_mode: SQLite journal mode for every Hermes DB. "wal" default; use "delete" on

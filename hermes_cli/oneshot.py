@@ -438,7 +438,7 @@ def _run_agent(
         explicit_base_url=choice.base_url,
         explicit_api_key=choice.api_key,
     )
-    if choice.api_mode:
+    if choice.api_mode and not runtime.get("quota_fallback_from"):
         runtime["api_mode"] = choice.api_mode
 
     from hermes_constants import parse_reasoning_effort, resolve_reasoning_config
@@ -478,7 +478,7 @@ def _run_agent(
             provider=runtime.get("provider"),
             requested_provider=runtime.get("requested_provider"),
             api_mode=runtime.get("api_mode"),
-            model=choice.model,
+            model=runtime.get("model", choice.model) if runtime.get("quota_fallback_from") else choice.model,
             enabled_toolsets=toolsets_list,
             quiet_mode=True,
             platform="cli",

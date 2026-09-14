@@ -940,6 +940,14 @@ def _merge_disk_cooldown_state(
         disk_access = disk_entry.get("access_token") or ""
         if mem_access and disk_access and mem_access != disk_access:
             return entry
+        if provider_id == "gemini" and disk_entry.get("quota_project"):
+            entry = {**entry, "quota_project": disk_entry["quota_project"]}
+        if (provider_id == "gemini" and disk_entry.get("last_error_reason") == "gemini_daily_quota"
+                and (_parse_absolute_timestamp(disk_entry.get("last_error_reset_at")) or 0) > time.time()
+                and entry.get("last_status") != STATUS_DEAD
+                and (entry.get("last_error_reason") != "gemini_daily_quota"
+                     or (entry.get("last_error_reset_at") or 0) < disk_entry["last_error_reset_at"])):
+            return {**entry, **{f: disk_entry.get(f) for f in _POOL_STATUS_FIELDS}}
         disk_ts = _parse_absolute_timestamp(disk_entry.get("last_status_at")) or 0.0
         mem_ts = _parse_absolute_timestamp(entry.get("last_status_at")) or 0.0
         if disk_ts <= mem_ts:

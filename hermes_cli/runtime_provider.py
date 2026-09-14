@@ -524,11 +524,16 @@ def _resolve_from_pool(provider: str, requested_provider: str, model_cfg: Dict[s
     try:
         pool = load_pool(provider) if should_use_pool else None
     except Exception:
+        if provider == "gemini":
+            raise
         pool = None
     if not (pool and pool.has_credentials()):
         return None
     entry = pool.select()
     if entry is None:
+        if provider == "gemini":
+            from agent.quota_fallback import GeminiPoolUnavailable
+            raise GeminiPoolUnavailable(pool)
         return None
     pool_api_key = _pool_entry_api_key(entry)
     if provider == "nous":
@@ -849,7 +854,12 @@ def resolve_runtime_provider(*, requested: Optional[str] = None, explicit_api_ke
     OpenCode Zen/Go where different models route through different API surfaces)."""
     requested_provider = resolve_requested_provider(requested)
     _raise_if_provider_disabled(requested_provider)
-    return next(r for r in _ladder_rungs(requested_provider, explicit_api_key, explicit_base_url, target_model) if r)
+    from agent.quota_fallback import GeminiPoolUnavailable, resolve_exhausted_runtime
+    try:
+        return next(r for r in _ladder_rungs(requested_provider, explicit_api_key, explicit_base_url, target_model) if r)
+    except GeminiPoolUnavailable as exc:
+        return resolve_exhausted_runtime(exc, requested_provider, target_model or _effective_model(_get_model_config(), None),
+            explicit_api_key=explicit_api_key, explicit_base_url=explicit_base_url)
 
 
 def _ladder_rungs(requested_provider, explicit_api_key, explicit_base_url, target_model):

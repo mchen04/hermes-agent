@@ -14,6 +14,7 @@ os.environ.pop('HERMES_DELEGATED_CHILD_CONTEXT', None)
 import pytest
 from hermes_cli import kanban_db as kb
 from hermes_cli.kanban_db_connect import connect
+from hermes_cli.kanban_db_unblock import unblock_task
 import inspect
 
 def create(conn, title):
@@ -51,7 +52,7 @@ with tempfile.TemporaryDirectory(prefix='hermes-pr-live-') as home:
                 def reclaim():
                     with connect() as other:
                         kb.block_task(other, tid, reason='Reassigned during acceptance')
-                        kb.unblock_task(other, tid)
+                        unblock_task(other, tid)
                         state['replacement'] = kb.claim_task(other, tid).current_run_id
                 state.update(conclusion=outcome, race=reclaim)
                 accepted = kb.complete_task(conn, tid, expected_run_id=run_id, metadata={'published_pr': 'https://github.com/acme/repo/pull/7'})

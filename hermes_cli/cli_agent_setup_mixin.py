@@ -179,12 +179,15 @@ class CLIAgentSetupMixin:
         refresh are picked up without restarting the CLI. False on auth failure."""
         from cli import ChatConsole, logger
         from hermes_cli.runtime_provider import resolve_runtime_provider, format_runtime_provider_error
+        primary_model = getattr(self, "_quota_primary_model", None)
+        requested_model = (primary_model if primary_model and self.model == getattr(self, "_quota_fallback_model", None)
+                           else self.model)
         _primary_exc = None
         runtime = None
         try:
             runtime = resolve_runtime_provider(
                 requested=self.requested_provider, explicit_api_key=self._explicit_api_key,
-                explicit_base_url=self._explicit_base_url)
+                explicit_base_url=self._explicit_base_url, target_model=requested_model)
         except Exception as exc:
             _primary_exc = exc
         if _primary_exc is not None:
@@ -195,6 +198,13 @@ class CLIAgentSetupMixin:
             message = format_runtime_provider_error(_primary_exc) if _primary_exc else "Provider resolution failed."
             ChatConsole().print(f"[bold red]{message}[/]")
             return False
+        if runtime.get("quota_fallback_from"):
+            self._quota_primary_model = requested_model
+            self._quota_fallback_model = runtime["model"]
+        elif primary_model:
+            if requested_model == primary_model:
+                self.model = primary_model
+            self._quota_primary_model = self._quota_fallback_model = None
         api_key = runtime.get("api_key")
         base_url = runtime.get("base_url")
         resolved_provider = runtime.get("provider", "openrouter")
@@ -242,7 +252,7 @@ class CLIAgentSetupMixin:
         # would otherwise send the provider name as the model string -> 400).
         runtime_model = runtime.get("model")
         if runtime_model and isinstance(runtime_model, str) and (
-            not self.model or self.model == self.provider or self.model == runtime.get("name")):
+            runtime.get("quota_fallback_from") or not self.model or self.model == self.provider or self.model == runtime.get("name")):
             self.model = runtime_model
 
         # Still empty (e.g. `hermes auth add` without `hermes model`): fall back to the

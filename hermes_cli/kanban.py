@@ -20,6 +20,7 @@ from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
 from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_workspace as kbw
+from hermes_cli.kanban_db_unblock import unblock_task
 from hermes_cli import kanban_db_notify as kbn
 from hermes_cli import kanban_swarm as ks
 from hermes_cli.kanban_output import (
@@ -922,9 +923,25 @@ def _cmd_block(args: argparse.Namespace) -> int:
                 return f"{tid} → triage (unblock loop detected — needs a human decision){suffix}"
             return f"Blocked {tid}{suffix}"
 
-        op = _commented(conn, reason, author, "BLOCKED", lambda tid: kb.block_task(
-            conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id_for(tid)))
-        return _bulk_apply(ids, op, ok_msg, lambda tid: f"cannot block {tid}")
+        refusals: dict[str, str] = {}
+
+        def _block(tid):
+            try:
+                return kb.block_task(conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id_for(tid),
+                                     force=bool(getattr(args, "force", False)),
+                                     resume_after=getattr(args, "resume_after", None))
+            except kb.BlockRejected as exc:
+                refusals[tid] = str(exc)
+                return False
+
+        def op(tid):
+            # Comment only after the block landed: a refused block must leave no "BLOCKED:" note behind.
+            ok = _block(tid)
+            if ok and reason:
+                kb.add_comment(conn, tid, author, f"BLOCKED: {reason}")
+            return ok
+
+        return _bulk_apply(ids, op, ok_msg, lambda tid: refusals.get(tid, f"cannot block {tid}"))
 
 
 def _cmd_schedule(args: argparse.Namespace) -> int:
@@ -948,7 +965,7 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
     author = _profile_author() if reason else None
     suffix = f": {reason}" if reason else ""
     with kbc.connect_closing() as conn:
-        op = _commented(conn, reason, author, "UNBLOCK", lambda tid: kb.unblock_task(conn, tid))
+        op = _commented(conn, reason, author, "UNBLOCK", lambda tid: unblock_task(conn, tid))
         return _bulk_apply(ids, op, lambda tid: f"Unblocked {tid}{suffix}",
                            lambda tid: f"cannot unblock {tid} (not blocked/scheduled?)")
 

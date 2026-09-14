@@ -432,6 +432,7 @@ class GatewayConfigLoadersMixin:
             from hermes_cli.config import read_user_config_raw
             cfg_path = _hermes_home / "config.yaml"
             if not cfg_path.exists():
+                self._fallback_config = {}
                 self._fallback_model = None
                 return self._fallback_model
             # Raw primitive (raises on parse failure) is required here: the canonical fail-open
@@ -449,11 +450,12 @@ class GatewayConfigLoadersMixin:
         except Exception:
             logger.debug("fallback_providers refresh: config.yaml read failed; keeping last known-good chain", exc_info=True)
             return self._fallback_model
+        self._fallback_config = cfg
         self._fallback_model = get_fallback_chain(cfg) or None
         return self._fallback_model
 
     @staticmethod
-    def _apply_fallback_chain_to_agent(agent: Any, chain: list | None) -> None:
+    def _apply_fallback_chain_to_agent(agent: Any, chain: list | None, *, config: dict | None = None) -> None:
         """Keep a cached agent's fallback chain aligned with current config.
 
         Skips the rewrite while a cooldown holds the agent on an activated fallback provider
@@ -469,6 +471,21 @@ class GatewayConfigLoadersMixin:
         rate_limited_until = getattr(agent, "_rate_limited_until", 0) or 0
         if getattr(agent, "_fallback_activated", False) and rate_limited_until > time.monotonic():
             return
+        if not new_chain:
+            if config is None:
+                return  # No successful snapshot yet; a torn write cannot clear policy.
+            from agent.quota_fallback import configured_fallback
+            # Reuse must resolve the primary's policy even while the current client
+            # is a fallback awaiting restoration. An explicit chain still wins.
+            primary = getattr(agent, "_primary_runtime", None) or {}
+            fallback = configured_fallback(
+                primary.get("provider", getattr(agent, "provider", None)),
+                primary.get("model", getattr(agent, "model", None)),
+                base_url=primary.get("base_url", getattr(agent, "base_url", None)),
+                config=config,
+            )
+            if fallback:
+                new_chain = [fallback]
         old_chain = list(getattr(agent, "_fallback_chain", []) or [])
         agent._fallback_chain = new_chain
         agent._fallback_model = new_chain[0] if new_chain else None

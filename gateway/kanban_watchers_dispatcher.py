@@ -295,16 +295,21 @@ def _log_spawn_results(results: Optional[list]) -> bool:
     """Log per-board spawn summaries; returns whether any board spawned."""
     any_spawned = False
     for slug, res in (results or []):
+        if res is not None and getattr(res, "auto_resumed", None):
+            for item in res.auto_resumed:
+                logger.info("kanban dispatcher [%s]: auto-resumed %s (%s, waited %ss)", slug,
+                            item.get("task_id"), item.get("trigger"), item.get("waited_seconds", "?"))
         if res is not None and getattr(res, "spawned", None):
             any_spawned = True
             # Quiet by default: an idle gateway stays silent.
             logger.info(
                 "kanban dispatcher [%s]: spawned=%d reclaimed=%d "
-                "crashed=%d timed_out=%d promoted=%d auto_blocked=%d",
+                "crashed=%d timed_out=%d promoted=%d auto_blocked=%d auto_resumed=%d",
                 slug, len(res.spawned), res.reclaimed,
                 len(res.crashed) if hasattr(res.crashed, "__len__") else 0,
                 len(res.timed_out) if hasattr(res.timed_out, "__len__") else 0,
                 res.promoted,
                 len(res.auto_blocked) if hasattr(res.auto_blocked, "__len__") else 0,
+                len(getattr(res, "auto_resumed", None) or []),
             )
     return any_spawned

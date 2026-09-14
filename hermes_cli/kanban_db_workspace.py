@@ -8,9 +8,11 @@ late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
+import zipfile
 from pathlib import Path
 from typing import Optional
 from typing import TYPE_CHECKING
@@ -110,6 +112,23 @@ def _is_managed_scratch_path(p: Path) -> bool:
     return _managed_scratch_path_info(p)[0]
 
 
+def _remove_scratch_workspace(conn, task_id, wp):
+    """One retention/containment gate for direct, deferred and GC removal."""
+    if not wp.is_dir() or not _is_managed_scratch_path(wp) or _has_active_children(conn, task_id):
+        return False
+    from hermes_cli.kanban_retention import require_retention
+    task = _kb.get_task(conn, task_id)
+    research = bool(task and any(re.search(r'(?:^|[-_/])research(?:$|[-_/])', skill)
+                                for skill in task.skills or []))
+    try:
+        require_retention(wp, research=research)
+    except (OSError, ValueError, KeyError, TypeError, zipfile.BadZipFile) as exc:
+        _kb._log.error("Retaining research workspace %s: archive verification failed: %s", wp, exc)
+        return False
+    shutil.rmtree(wp, ignore_errors=True)
+    return not wp.exists()
+
+
 def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
     """Remove a task's scratch workspace dir and kill its stale tmux session.
     Called from :func:`complete_task` after the transaction commits; best-effort
@@ -151,7 +170,8 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
             # source tree; without this, completion would rmtree the user's data.
             # See #28818.
             if _is_managed_scratch_path(wp):
-                shutil.rmtree(wp, ignore_errors=True)
+                if not _remove_scratch_workspace(conn, task_id, wp):
+                    return
                 _kb._log.debug("Removed scratch workspace: %s", wp)
             else:
                 _kb._log.warning(
@@ -241,8 +261,7 @@ def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> No
                 _cleanup_worktree_workspace(parent_id, row["workspace_path"], row["branch_name"])
                 continue
             wp = Path(row["workspace_path"])
-            if wp.is_dir() and _is_managed_scratch_path(wp):
-                shutil.rmtree(wp, ignore_errors=True)
+            if _remove_scratch_workspace(conn, parent_id, wp):
                 _kb._log.debug("Deferred cleanup: removed parent %s scratch workspace: %s", parent_id, wp)
     except Exception:
         pass  # best-effort

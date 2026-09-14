@@ -174,6 +174,7 @@ _EXTRA_KEYS = frozenset({
     # raw status cannot size a cooldown; persisted so a restart doesn't downgrade
     # a billing bench to a 60s transient cooldown.
     "failure_reason",
+    "quota_project",
 })
 
 # Nous singleton metadata mirrored between auth.json state and ``entry.extra``.
@@ -401,7 +402,7 @@ def _normalize_error_context(error_context: Optional[Dict[str, Any]]) -> Dict[st
     if not isinstance(error_context, dict):
         return {}
     normalized: Dict[str, Any] = {}
-    for key in ("reason", "message"):
+    for key in ("reason", "message", "quota_project"):
         value = error_context.get(key)
         if isinstance(value, str) and value.strip():
             normalized[key] = value.strip()
@@ -854,7 +855,7 @@ def persist_pool_entries(
     ``invalid_grant`` (#100339). Such rows are written back to the root store
     (under the root lock); everything else goes to the active store.
     """
-    if provider in SINGLE_USE_REFRESH_POOL_PROVIDERS and not _profile_owns_pool_provider(provider):
+    if (provider in SINGLE_USE_REFRESH_POOL_PROVIDERS or provider == "gemini") and not _profile_owns_pool_provider(provider):
         global_path = _borrowed_single_use_pool_root()
         if global_path is not None:
             try:
@@ -863,6 +864,8 @@ def persist_pool_entries(
                     status_cleared_ids=status_cleared_ids,
                 )
             except Exception as exc:
+                if provider == "gemini":
+                    raise RuntimeError("Cannot persist shared Gemini cooldown") from exc
                 # Fail closed on the FORK, not on the save: never fall back to
                 # writing a local copy (that IS the bug). The in-memory pool
                 # still holds the rotated pair for this process.
@@ -1108,14 +1111,20 @@ class CredentialPool(CredentialPoolAdminMixin):
         failure_reason: Optional[str] = None,
     ) -> PooledCredential:
         normalized_error = _normalize_error_context(error_context)
+        if self.provider == "gemini":
+            from agent.gemini_quota import normalize_context
+            normalized_error = normalize_context(self.provider, status_code, normalized_error)
         # Permanent OAuth failures become STATUS_DEAD, not STATUS_EXHAUSTED:
         # otherwise a revoked credential re-enters rotation every hour and
         # fails immediately until the user removes it (#32849).
-        terminal = self._is_terminal_auth_failure(status_code, normalized_error)
+        terminal = self._is_terminal_auth_failure(status_code, normalized_error) or (
+            self.provider == "gemini" and status_code in {401, 403})
         # Carry the classifier's verdict so the cooldown is sized by what
         # actually failed (a billing 403 must not get the sole-credential
         # transient cooldown); absent a classification, clear a stale one.
         updated_extra = dict(entry.extra)
+        if self.provider == "gemini" and normalized_error.get("quota_project"):
+            updated_extra["quota_project"] = normalized_error["quota_project"]
         if failure_reason:
             updated_extra["failure_reason"] = failure_reason
         else:
@@ -1835,6 +1844,9 @@ class CredentialPool(CredentialPoolAdminMixin):
         refreshes them outside the lock instead of stalling every pool
         consumer during cross-process flock acquisition + OAuth network I/O.
         """
+        if self.provider == "gemini":
+            from agent.gemini_quota import sync_pool_cooldowns
+            sync_pool_cooldowns(self)
         now = time.time()
         cleared_any = False
         entries_to_prune: List[str] = []
@@ -2061,8 +2073,14 @@ class CredentialPool(CredentialPoolAdminMixin):
             # Mark every entry sharing the failed key.
             failed_runtime_key = entry.runtime_api_key
             if identity_supplied and failed_runtime_key:
+                failed = self._find(lambda e: e.id == entry.id) or entry
+                quota_project = (failed.extra.get("quota_project") if self.provider == "gemini"
+                                 and failed.last_error_reason == "gemini_daily_quota" else None)
                 siblings = [
-                    s for s in self._entries if s.id != entry.id and s.runtime_api_key == failed_runtime_key
+                    s for s in self._entries if s.id != entry.id and (
+                        s.runtime_api_key == failed_runtime_key
+                        or (quota_project and s.extra.get("quota_project") == quota_project
+                            and s.last_status != STATUS_DEAD))
                 ]
                 for sibling in siblings:
                     self._mark_exhausted(

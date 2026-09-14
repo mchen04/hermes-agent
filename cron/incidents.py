@@ -58,6 +58,10 @@ def _connect() -> sqlite3.Connection:
 
 def _initialize_schema(conn: sqlite3.Connection) -> None:
     prepare_ledger(conn, db_label="cron/executions.db")
+    _create_schema(conn)
+
+
+def _create_schema(conn):
     conn.execute(
         """CREATE TABLE IF NOT EXISTS cron_incidents (
              id            TEXT PRIMARY KEY,
@@ -73,6 +77,8 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
              output_file   TEXT
            )"""
     )
+    from hermes_cli.sqlite_util import add_column_if_missing
+    add_column_if_missing(conn, "cron_incidents", "execution_id", "execution_id TEXT")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_cron_incidents_job "
         "ON cron_incidents(job_id)"
@@ -139,6 +145,14 @@ def upsert_incident(
     is_new)``. An existing row for the signature refreshes
     ``last_seen_at``/``error``/``output_file`` and keeps its state — a ``closed`` incident stays
     closed. A changed error text mints a new incident."""
+    with _transaction() as conn:
+        return upsert_incident_in_transaction(
+            conn, job_id, error, failure_type=failure_type, output_file=output_file)
+
+
+def upsert_incident_in_transaction(conn, job_id, error, *, failure_type=None, output_file=None, execution_id=None):
+    """Share the execution's transaction so a terminal delivery failure cannot lose its incident."""
+    _create_schema(conn)
     job_id = str(job_id or "")
     sig = _error_signature(job_id, error)
     stored_error = _redact_error(error)
@@ -147,27 +161,26 @@ def upsert_incident(
     failure_type = failure_type or _classify_failure_type(error)
     output_file = str(output_file) if output_file is not None else None
 
-    with _transaction() as conn:
-        row = conn.execute(
-            "SELECT id FROM cron_incidents WHERE id=?", (incident_id,)
-        ).fetchone()
-        if row is not None:
-            conn.execute(
-                """UPDATE cron_incidents
-                   SET last_seen_at=?, error=?, output_file=?
-                   WHERE id=?""",
-                (now, stored_error, output_file, incident_id),
-            )
-            return incident_id, False
+    row = conn.execute(
+        "SELECT id FROM cron_incidents WHERE id=?", (incident_id,)
+    ).fetchone()
+    if row is not None:
         conn.execute(
-            """INSERT INTO cron_incidents
-               (id, job_id, error_sig, state, failure_type,
-                first_seen_at, last_seen_at, error, output_file)
-               VALUES (?, ?, ?, 'detected', ?, ?, ?, ?, ?)""",
-            (incident_id, job_id, sig, failure_type, now, now,
-             stored_error, output_file),
+            """UPDATE cron_incidents
+               SET last_seen_at=?, error=?, output_file=?, execution_id=COALESCE(?, execution_id)
+               WHERE id=?""",
+            (now, stored_error, output_file, execution_id, incident_id),
         )
-        return incident_id, True
+        return incident_id, False
+    conn.execute(
+        """INSERT INTO cron_incidents
+           (id, job_id, error_sig, state, failure_type,
+            first_seen_at, last_seen_at, error, output_file, execution_id)
+           VALUES (?, ?, ?, 'detected', ?, ?, ?, ?, ?, ?)""",
+        (incident_id, job_id, sig, failure_type, now, now,
+         stored_error, output_file, execution_id),
+    )
+    return incident_id, True
 
 
 def set_incident_state(incident_id: str, state: str) -> bool:

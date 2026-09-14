@@ -215,6 +215,54 @@ Fallback behavior is exercised across several suites:
 - `tests/hermes_cli/test_fallback_cmd.py` — the `/fallback` CLI command
 - `tests/gateway/test_fallback_eviction.py` — gateway eviction of failed providers
 
+### Quota and availability fallback for a selected model
+
+`quota_fallbacks` is opt-in and matches the primary provider and model exactly. It
+currently supports explicit Gemini daily quota exhaustion. It uses the ordinary
+credential pool and fallback clients; an explicit fallback chain takes precedence.
+An additional `outages: true` opt-in permits native Gemini HTTP 503 availability
+failures after the caller exhausts its existing retry budget. Other HTTP/network
+failures, authentication rejection, minute throttles, missing credentials,
+cancellation and tool failures do not authorize outage fallback.
+A rejected key is ignored when every other key has
+exhausted its daily quota. It does not change the default/main model.
+
+```yaml
+quota_fallbacks:
+  - provider: gemini
+    model: gemini-3.8-flash
+    outages: true
+    outage_cooldown_seconds: 60
+    fallback:
+      provider: openai-codex
+      model: gpt-5.6-luna
+      reasoning_effort: low
+```
+
+Each authorized pool entry is tried before falling back. A daily quota cools the
+failed credential until midnight `America/Los_Angeles`, or later explicit reset
+information. Profiles borrowing a root Gemini pool persist cooldowns at the root;
+profile-owned pools remain separate. Cached clients check shared cooldowns before
+HTTP dispatch. Daily limits are project limits, not extra allowances per API key;
+keys with unknown project identity may each receive one rejection before all are
+cooled. The next eligible call selects Gemini again after reset. No active prompt
+prefix is rebuilt when this quota policy switches providers.
+
+An outage never changes credential state or daily reset times. Its cooldown is
+separate: 60 seconds by default, configurable from 1 to 300 seconds. The main
+agent continues the same turn on the configured fallback and can restore Gemini
+after that deadline. Auxiliary calls share a process-local cooldown scoped to
+profile, provider and model; the next call after expiry tries Gemini again.
+New processes receive a fresh retry budget. Synchronous auxiliary calls retain
+`auxiliary.transient_retries` (default two retries); asynchronous calls retain
+their existing single retry. Recovery within that budget never changes provider.
+Omitting `outages` preserves daily-only behavior. Explicit fallback chains take
+precedence, and unrelated model routes and conversation prefixes stay intact.
+
+Gemini 3.8 keeps the native adapter's sampling behavior. Thinking uses `low`,
+`medium` or `high`; a legacy `minimal`/disabled value maps to `low`. Tool-call IDs
+and thought signatures are retained by the native adapter.
+
 ## Related docs
 
 - [Agent Loop Internals](./agent-loop.md)

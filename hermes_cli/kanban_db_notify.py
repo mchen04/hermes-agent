@@ -102,13 +102,14 @@ def add_notify_sub(
             INSERT OR IGNORE INTO kanban_notify_subs
                 (task_id, platform, chat_id, thread_id, user_id, user_id_alt,
                  chat_type, notifier_profile, delivery_mode, delivery_metadata,
-                 created_at, last_event_id)
+                 created_at, last_event_id, start_event_id)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    COALESCE((SELECT MAX(id) FROM task_events WHERE task_id = ?), 0),
                     COALESCE((SELECT MAX(id) FROM task_events WHERE task_id = ?), 0))
             """,
             (
                 *key, user_id, user_id_alt, chat_type or "dm", notifier_profile,
-                insert_mode, metadata_json, int(time.time()), task_id,
+                insert_mode, metadata_json, int(time.time()), task_id, task_id,
             ),
         )
         # chat_type / delivery_mode / delivery_metadata are last-write-wins;
@@ -337,6 +338,20 @@ def unseen_events_for_sub(
     return max_id, out
 
 
+def _blocker_identity(event):
+    payload = dict(event.payload or {})
+    for counter in ('recurrences', 'failures'):
+        payload.pop(counter, None)
+    for field in ('reason', 'error'):
+        text = payload.get(field)
+        if isinstance(text, str):
+            try:
+                payload[field] = json.loads(text)
+            except ValueError:
+                payload[field] = ' '.join(text.split())
+    return event.kind, payload
+
+
 def claim_unseen_events_for_sub(
     conn: sqlite3.Connection,
     *,
@@ -365,6 +380,28 @@ def claim_unseen_events_for_sub(
         )
         if not events:
             return old_cursor, old_cursor, []
+        # Coalesce unchanged blockers before either the passive send or model wake.
+        start_cursor = conn.execute(
+            "SELECT start_event_id FROM kanban_notify_subs " + _SUB_KEY_WHERE,
+            _sub_key(task_id, platform, chat_id, thread_id),
+        ).fetchone()[0]
+        previous = conn.execute(
+            "SELECT * FROM task_events WHERE task_id=? AND id<=? AND id>? "
+            "AND kind IN ('blocked','gave_up','completed','review_requested','changes_requested','archived') "
+            "ORDER BY id DESC LIMIT 1", (task_id, old_cursor, start_cursor),
+        ).fetchone()
+        prior = _kb.Event.from_row(previous) if previous else None
+        filtered = []
+        for event in events:
+            if event.kind in {'blocked', 'gave_up'}:
+                if prior is None or _blocker_identity(event) != _blocker_identity(prior):
+                    filtered.append(event)
+                prior = event
+            else:
+                filtered.append(event)
+                if event.kind in {'completed', 'review_requested', 'changes_requested', 'archived'}:
+                    prior = event
+        events = filtered
         _cas_cursor(conn, _sub_key(task_id, platform, chat_id, thread_id), new_cursor, old_cursor)
         return old_cursor, new_cursor, events
 

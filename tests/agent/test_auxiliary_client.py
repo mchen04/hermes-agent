@@ -3451,28 +3451,38 @@ class TestCodexAuxiliaryAdapterTimeout:
 
     def test_enforces_total_timeout_while_stream_keeps_emitting_events(self):
         class _SlowAliveCreateStream:
+            event_count = 5
+
+            def __init__(self):
+                self.events_emitted = 0
+                self.closed = False
+
             def __iter__(self):
-                for _ in range(5):
+                for _ in range(self.event_count):
                     time.sleep(0.03)
+                    self.events_emitted += 1
                     yield SimpleNamespace(type="response.in_progress")
 
-            def close(self): pass
+            def close(self):
+                self.closed = True
+
+        stream = _SlowAliveCreateStream()
 
         class FakeResponses:
             def create(self, **kwargs):
-                return _SlowAliveCreateStream()
+                return stream
 
         fake_client = SimpleNamespace(responses=FakeResponses(), close=lambda: None)
         adapter = _CodexCompletionsAdapter(fake_client, "gpt-5.5")
 
-        started = time.monotonic()
         with pytest.raises(TimeoutError):
             adapter.create(
                 messages=[{"role": "user", "content": "summarize this"}],
                 timeout=0.05,
             )
 
-        assert time.monotonic() - started < 0.14
+        assert stream.events_emitted < stream.event_count
+        assert stream.closed
 
 
 class TestCodexAuxiliaryAdapterCacheScope:

@@ -262,7 +262,7 @@ def test_complete_goal_mode_rejected_by_judge(monkeypatch, tmp_path):
 
 def test_block_happy_path(worker_env):
     from tools import kanban_tools as kt
-    out = kt._handle_block({"reason": "need clarification"})
+    out = kt._handle_block({"reason": "need clarification", "kind": "needs_input"})
     d = json.loads(out)
     assert d["ok"] is True
     from hermes_cli import kanban_db as kb
@@ -315,7 +315,9 @@ def test_block_goal_mode_rejects_missing_kind(monkeypatch, tmp_path):
     out = kt._handle_block({"reason": "giving up"})
     d = json.loads(out)
     assert "error" in d
-    assert "goal_mode" in d["error"]
+    # kind is now required for every worker (LOCAL-PATCH kanban-stranded-resume); the
+    # goal-mode gate still stands behind it for capability blocks (see the next test).
+    assert "kind is required" in d["error"]
 
     conn = kbc.connect()
     try:
@@ -325,14 +327,16 @@ def test_block_goal_mode_rejects_missing_kind(monkeypatch, tmp_path):
 
 
 def test_block_goal_mode_rejects_disallowed_kind(monkeypatch, tmp_path):
-    """`capability` / `transient` are valid kinds in general but must not
-    let a goal_mode worker exit the loop without going through the judge."""
+    """`capability` is a valid kind in general but must not let a goal_mode
+    worker exit the loop without going through the judge. (`transient` is
+    allowed since LOCAL-PATCH kanban-stranded-resume: it returns to the same
+    loop automatically, so it is not an escape.)"""
     from tools import kanban_tools as kt
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
 
     tid = _make_goal_mode_worker_env(monkeypatch, tmp_path)
-    for kind in ("capability", "transient"):
+    for kind in ("capability",):
         out = kt._handle_block({"reason": "blocked", "kind": kind})
         d = json.loads(out)
         assert "error" in d, f"kind={kind} should be rejected for goal_mode"

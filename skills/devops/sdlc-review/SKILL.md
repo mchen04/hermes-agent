@@ -146,6 +146,7 @@ Use escalation only when the reviewer and implementer cannot resolve the problem
 
 ```text
 kanban_block(
+    kind="needs_input",   # or "capability" for a hard wall; "transient" + resume_after for an outside process
     reason="escalation: <decision or prerequisite required>"
 )
 ```

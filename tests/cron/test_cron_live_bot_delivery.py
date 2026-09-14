@@ -60,7 +60,8 @@ def test_result_records_pending_until_terminal_receipt(tmp_path, monkeypatch):
     assert error is None
     queued = updates[-1]["last_delivery_queued"]
     assert queued and next(iter(queued.values()))["status"] == "queued"
-    assert delivery._sched._classify_delivery_outcome(
+    from cron.scheduler_outcomes import _classify_delivery_outcome
+    assert _classify_delivery_outcome(
         delivery_error=error, delivery_queued=queued, should_deliver=True, unresolved_origin=False,
         normalized_deliver="bot-chat", incident_acked=False, success=True) == "queued"
     record = mailbox.claim_pending_delivery(tmp_path, owner)
