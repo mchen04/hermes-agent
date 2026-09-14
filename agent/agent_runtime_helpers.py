@@ -777,7 +777,7 @@ def _recover_rate_limit(pool, *, has_retried_429, error_context, api_key_hint, c
     if error_context:
         context_reason = str(error_context.get("reason") or "").lower()
         context_message = str(error_context.get("message") or "").lower()
-        usage_limit_reached = any(t in context_reason for t in _USAGE_LIMIT_REASON_TOKENS) or any(
+        usage_limit_reached = (pool.provider == "gemini" and context_reason == "gemini_daily_quota") or any(t in context_reason for t in _USAGE_LIMIT_REASON_TOKENS) or any(
             t in context_message for t in _USAGE_LIMIT_MESSAGE_TOKENS
         )
     if not has_retried_429 and not usage_limit_reached:
@@ -1038,9 +1038,11 @@ def _primary_reset_gate_blocks(agent, rt, primary_provider, primary_runtime_base
     future reset; fails open on any error/None. Returns ``(blocked, prefetched_pool, prefetched)``
     so the rebind step reuses the loaded pool (one auth.json read at most)."""
     prefetched_pool, prefetched = None, False
+    if "credential_pool_provider" in rt and rt["credential_pool_provider"] is None:
+        return False, None, False
     try:
         pool = getattr(agent, "_credential_pool", None)
-        if not matches_primary(pool):
+        if (pool is None and rt.get("credential_pool_provider")) or not matches_primary(pool):
             prefetched_pool = pool = load_primary_pool()
             prefetched = True
         next_at = getattr(pool, "next_available_at", lambda: None)()
@@ -1073,9 +1075,15 @@ def _rebind_primary_credential_pool(agent, primary_provider, matches_primary, lo
     fallback attaches its own pool, which would trip the provider-mismatch guard on the next
     401/429: reload the primary pool, else clear it. The snapshot api_key may be stale after
     rotation; re-select the pool's best entry, keeping the snapshot key when none is usable."""
+    snapshot = agent._primary_runtime
+    if "credential_pool_provider" in snapshot and snapshot["credential_pool_provider"] is None:
+        # An explicit primary key must never acquire another account's pool.
+        agent._credential_pool = None
+        agent._credential_pool_entry_id = None
+        return
     pool = getattr(agent, "_credential_pool", None)
     pool_provider = str(getattr(pool, "provider", "") or "").strip().lower()
-    if pool is not None and pool_provider and not matches_primary(pool):
+    if (pool is None and snapshot.get("credential_pool_provider")) or (pool_provider and not matches_primary(pool)):
         agent._credential_pool = None
         agent._credential_pool_entry_id = None
         try:
@@ -1188,7 +1196,8 @@ def restore_primary_runtime(agent) -> bool:
         _reset_stale_streak(agent)
         # Undo the fallback's identity rewrite so the prompt is byte-identical to the stored copy
         # again (prefix cache match).
-        rewrite_prompt_model_identity(agent, rt["model"], rt["provider"])
+        if not getattr(agent, "_quota_fallback_prompt_preserved", False):
+            rewrite_prompt_model_identity(agent, rt["model"], rt["provider"])
         logger.info("Primary runtime restored for new turn: %s (%s)", agent.model, agent.provider)
         agent._provider_fallback_active = False
         agent._provider_fallback_route = None
@@ -1673,7 +1682,7 @@ def _gemini_native_client(agent, client_kwargs: dict, httpx_verify, *, reason: s
         keepalive_http = agent._build_keepalive_http_client(base_url, verify=httpx_verify)
         if keepalive_http is not None:
             safe_kwargs["http_client"] = keepalive_http
-    client = GeminiNativeClient(**safe_kwargs)
+    client = GeminiNativeClient(**safe_kwargs, credential_pool=getattr(agent, "_credential_pool", None))
     _ra().logger.info(
         "Gemini native client created (%s, shared=%s) %s", reason, shared, agent._client_log_context()
     )
@@ -2074,6 +2083,7 @@ def _build_primary_runtime_snapshot(agent, api_mode) -> Dict[str, Any]:
         "base_url": agent.base_url,
         "api_mode": agent.api_mode,
         "api_key": getattr(agent, "api_key", ""),
+        "credential_pool_provider": getattr(getattr(agent, "_credential_pool", None), "provider", None),
         "client_kwargs": dict(agent._client_kwargs),
         "use_prompt_caching": agent._use_prompt_caching,
         "use_native_cache_layout": agent._use_native_cache_layout,
@@ -3165,6 +3175,8 @@ def extract_api_error_context(error: Exception) -> Dict[str, Any]:
         delay = _reset_delay_from_message(context.get("message") or "")
         if delay is not None:
             context["reset_at"] = time.time() + delay
+    from agent.gemini_quota import error_context as gemini_error_context
+    context.update(gemini_error_context(error))
     return context
 
 

@@ -406,12 +406,23 @@ def build_gemini_request(
     )
     request: Dict[str, Any] = {"contents": contents, **{k: v for k, v in optional if v}}
     # Key order is part of the wire format (prompt-cache parity): temperature, maxOutputTokens, topP, stop, thinking.
+    thinking = _normalize_thinking_config(thinking_config)
     generation = (
         ("temperature", temperature), ("maxOutputTokens", _effective_gemini_max_output_tokens(max_tokens, thinking_config)),
         ("topP", top_p), ("stopSequences", (stop if isinstance(stop, list) else [str(stop)]) if stop else None),
-        ("thinkingConfig", _normalize_thinking_config(thinking_config)),
+        ("thinkingConfig", thinking),
     )
     request["generationConfig"] = {k: v for k, v in generation if v is not None}
+    if bare_gemini_model_id(model).lower() == "gemini-3.8-flash":
+        if thinking:
+            budget = thinking.pop("thinkingBudget", None)
+            if budget is not None and "thinkingLevel" not in thinking:
+                thinking["thinkingLevel"] = "low" if budget <= 0 else "medium"
+            level = thinking.get("thinkingLevel")
+            if level in {"minimal", "none"}:
+                thinking["thinkingLevel"] = "low"
+            elif level is not None and level not in {"low", "medium", "high"}:
+                raise ValueError("Gemini 3.8 thinking level must be low, medium or high")
     return request
 
 
@@ -591,6 +602,9 @@ def gemini_http_error(response: httpx.Response, *, body_text: Optional[str] = No
     err_obj = _error_object(body_text)
     err_status, err_message = (str(err_obj.get(k) or "").strip() for k in ("status", "message"))
     reason, metadata = _error_info(err_obj)
+    violations = [v for d in err_obj.get("details", []) if isinstance(d, dict)
+                  and str(d.get("@type", "")).endswith("google.rpc.QuotaFailure")
+                  for v in d.get("violations", []) if isinstance(v, dict)]
     try:
         retry_after: Optional[float] = float(response.headers.get("Retry-After") or response.headers.get("retry-after"))
     except (TypeError, ValueError):
@@ -607,7 +621,7 @@ def gemini_http_error(response: httpx.Response, *, body_text: Optional[str] = No
         message += _STANDARD_KEY_GUIDANCE
     return GeminiAPIError(
         message, code=_HTTP_ERROR_CODES.get(status, f"gemini_http_{status}"), status_code=status, response=response,
-        retry_after=retry_after, details={"status": err_status, "reason": reason, "metadata": metadata, "message": err_message},
+        retry_after=retry_after, details={"status": err_status, "reason": reason, "metadata": metadata, "message": err_message, "quota_violations": violations},
     )
 
 
@@ -620,11 +634,12 @@ class GeminiNativeClient:
 
     def __init__(
         self, *, api_key: str, base_url: Optional[str] = None, default_headers: Optional[Dict[str, str]] = None,
-        timeout: Any = None, http_client: Optional[httpx.Client] = None, **_: Any,
+        timeout: Any = None, http_client: Optional[httpx.Client] = None, credential_pool=None, **_: Any,
     ) -> None:
         if not (api_key or "").strip():
             raise RuntimeError(_MISSING_KEY_ERROR)
         self.api_key, self.is_closed = api_key, False
+        self._credential_pool = credential_pool
         self.base_url = (base_url or DEFAULT_GEMINI_BASE_URL).rstrip("/").removesuffix("/openai")
         self._default_headers = dict(default_headers or {})
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create_chat_completion))
@@ -656,6 +671,8 @@ class GeminiNativeClient:
         tools: Any = None, tool_choice: Any = None, temperature: Optional[float] = None, max_tokens: Optional[int] = None,
         top_p: Optional[float] = None, stop: Any = None, extra_body: Optional[Dict[str, Any]] = None, timeout: Any = None, **_: Any,
     ) -> Any:
+        from agent.quota_fallback import guard_native_credential
+        guard_native_credential(self._credential_pool, self.api_key)
         extra = extra_body if isinstance(extra_body, dict) else {}
         request = build_gemini_request(
             messages=messages or [], tools=tools, tool_choice=tool_choice, temperature=temperature, max_tokens=max_tokens,
@@ -667,7 +684,7 @@ class GeminiNativeClient:
             return self._stream_completion(model, url + "streamGenerateContent?alt=sse", request, timeout)
         response = self._http.post(url + "generateContent", json=request, headers=self._headers(), timeout=timeout)
         if response.status_code != 200:
-            raise gemini_http_error(response)
+            self._raise_api_error(response)
         try:
             payload = response.json()
         except ValueError as exc:
@@ -676,12 +693,20 @@ class GeminiNativeClient:
             ) from exc
         return translate_gemini_response(payload, model=model)
 
+    def _raise_api_error(self, response, *, body_text=None):
+        error = gemini_http_error(response, body_text=body_text)
+        if self._credential_pool is not None and response.status_code in {401, 403, 429}:
+            from agent.agent_runtime_helpers import extract_api_error_context
+            self._credential_pool.mark_exhausted_and_rotate(status_code=response.status_code,
+                api_key_hint=self.api_key, error_context=extract_api_error_context(error))
+        raise error
+
     def _stream_completion(self, model: str, url: str, request: Dict[str, Any], timeout: Any) -> Iterator[_GeminiStreamChunk]:
         try:
             headers = {**self._headers(), "Accept": "text/event-stream"}
             with self._http.stream("POST", url, json=request, headers=headers, timeout=timeout) as response:
                 if response.status_code != 200:
-                    raise gemini_http_error(response, body_text=read_streaming_error_body(response))
+                    self._raise_api_error(response, body_text=read_streaming_error_body(response))
                 tool_call_indices: Dict[str, Dict[str, Any]] = {}
                 for event in _iter_sse_events(response):
                     yield from translate_stream_event(event, model, tool_call_indices)

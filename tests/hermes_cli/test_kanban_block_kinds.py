@@ -17,6 +17,8 @@ forever. The fix gives ``block_task`` a typed ``kind`` and a persistent
 
 from __future__ import annotations
 
+from hermes_cli.kanban_db_unblock import unblock_task
+
 from pathlib import Path
 
 import pytest
@@ -68,7 +70,7 @@ def test_block_loop_detected_event_emitted(kanban_home: Path) -> None:
     with kbc.connect_closing() as conn:
         tid = _running_task(conn)
         kb.block_task(conn, tid, reason="x", kind="capability")
-        kb.unblock_task(conn, tid)
+        unblock_task(conn, tid)
         _make_running_again(conn, tid)
         kb.block_task(conn, tid, reason="x", kind="capability")
         events = [e for e in kb.list_events(conn, tid)

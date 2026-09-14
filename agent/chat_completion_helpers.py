@@ -1831,10 +1831,17 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
     construction goes through resolve_provider_client (no duplicated provider→key mappings)."""
     from agent.fallback_cooldown import _arm_rate_limit_cooldown
     cooldown_seconds = _arm_rate_limit_cooldown(agent, reason)
+    outage_seconds = getattr(agent, '_outage_fallback_ready', None)
+    agent._outage_fallback_ready = None
     while True:
         if agent._fallback_index >= len(agent._fallback_chain):
             return _fallback_chain_exhausted(agent, reason)
         fb = agent._fallback_chain[agent._fallback_index]
+        if fb.get("_daily_quota_only"):
+            from agent.gemini_quota import pool_daily_exhausted
+            if not pool_daily_exhausted(getattr(agent, "_credential_pool", None)) and outage_seconds is None:
+                # Ineligible errors must not consume the implicit fallback attempt.
+                return False
         agent._fallback_index += 1
         fb_key = _fallback_entry_key(fb)
         if getattr(agent, "_unavailable_fallback_keys", None) is None:
@@ -1891,6 +1898,9 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             if hasattr(agent, "_transport_cache"):
                 agent._transport_cache.clear()
             agent._fallback_activated = True
+            if fb.get("_daily_quota_only") and outage_seconds is not None:
+                cooldown_seconds = outage_seconds
+                agent._rate_limited_until = time.monotonic() + outage_seconds
 
             _rebind_fallback_credential_pool(agent, fb_provider, fb_model)
             from agent.client_lifecycle import _swap_fallback_clients
@@ -1904,8 +1914,14 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             agent._ensure_lmstudio_runtime_loaded()  # LM Studio: preload before probing context length
             _update_fallback_context_compressor(agent)
             _reresolve_fallback_reasoning_config(agent)
+            if fb.get("_daily_quota_only") and "reasoning_effort" in fb:
+                from hermes_constants import parse_reasoning_effort
+                agent.reasoning_config = parse_reasoning_effort(fb["reasoning_effort"])
             _rescope_fallback_extra_body(agent, old_model, old_provider, old_base_url)
-            rewrite_prompt_model_identity(agent, fb_model, fb_provider)
+            if not fb.get("_daily_quota_only"):
+                rewrite_prompt_model_identity(agent, fb_model, fb_provider)
+            else:
+                agent._quota_fallback_prompt_preserved = True
 
             notice = (
                 f"⚠️ Model fallback: {old_model} via {old_provider} unavailable "

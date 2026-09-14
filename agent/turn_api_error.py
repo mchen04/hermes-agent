@@ -336,6 +336,8 @@ def settle_unrecovered_error(
             agent._fallback_index = 0
             agent._fallback_activated = False
             return _verdict("continue")
+        from agent.gemini_outage import prepare_outage_fallback
+        prepare_outage_fallback(agent, api_error)
         if agent._has_pending_fallback():
             agent._buffer_status(f"⚠️ Max retries ({max_retries}) exhausted — trying fallback...")
         if agent._try_activate_fallback():

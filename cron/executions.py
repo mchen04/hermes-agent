@@ -238,7 +238,7 @@ def mark_execution_running(execution_id: str) -> Optional[Dict[str, Any]]:
 
 def finish_execution(
     execution_id: str, *, success: bool, error: Optional[str] = None,
-    delivery_outcome: Optional[str] = None,
+    delivery_outcome: Optional[str] = None, output_file: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Write a terminal result once; terminal attempts cannot be rewritten."""
     now = _hermes_now().isoformat()
@@ -257,6 +257,14 @@ def finish_execution(
             return None
         _prune_unlocked(conn)
         record = _fetch(conn, execution_id)
+        if record and delivery_outcome in {"failed", "unverified", "not_configured"}:
+            from cron.incidents import upsert_incident_in_transaction
+            upsert_incident_in_transaction(
+                conn, record["job_id"],
+                f"Execution {execution_id}: delivery {delivery_outcome}; inspect this execution and its retained output before retrying. "
+                "Reuse the original output and approval identity; generation success is not delivery.",
+                failure_type="delivery", output_file=output_file, execution_id=execution_id,
+            )
     _emit_execution_state(record, delivery_outcome=delivery_outcome)
     return record
 

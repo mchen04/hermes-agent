@@ -816,6 +816,7 @@ _LATER_TASK_COLUMNS = (
 )
 
 _NOTIFY_SUB_COLUMNS = (
+    ("start_event_id", "start_event_id INTEGER NOT NULL DEFAULT 0"),
     ("last_ping_event_id", "last_ping_event_id INTEGER NOT NULL DEFAULT 0"),
     ("notifier_profile", "notifier_profile TEXT"),
     ("delivery_mode", "delivery_mode TEXT NOT NULL DEFAULT 'notify'"),
@@ -889,6 +890,9 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             if name in notify_cols:
                 continue
             _add_column_if_missing(conn, "kanban_notify_subs", name, ddl)
+            if name == "start_event_id":
+                # Old cursors do not prove delivery of pre-subscription history.
+                conn.execute("UPDATE kanban_notify_subs SET start_event_id = last_event_id")
             if name == "delivery_mode":
                 # Backfill ONLY on first-add: pre-column gateway subscriptions
                 # had de facto active wake; defaulting them to 'notify' would
@@ -1017,6 +1021,7 @@ _REBUILD_SPECS = {
         " notifier_profile TEXT, delivery_mode TEXT NOT NULL DEFAULT 'notify',"
         " delivery_metadata TEXT, created_at INTEGER NOT NULL,"
         " last_event_id INTEGER NOT NULL DEFAULT 0,"
+        " start_event_id INTEGER NOT NULL DEFAULT 0,"
         " last_ping_event_id INTEGER NOT NULL DEFAULT 0,"
         " PRIMARY KEY (task_id, platform, chat_id, thread_id))",
         ("CREATE INDEX idx_notify_task ON kanban_notify_subs(task_id)",),

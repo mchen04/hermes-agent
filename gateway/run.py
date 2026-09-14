@@ -2334,15 +2334,16 @@ def _resolve_gateway_model_context(model: Optional[str] = None) -> _GatewayModel
         context_length=context_length, context_source=context_source)
 
 
-def _resolve_runtime_agent_kwargs_for_provider(provider: str) -> dict:
+def _resolve_runtime_agent_kwargs_for_provider(provider: str, *, model: Optional[str] = None) -> dict:
     """Resolve runtime credentials for a specific provider (e.g. from channel override)."""
     from hermes_cli.runtime_provider import resolve_runtime_provider, format_runtime_provider_error
     try:
-        runtime = resolve_runtime_provider(requested=provider)
+        runtime = resolve_runtime_provider(requested=provider, **({"target_model": model} if model else {}))
     except Exception as exc:
         raise RuntimeError(format_runtime_provider_error(exc)) from exc
     return {
         **_runtime_agent_kwargs(runtime),
+        **({"model": runtime["model"]} if runtime.get("quota_fallback_from") else {}),
         "request_overrides": dict(runtime.get("request_overrides") or {}),
         "capabilities": dict(runtime.get("capabilities") or {})}
 

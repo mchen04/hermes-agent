@@ -11,6 +11,8 @@ These tests cover the two review models that must coexist:
 
 from __future__ import annotations
 
+from hermes_cli.kanban_db_unblock import unblock_task
+
 import time
 from pathlib import Path
 
@@ -400,7 +402,7 @@ def test_review_retry_still_trips_the_failure_breaker(conn) -> None:
     gave_up = _event(kb.list_events(conn, task_id), "gave_up")
     assert gave_up.payload is not None
     assert gave_up.payload["retry_status"] == "review"
-    assert kb.unblock_task(conn, task_id)
+    assert unblock_task(conn, task_id)
     unblocked = kb.get_task(conn, task_id)
     assert unblocked is not None
     assert unblocked.status == "review"
@@ -418,7 +420,7 @@ def test_review_escalation_unblocks_back_to_review(conn) -> None:
     blocked_event = _event(kb.list_events(conn, task_id), "blocked")
     assert blocked_event.payload is not None
     assert blocked_event.payload["source_status"] == "review"
-    assert kb.unblock_task(conn, task_id)
+    assert unblock_task(conn, task_id)
     resumed = kb.get_task(conn, task_id)
     assert resumed is not None
     assert resumed.status == "review"

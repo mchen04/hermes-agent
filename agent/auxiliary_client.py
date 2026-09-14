@@ -3374,7 +3374,8 @@ def _recover_provider_pool(provider: str, exc: Exception, *, failed_api_key: str
     status_code = getattr(exc, "status_code", None)
 
     def _rotate(fallback_status: int) -> bool:
-        error_context: Dict[str, Any] = {"message": str(exc)}
+        from agent.agent_runtime_helpers import extract_api_error_context
+        error_context = extract_api_error_context(exc)
         if status_code is not None:
             error_context["status_code"] = status_code
         next_entry = pool.mark_exhausted_and_rotate(
@@ -3701,7 +3702,10 @@ def _plan_fallback_candidate(
         effective_timeout = fb_timeout
     destination = _fallback_destination(task, fb_client, fb_model, fb_label)
     task_config = _get_auxiliary_task_config(task) if task == "compression" else {}
-    fallback_entry = _fallback_chain_entry(task, fb_label) or {}
+    fallback_entry = _fallback_chain_entry(task, fb_label) or getattr(fb_client, "_hermes_quota_fallback", {})
+    if fallback_entry.get("_daily_quota_only"):
+        from hermes_constants import parse_reasoning_effort
+        request["reasoning_config"] = parse_reasoning_effort(fallback_entry.get("reasoning_effort", "low"))
     common = dict(
         task=task, effective_timeout=effective_timeout, fallback_entry=fallback_entry,
         task_config=task_config, apply_fast_lane=apply_fast_lane, **request,
@@ -4791,6 +4795,11 @@ def _resolve_api_key_branch(req: _ResolveRequest, pconfig: Any, resolve_creds: C
         client, default_model = _try_anthropic(explicit_api_key=req.explicit_api_key)
         return _route_or_warn(req, client, default_model,
                               "resolve_provider_client: anthropic requested but no Anthropic credentials found")
+    if provider == "gemini":
+        from agent.quota_fallback import resolve_gemini_client
+        resolved = resolve_gemini_client(req)
+        if resolved is not None:
+            return resolved
     creds = resolve_creds(provider)
     api_key = str(creds.get("api_key", "")).strip()
     # Explicit api_key override (fallback_model / custom_providers entry) lets callers
@@ -4945,8 +4954,8 @@ _EXPLICIT_PROVIDER_BRANCHES: Dict[str, Callable[[_ResolveRequest], _ResolveResul
 
 
 def resolve_provider_client(
-    provider: str, model: str = None, async_mode: bool = False, raw_codex: bool = False,
-    explicit_base_url: str = None, explicit_api_key: str = None, api_mode: str = None,
+    provider: str, model: Optional[str] = None, async_mode: bool = False, raw_codex: bool = False,
+    explicit_base_url: Optional[str] = None, explicit_api_key: Optional[str] = None, api_mode: Optional[str] = None,
     main_runtime: Optional[Dict[str, Any]] = None, is_vision: bool = False,
     task: Optional[str] = None,
 ) -> Tuple[Optional[Any], Optional[str]]:
@@ -5503,7 +5512,7 @@ def _compat_model(client: Any, model: Optional[str], cached_default: Optional[st
 
 
 def _get_cached_client(
-    provider: str, model: str = None, async_mode: bool = False, base_url: str = None,
+    provider: str, model: Optional[str] = None, async_mode: bool = False, base_url: str = None,
     api_key: str = None, api_mode: str = None, main_runtime: Optional[Dict[str, Any]] = None,
     is_vision: bool = False, task: Optional[str] = None,
 ) -> Tuple[Optional[Any], Optional[str]]:
@@ -5516,6 +5525,17 @@ def _get_cached_client(
     previously occurred in long-running gateways where recycled worker threads created unbounded entries
     (#10200).
     """
+    from agent.quota_fallback import auxiliary_route
+    quota_route = auxiliary_route(provider, model, api_key=api_key, base_url=base_url, task=task)
+    if quota_route:
+        from hermes_cli.fallback_config import resolve_entry_api_key
+        client, routed_model = _get_cached_client(quota_route["provider"], quota_route["model"], async_mode=async_mode,
+            base_url=quota_route.get("base_url"), api_key=resolve_entry_api_key(quota_route),
+            api_mode=quota_route.get("api_mode"), main_runtime=main_runtime, is_vision=is_vision, task=task)
+        if client is not None:
+            client._hermes_aux_effective_provider = quota_route["provider"]
+            client._hermes_quota_fallback = quota_route
+        return client, routed_model
     current_loop = _current_event_loop() if async_mode else None
     runtime = _normalize_main_runtime(main_runtime)
     cache_key = _client_cache_key(
@@ -5538,7 +5558,7 @@ def _get_cached_client(
     # resolve_api_key_provider_credentials prefers env vars, which would bypass pool rotation
     # and retry an exhausted key.
     effective_api_key = api_key
-    if not effective_api_key:
+    if not effective_api_key and provider != "gemini":
         _pe = _peek_pool_entry(_normalize_aux_provider(provider))
         if _pe is not None:
             effective_api_key = _pool_runtime_api_key(_pe) or api_key
@@ -6123,6 +6143,11 @@ def _build_call_kwargs(
     # Provider profiles are the source of truth for reasoning wire shapes (top-level, nested body,
     # or extra_body.reasoning); providers without a reasoning-aware profile keep the generic
     # ``extra_body.reasoning`` fallback.
+    if (provider_norm == "gemini" and reasoning_config is None and isinstance(extra_body, dict)
+            and not any(key in extra_body for key in ("thinking_config", "thinkingConfig", "google"))):
+        # Task config and per-call extra_body use generic reasoning; native Gemini
+        # needs the same profile translation as an explicit reasoning_config.
+        reasoning_config = extra_body.get("reasoning")
     projection = _project_provider_profile(provider, provider_norm, model, effective_base, reasoning_config)
     kwargs.update(projection.top_level)
     if merged_extra := _merge_aux_extra_body(extra_body, projection, reasoning_config, provider_norm):
@@ -6755,6 +6780,10 @@ def _prepare_aux_request(
         resolved_base_url=resolved_base_url, resolved_api_key=resolved_api_key,
         resolved_api_mode=resolved_api_mode, main_runtime=main_runtime, async_mode=async_mode,
     )
+    quota_entry = getattr(client, "_hermes_quota_fallback", None)
+    if resolved_provider == "gemini" and isinstance(quota_entry, dict):
+        from hermes_constants import parse_reasoning_effort
+        reasoning_config = parse_reasoning_effort(quota_entry.get("reasoning_effort", "low"))
     effective_timeout = _effective_aux_timeout(task, timeout)
     request_provider = effective_provider or resolved_provider
     if not async_mode:
@@ -6972,7 +7001,8 @@ def _ladder_credential_rungs(
         recovery_err = first_err
         # Skip the extra retry for clear payment/quota errors — the endpoint won't accept
         # another request with the same exhausted key.
-        if _is_rate_limit_error(first_err) and not _is_payment_error(first_err):
+        from agent.gemini_quota import error_context as gemini_quota_context
+        if _is_rate_limit_error(first_err) and not _is_payment_error(first_err) and not gemini_quota_context(first_err):
             resp, recovery_err = yield from _rung(
                 _LadderStep("call", (client, kwargs)), _credential_rung_accepts)
             if recovery_err is None:
@@ -7029,6 +7059,25 @@ def _ladder_provider_fallback(first_err: Exception, route: _LadderRoute):
     # (429 + "too many tokens per day") must fall back just like a 402 credit error.
     # Rate limits are included: after retries are exhausted, a 429 means the provider is at capacity. See
     # #52228. See #26803: daily token quota must fall back like a 402 credit error.
+    from agent.quota_fallback import configured_fallback, auxiliary_route
+    quota_policy = configured_fallback(resolved_provider, route.resolved_model or route.final_model, base_url=route.base_info)
+    if quota_policy and not (task and _get_auxiliary_task_config(task).get("fallback_chain")):
+        if route.resolved_api_key or route.resolved_base_url:
+            return None
+        quota_route = auxiliary_route(resolved_provider, route.resolved_model or route.final_model,
+                                      task=task, exhausted_error=first_err)
+        if not quota_route:
+            return None
+        _record_route_info(route.route_info, quota_route["provider"], quota_route["model"])
+        from hermes_cli.fallback_config import resolve_entry_api_key
+        fb_client, fb_model = resolve_provider_client(quota_route["provider"], quota_route["model"],
+            explicit_api_key=resolve_entry_api_key(quota_route), explicit_base_url=quota_route.get("base_url"),
+            api_mode=quota_route.get("api_mode"))
+        if fb_client is None:
+            return None
+        fb_client._hermes_quota_fallback = quota_route
+        return (yield _LadderStep("fallback", (fb_client, fb_model,
+            f"fallback_chain[0]({quota_route['provider']})")))
     is_auto = resolved_provider in {"auto", "", None}
     reason = next((label for predicate, label in _FALLBACK_REASONS if predicate(first_err)), None)
     is_capacity_error = any(
@@ -7549,7 +7598,10 @@ async def _async_call_llm_impl(
             if kind == "retry":
                 return await _retry_same_provider_async(**kw)
             fb_client, fb_model, fb_label = args
+            quota_entry = getattr(fb_client, "_hermes_quota_fallback", None)
             fb_client, _ = _to_async_client(fb_client, fb_model or "", is_vision=(task == "vision"))
+            if quota_entry:
+                fb_client._hermes_quota_fallback = quota_entry
             return await _call_fallback_candidate_async(fb_client, fb_model, fb_label, **kw)
         result = await _drive_ladder_async(
             _start_recovery_ladder(first_err, req, retry_kwargs, task=task, async_mode=True, route_info=route_info),

@@ -1061,7 +1061,8 @@ class TurnRunner:
         # (disk I/O under the lock stalls the idle-sweep watcher and Discord heartbeats). A chain
         # configured after caching must reach the next turn; per-session serialization keeps it safe.
         if found.reused and agent is not None:
-            self._runner._apply_fallback_chain_to_agent(agent, runner._refresh_fallback_model())
+            self._runner._apply_fallback_chain_to_agent(
+                agent, runner._refresh_fallback_model(), config=getattr(runner, "_fallback_config", None))
         if found.evicted is not None:
             self._release_evicted_agent(found.evicted)
         if agent is None:

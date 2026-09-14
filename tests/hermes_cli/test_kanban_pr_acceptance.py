@@ -1,4 +1,6 @@
 """Two lifecycle invariants, using real SQLite and a local GitHub HTTP contract."""
+
+from hermes_cli.kanban_db_unblock import unblock_task
 import json
 import os
 import sys
@@ -119,7 +121,7 @@ def test_acceptance_receipts_and_terminal_write_share_run_ownership(github):
             def reclaim():
                 with connect() as rival:
                     assert kb.block_task(rival, tid, reason="Reassigned during acceptance")
-                    assert kb.unblock_task(rival, tid)
+                    assert unblock_task(rival, tid)
                     github["replacement"] = kb.claim_task(rival, tid).current_run_id
             github.update(conclusion=conclusion, race=reclaim)
             assert not kb.complete_task(conn, tid, expected_run_id=run_id,

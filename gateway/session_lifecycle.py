@@ -79,8 +79,41 @@ class SessionLifecycleMixin:
         return bool(row is not None and row.get("end_reason") is not None)
 
     def _route_reset_reason(self, entry: SessionEntry) -> Optional[str]:
-        """Only explicit suspension replaces a routed conversation; time never does."""
-        return "suspended" if entry.suspended else None
+        """Explicit suspension, or the LOCAL time policy in config.yaml ``session_reset``
+        (LOCAL-PATCH hermes-session-time-reset: upstream dropped time-based resets on 2026-09-09).
+
+        ``mode`` idle|daily|both. idle: no activity for ``idle_minutes``. daily: the session was
+        created before the most recent ``at_hour`` boundary (local time). Internal wakes advance
+        ``updated_at`` but never ``created_at``, so the daily cut always lands."""
+        if entry.suspended:
+            return "suspended"
+        try:
+            from hermes_cli.config import load_config_readonly
+            policy = load_config_readonly().get("session_reset") or {}
+        except Exception:
+            return None
+        mode = str(policy.get("mode") or "none").lower()
+        if mode not in ("idle", "daily", "both"):
+            return None
+        now = _now()
+        if mode in ("idle", "both"):
+            try:
+                idle_minutes = int(policy.get("idle_minutes") or 0)
+            except (TypeError, ValueError):
+                idle_minutes = 0
+            if idle_minutes > 0 and entry.updated_at and now - entry.updated_at > timedelta(minutes=idle_minutes):
+                return "idle_timeout"
+        if mode in ("daily", "both"):
+            try:
+                at_hour = int(policy.get("at_hour") if policy.get("at_hour") is not None else 4) % 24
+            except (TypeError, ValueError):
+                at_hour = 4
+            boundary = now.replace(hour=at_hour, minute=0, second=0, microsecond=0)
+            if boundary > now:
+                boundary -= timedelta(days=1)
+            if entry.created_at and entry.created_at < boundary:
+                return "daily_reset"
+        return None
 
     def _update_entry(self, session_key: str, mutate) -> bool:
         """Apply ``mutate(entry)`` under ``_lock`` and full-save; False when the entry is missing

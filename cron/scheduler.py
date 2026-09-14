@@ -1511,7 +1511,8 @@ def _resolve_job_runtime(job: dict, job_id: str, jc: _CronJobConfig) -> tuple[di
         }
         if job.get("base_url"):
             runtime_kwargs["explicit_base_url"] = job.get("base_url")
-        return resolve_runtime_provider(**runtime_kwargs), model
+        runtime = resolve_runtime_provider(**runtime_kwargs)
+        return runtime, runtime.get("model", model) if runtime.get("quota_fallback_from") else model
     except Exception as resolve_exc:
         # Walk the fallback chain on AuthError AND transient network/DNS failures (e.g. during
         # OAuth refresh); anything else re-raises.
@@ -2506,25 +2507,6 @@ def _record_fire_ownership_lost(job_id: str, fire_owner: Optional[str], executio
             error="Fire claim ownership lost; stale result was discarded.")
 
 
-def _classify_delivery_outcome(
-    *, delivery_error, should_deliver: bool, unresolved_origin: bool,
-    normalized_deliver: str, incident_acked: bool, success: bool,
-    delivery_queued=None,
-) -> str:
-    if delivery_error:
-        return "failed"
-    if should_deliver and delivery_queued:
-        return "queued"
-    if should_deliver and unresolved_origin:
-        return "not_configured"
-    if should_deliver and normalized_deliver != "local":
-        return "delivered"
-    if incident_acked and not success:
-        # Failure ping withheld: operator acked this exact signature (vs. plain "suppressed").
-        return "suppressed_acked"
-    return "suppressed"
-
-
 def _compose_run_delivery(
     job: dict, *, success: bool, error, final_response: str, output_file,
 ) -> tuple[str, bool, bool, bool, Optional[str]]:
@@ -2598,20 +2580,7 @@ class _FireOwnership:
         return True
 
 
-@dataclass
-class _RunDelivery:
-    """Mutable outcome of the save/compose/deliver phase, read back by the bookkeeping tail."""
-    job: dict
-    success: bool
-    error: Optional[str]
-    delivery_attempted: bool = False
-    delivery_error: Optional[str] = None
-    should_deliver: bool = False
-    unresolved_origin: bool = False
-    blocked_config: bool = False
-    incident_acked: bool = False
-    failure_incident_id: Optional[str] = None
-    side_effect_ownership_lost: bool = False
+from cron.scheduler_outcomes import _RunDelivery
 
 
 def _save_compose_deliver(
@@ -2625,6 +2594,7 @@ def _save_compose_deliver(
         if not owns_output:
             raise _FireClaimLostDuringSideEffect
         output_file = save_job_output(job["id"], output)
+        d.output_file = str(output_file)
     if verbose:
         logger.info("Output saved to: %s", output_file)
 
@@ -2684,9 +2654,11 @@ def _save_compose_deliver(
         logger.error("Delivery failed for job %s: %s", job["id"], de)
 
 
-def _finish_interrupted_run(job: dict, execution_id: str, delivery_error: Optional[str]) -> None:
+def _finish_interrupted_run(d: _RunDelivery, execution_id: str) -> None:
     """Shutdown already wrote last_status, so mark_job_run is skipped (a second call would skip a
     fire or auto-delete the job); an unsent notice is recorded via update_job instead."""
+    from cron.scheduler_outcomes import _run_delivery_outcome
+    job, delivery_error = d.job, d.delivery_error
     if delivery_error:
         try:
             # The gateway shutdown already wrote last_status for this run, so mark_job_run is skipped below
@@ -2701,7 +2673,8 @@ def _finish_interrupted_run(job: dict, execution_id: str, delivery_error: Option
                 "Failed recording delivery_error for interrupted job %s: %s", job["id"], _rec_err)
     finish_execution(
         execution_id, success=False,
-        error="Interrupted by gateway shutdown before terminal completion.")
+        error="Interrupted by gateway shutdown before terminal completion.",
+        delivery_outcome=_run_delivery_outcome(d), output_file=d.output_file)
 
 
 def _finish_completed_run(d: _RunDelivery, fire_owner: Optional[str], execution_id: str) -> bool:
@@ -2724,21 +2697,14 @@ def _finish_completed_run(d: _RunDelivery, fire_owner: Optional[str], execution_
             execution_id, success=False,
             error="Fire claim ownership lost before terminal completion.")
         return True
-    delivery_outcome = _classify_delivery_outcome(
-        delivery_error=d.delivery_error,
-        delivery_queued=job.get("last_delivery_queued"),
-        should_deliver=d.should_deliver,
-        unresolved_origin=d.unresolved_origin,
-        # Read the lane the notice was actually routed through (failure_deliver on failure).
-        normalized_deliver=_normalize_deliver_value(_delivery_lane_value(job, for_failure=not d.success)),
-        incident_acked=d.incident_acked,
-        success=d.success,
-    )
-    if delivery_outcome in ("delivered", "not_configured") and not d.success:
-        # Failure ping left the process (or had a configured target): mark the incident alerted.
+    from cron.scheduler_outcomes import _run_delivery_outcome
+    delivery_outcome = _run_delivery_outcome(d)
+    if delivery_outcome == "delivered" and not d.success:
+        # Only a delivered failure ping reached the operator.
         _mark_incident_alerted(d.failure_incident_id)
     finish_execution(
-        execution_id, success=d.success, error=d.error, delivery_outcome=delivery_outcome)
+        execution_id, success=d.success, error=d.error, delivery_outcome=delivery_outcome,
+        output_file=d.output_file)
     return True
 
 
@@ -2770,11 +2736,13 @@ def _deliver_crash_failure(
         and normalized_deliver == "origin"
         and not _resolve_delivery_targets(job, for_failure=True)
     )
+    from cron.scheduler_outcomes import _classify_delivery_outcome
     delivery_outcome = _classify_delivery_outcome(
         delivery_error=delivery_error, should_deliver=True, unresolved_origin=unresolved_origin,
         normalized_deliver=normalized_deliver, incident_acked=False, success=False,
-        delivery_queued=job.get("last_delivery_queued"))
-    if delivery_outcome in ("delivered", "not_configured"):
+        delivery_queued=job.get("last_delivery_queued"),
+        delivery_unverified=job.get("last_delivery_unverified"))
+    if delivery_outcome == "delivered":
         _mark_incident_alerted(failure_incident_id)
     return delivery_error, delivery_outcome
 
@@ -2908,7 +2876,7 @@ def _run_one_job_body(
             d.error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
 
         if _consume_interrupted_flag(job["id"], execution_token):
-            _finish_interrupted_run(job, execution_id, delivery_error)
+            _finish_interrupted_run(d, execution_id)
             return True
 
         return _finish_completed_run(d, fire_owner, execution_id)

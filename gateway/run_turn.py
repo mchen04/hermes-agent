@@ -137,10 +137,10 @@ class GatewayTurnMixin:
                 if ch.model:
                     model = ch.model
                 if ch.provider:
-                    runtime_kwargs = _resolve_runtime_agent_kwargs_for_provider(ch.provider)
+                    runtime_kwargs = _resolve_runtime_agent_kwargs_for_provider(ch.provider, **({"model": model} if ch.provider == "gemini" else {}))
                     ch_runtime_model = runtime_kwargs.pop("model", None)
                     # Adopt the provider's bundled model only when the override named none.
-                    if ch_runtime_model and not ch.model:
+                    if ch_runtime_model and (not ch.model or runtime_kwargs.get("provider") != ch.provider):
                         model = ch_runtime_model
 
         if override and skey:

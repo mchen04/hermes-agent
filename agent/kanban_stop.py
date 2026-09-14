@@ -70,7 +70,11 @@ def build_kanban_stop_nudge(
         "Do this immediately in your next response — do not narrate intent:\n"
         "1. Finish any remaining deliverable (write the required file(s) now).\n"
         "2. Call `kanban_complete(summary=..., artifacts=[...])` if the work "
-        "is done, OR `kanban_block(reason=...)` if you are blocked.\n\n"
+        "is done; `kanban_block(kind='transient', resume_after=<seconds>, reason=...)` "
+        "if you are waiting on a session, machine, or process outside this board "
+        "(the dispatcher re-runs you then); `kanban_block(kind='needs_input', reason=<the exact question>)` "
+        "if a person must decide; `kanban_block(kind='capability', reason=...)` at a hard wall. "
+        "Never use kind='dependency' unless this task has an unfinished parent task.\n\n"
         "Never end a turn with only a promise of future action. Repeated "
         "protocol violations will block this task and require manual intervention.]"
     )

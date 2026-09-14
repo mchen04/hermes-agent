@@ -89,6 +89,10 @@ class DispatchResult:
 
     reclaimed: int = 0
     promoted: int = 0
+    auto_resumed: list[dict] = field(default_factory=list)
+    """Blocked tasks returned to their resumable phase by
+    :func:`kanban_db.resume_stranded_blocks` this tick (answered ``needs_input`` /
+    untyped blocks, timed-out ``transient`` blocks)."""
     reconciled_orphans: list[str] = field(default_factory=list)
     """``running`` cards requeued by :func:`reconcile_orphaned_running` (broken
     claim bookkeeping, dead/gone worker)."""
@@ -1644,6 +1648,9 @@ def _run_reclaim_phase(
     result.auto_blocked.extend(getattr(detect_crashed_workers, "_last_auto_blocked", []))
     result.rate_limited.extend(getattr(detect_crashed_workers, "_last_rate_limited", []))
     result.timed_out = enforce_max_runtime(conn)
+    # LOCAL-PATCH kanban-stranded-resume: answered / timed-out explicit blocks
+    # come back on their own before parent re-evaluation.
+    result.auto_resumed = _kb.resume_stranded_blocks(conn)
     result.promoted = _kb.recompute_ready(conn, failure_limit=failure_limit)
 
 
