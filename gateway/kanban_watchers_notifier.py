@@ -432,9 +432,35 @@ def _fmt_timed_out(ev, n) -> tuple:
 # archived / unblocked are claimed (so the cursor advances past them) but
 # intentionally silent (no formatter), and excluded from _WAKE_KINDS so they
 # never wake the creator.
+# LOCAL-PATCH kanban-quiet-transient: a `transient` block is a supervisor waiting on a
+# machine (its coder is still running); it resumes on its own and is nobody's decision, so
+# it posts nothing and wakes nobody. `needs_input` is a question for a person: it posts and
+# wakes. `capability` is a wall for the operator profile to fix: it posts, but does not wake
+# the origin to compose an environment question the user cannot answer.
+_QUIET_BLOCK_KINDS = frozenset({"transient"})
+_NO_WAKE_BLOCK_KINDS = frozenset({"transient", "capability"})
+
+
+def _block_kind(ev: Any) -> Optional[str]:
+    kind = (ev.payload or {}).get("kind") if getattr(ev, "payload", None) else None
+    return kind if isinstance(kind, str) else None
+
+
+def _fmt_blocked(ev, n) -> tuple:
+    if _block_kind(ev) in _QUIET_BLOCK_KINDS:
+        return None, None, None
+    return f"⏸ {n.head} blocked{_clip(ev, 'reason', ': {}', 160)}", None, None
+
+
+def _wakes_origin(ev: Any) -> bool:
+    if ev.kind not in _WAKE_KINDS:
+        return False
+    return not (ev.kind == "blocked" and _block_kind(ev) in _NO_WAKE_BLOCK_KINDS)
+
+
 _EVENT_FORMATTERS: dict[str, Callable[[Any, "_KanbanNotification"], tuple]] = {
     "completed": _fmt_completed,
-    "blocked": lambda ev, n: (f"⏸ {n.head} blocked{_clip(ev, 'reason', ': {}', 160)}", None, None),
+    "blocked": _fmt_blocked,
     "gave_up": _fmt_gave_up,
     "crashed": lambda ev, n: (
         f"✖ {n.head} — its worker stopped unexpectedly; it will be retried automatically.", None, None,
@@ -544,7 +570,7 @@ class _KanbanNotification:
     def build_wake_text(self) -> None:
         """Set ``wake_kinds`` / ``session_key`` / ``synth`` for the wake paths."""
         task, sub = self.task, self.sub
-        self.wake_kinds = {ev.kind for ev in self.d["events"] if ev.kind in _WAKE_KINDS} if self.wake_agent else set()
+        self.wake_kinds = {ev.kind for ev in self.d["events"] if _wakes_origin(ev)} if self.wake_agent else set()
         self.wake_diagnostic = all(diagnostic_event(ev) for ev in self.d["events"] if ev.kind in self.wake_kinds)
         if not self.wake_kinds:
             return
