@@ -16,6 +16,7 @@ import json
 import os
 import re
 import secrets
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -106,9 +107,35 @@ VALID_INITIAL_STATUSES = {"running", "blocked"}
 # Typed block reasons (routing in ``_route_block``); ``None`` = legacy un-typed.
 VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient"}
 
+# --- Stranded-work recovery (LOCAL-PATCH kanban-stranded-resume, 2026-09-12; re-ported onto upstream 2026-09-19) ---
+# A worker that waits on something outside the board (another session, a machine, a person's answer) had no
+# primitive that comes back on its own. These constants drive ``block_task`` and ``resume_stranded_blocks``
+# (run by the dispatcher each tick).
+DEFAULT_TRANSIENT_RESUME_SECONDS = 600
+# LOCAL-PATCH kanban-auto-loop (2026-09-16, bounded 2026-09-19): timed transient resumes stay on so an
+# implement -> review -> fix loop needs no human wake, but the interval never drops under
+# MIN_TRANSIENT_RESUME_SECONDS whatever the worker asked for, only timer resumes count toward
+# AUTO_RESUME_LIMIT, and a person's answer resets that budget. On 2026-09-18 two cards waiting on a human
+# sign-in respawned 40 times (~31M context tokens) because the floor was 1 s and the cap never tripped.
+MIN_TRANSIENT_RESUME_SECONDS = 600
+MAX_TRANSIENT_RESUME_SECONDS = 6 * 3600
+TRANSIENT_TIMER_RESUMES = True
+AUTO_RESUME_LIMIT = 8
+LIVE_OWNER_GRACE_SECONDS = 180
+_AUTO_RESUME_IGNORED_AUTHORS = frozenset({"auto-decomposer", "dispatcher", "system"})
+_AUTO_RESUME_IGNORED_PREFIXES = ("BLOCKED:", "SCHEDULED:", "CHANGES REQUESTED:", "HOLD:", "[swarm:blackboard] ")
+_HOLD_PREFIX = "HOLD:"
+# Event kinds that mark real progress or a human decision; the timer budget counts only resumes after the newest one.
+_AUTO_RESUME_RESET_KINDS = ("completed", "review_requested", "changes_requested", "gave_up", "promoted_manual", "created")
+
+
+class BlockRejected(ValueError):
+    """``block_task`` refused the transition; the message says why and what to do instead."""
+
+
 # Same-reason block -> unblock -> re-block cycles before routing to ``triage``.
 # Counts unblock recurrences, NOT dispatcher failures (``DEFAULT_FAILURE_LIMIT``).
-BLOCK_RECURRENCE_LIMIT = 2
+BLOCK_RECURRENCE_LIMIT = 1000  # LOCAL-PATCH kanban-no-triage; Michael 2026-09-10: board is agent-to-agent; never route to triage for repeated needs_input
 VALID_WORKSPACE_KINDS = {"scratch", "worktree", "dir"}
 
 
@@ -1728,6 +1755,35 @@ def parent_ids(conn: sqlite3.Connection, task_id: str) -> list[str]:
     return _linked_ids(conn, "parent_id", "child_id", task_id)
 
 
+def open_parent_ids(conn: sqlite3.Connection, task_id: str) -> list[str]:
+    """Parents that are not yet ``done``/``archived`` — the only ones a dependency wait can wait for."""
+    rows = conn.execute(
+        "SELECT t.id FROM tasks t JOIN task_links l ON l.parent_id = t.id "
+        "WHERE l.child_id = ? AND t.status NOT IN ('done', 'archived') ORDER BY t.id", (task_id,),
+    ).fetchall()
+    return [row["id"] for row in rows]
+
+
+def _live_worker_description(row: Any, now: int) -> Optional[str]:
+    """Why a ``running`` task still has a live owner (pid alive on this host, or a fresh heartbeat), else None.
+    LOCAL-PATCH kanban-stranded-resume."""
+    pid = _row_get(row, "worker_pid")
+    heartbeat = _row_get(row, "last_heartbeat_at")
+    lock = str(_row_get(row, "claim_lock") or "")
+    alive = False
+    if pid and lock.split(":", 1)[0] in ("", socket.gethostname()):
+        try:
+            from hermes_cli.kanban_db_dispatch import _pid_alive
+            alive = _pid_alive(int(pid))
+        except Exception:
+            alive = False
+    age = (now - int(heartbeat)) if heartbeat else None
+    fresh = age is not None and age <= LIVE_OWNER_GRACE_SECONDS
+    if not (alive or fresh):
+        return None
+    return f"pid {pid or '?'} {'alive' if alive else 'not alive on this host'}, last heartbeat {age if age is not None else 'never'}s ago"
+
+
 def child_ids(conn: sqlite3.Connection, task_id: str) -> list[str]:
     return _linked_ids(conn, "child_id", "parent_id", task_id)
 
@@ -3119,15 +3175,42 @@ def edit_completed_task_result(
 def block_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
     kind: Optional[str] = None, expected_run_id: Optional[int] = None,
+    force: bool = False, resume_after: Optional[int] = None,
 ) -> bool:
     """``running``/``ready`` -> ``blocked`` (or ``todo`` / ``triage``, see
     :func:`_route_block`). ``kind='dependency'`` with no incomplete parent is
     re-kinded to ``needs_input`` (sticky) so ``recompute_ready`` cannot
     promote it into a context-free respawn. ``transient`` still counts
     toward the loop breaker so a forever-flaky task escalates. True on any
-    transition."""
+    transition.
+
+    LOCAL-PATCH kanban-stranded-resume: raises :class:`BlockRejected` for a
+    block from outside the owning run while that run's worker is still alive
+    (``force=True`` overrides). ``resume_after`` (seconds) is recorded for
+    ``transient`` blocks and drives :func:`resume_stranded_blocks`; a block
+    filed by the owning run is marked ``auto_resumable`` so the dispatcher may
+    bring it back, an operator's park is not."""
     if kind is not None and kind not in VALID_BLOCK_KINDS:
         raise ValueError(f"block kind must be one of {sorted(VALID_BLOCK_KINDS)} or None")
+    now = int(time.time())
+    if expected_run_id is None and not force:
+        pre = conn.execute(
+            "SELECT status, worker_pid, last_heartbeat_at, claim_lock, current_run_id FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        live = (
+            _live_worker_description(pre, now)
+            if pre and pre["status"] == "running" and _row_get(pre, "current_run_id") is not None else None
+        )
+        if live:
+            with write_txn(conn):
+                _append_event(conn, task_id, "block_refused_live_owner",
+                              {"reason": reason, "kind": kind, "worker": live, "run_id": _row_get(pre, "current_run_id")})
+            raise BlockRejected(
+                f"{task_id} is running with a live worker ({live}). Blocking it from outside would strand that "
+                "worker and let the dispatcher start a second one. Comment on the card to steer the worker, or run "
+                "`hermes kanban reclaim <id>` first; a deliberate override is `hermes kanban block --force`."
+            )
     with write_txn(conn):
         cur_row = conn.execute(
             "SELECT status, block_kind, block_recurrences FROM tasks WHERE id = ?", (task_id,),
@@ -3151,6 +3234,12 @@ def block_task(
         if rekind_reason:
             payload["requested_kind"] = requested_kind
             payload["rekind_reason"] = rekind_reason
+        if kind == "transient" and TRANSIENT_TIMER_RESUMES:
+            # LOCAL-PATCH kanban-auto-loop: the worker's wish is recorded; the dispatcher floors it.
+            payload["resume_after"] = max(1, int(resume_after or DEFAULT_TRANSIENT_RESUME_SECONDS))
+        if expected_run_id is not None:
+            # A worker parked its own run: the dispatcher may bring it back (an operator's park is not resumable).
+            payload["auto_resumable"] = True
         sql = f"""
                 UPDATE tasks
                    SET status        = '{new_status}',
@@ -3506,9 +3595,12 @@ def _landing_status_after_parents(conn: sqlite3.Connection, task_id: str) -> str
     return "ready" if _parents_satisfied(conn, task_id) else "todo"
 
 
-def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
+def unblock_task(conn: sqlite3.Connection, task_id: str, *, auto_resume: Optional[dict] = None) -> bool:
     """``blocked``/``scheduled`` -> its resumable phase (parent re-gated; ``review``
-    when that is where it left off), closing any leaked run first."""
+    when that is where it left off), closing any leaked run first. ``auto_resume``
+    (dispatcher only, LOCAL-PATCH kanban-stranded-resume) records an ``auto_resumed``
+    event in the same transaction and marks the ``unblocked`` event as automatic, so a
+    human unblock stays distinguishable."""
     now = int(time.time())
     with write_txn(conn):
         resume_status = (
@@ -3539,15 +3631,124 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         )
         if cur.rowcount != 1:
             return False
-        _append_event(
-            conn, task_id, "unblocked",
-            (
-                {"status": new_status, "resume_status": resume_status}
-                if new_status != "ready" or resume_status != "ready"
-                else None
-            ),
+        unblocked_payload = (
+            {"status": new_status, "resume_status": resume_status}
+            if new_status != "ready" or resume_status != "ready"
+            else None
         )
+        if auto_resume is not None:
+            unblocked_payload = dict(unblocked_payload or {}, auto=True)
+        _append_event(conn, task_id, "unblocked", unblocked_payload)
+        if auto_resume is not None:
+            _append_event(conn, task_id, "auto_resumed", auto_resume)
         return True
+
+
+def _auto_resume_answers(conn: sqlite3.Connection, task_id: str, blocked_at: int) -> tuple[list, bool]:
+    """Comments newer than the block that count as a person's answer, and whether a ``HOLD:`` comment
+    arrived since the block (which pins the card against the timer until a later plain comment)."""
+    rows = conn.execute(
+        "SELECT id, author, body, created_at FROM task_comments WHERE task_id = ? AND created_at > ? ORDER BY id",
+        (task_id, blocked_at),
+    ).fetchall()
+    held = False
+    answers = []
+    for c in rows:
+        body = str(c["body"] or "")
+        if body.startswith(_HOLD_PREFIX):
+            held, answers = True, []
+            continue
+        if (c["author"] or "") in _AUTO_RESUME_IGNORED_AUTHORS or body.startswith(_AUTO_RESUME_IGNORED_PREFIXES):
+            continue
+        answers.append(c)
+    return answers, held
+
+
+def resume_stranded_blocks(
+    conn: sqlite3.Connection, *, now: Optional[int] = None, max_auto_resumes: int = AUTO_RESUME_LIMIT,
+) -> list[dict]:
+    """Dispatcher phase (LOCAL-PATCH kanban-stranded-resume): return explicitly blocked tasks to their resumable
+    phase when the block has been answered or has timed out, so approved work continues in the same task without
+    an operator. Call OUTSIDE any write txn.
+
+    * A person's comment newer than the block (not a bookkeeping author or a ``BLOCKED:`` / ``HOLD:`` / ...
+      prefix) resumes ``needs_input``, ``transient`` and worker-originated untyped blocks; the answer is in the
+      worker context on the next run. A ``HOLD:`` comment pins the card until a later plain comment.
+    * ``transient`` with ``TRANSIENT_TIMER_RESUMES`` on (LOCAL-PATCH kanban-auto-loop) also resumes on a
+      timer: ``resume_after`` floored at ``MIN_TRANSIENT_RESUME_SECONDS`` and capped at
+      ``MAX_TRANSIENT_RESUME_SECONDS``. A block whose reason names a quota / rate limit or carries a
+      ``STOP`` / ``HOLD`` marker never resumes on the timer (``kanban_recovery``).
+    * ``capability`` never resumes; an operator park (no kind, no owning run) never resumes; a breaker trip
+      (``gave_up``) keeps its own recovery; ``done``/``review``/``running`` are untouched.
+    * At most ``max_auto_resumes`` TIMER resumes per task since the newest progress event, human unblock or
+      answered comment; after that one ``auto_resume_exhausted`` event (a wake kind) per block asks a person.
+    """
+    from hermes_cli.kanban_recovery import requires_capacity_or_manual_recovery
+    now = int(now or time.time())
+    resumed: list[dict] = []
+    rows = conn.execute(
+        "SELECT id, block_kind, block_recurrences FROM tasks WHERE status = 'blocked' ORDER BY id",
+    ).fetchall()
+    for row in rows:
+        task_id, kind = row["id"], _row_get(row, "block_kind")
+        if kind == "capability":
+            continue
+        last = conn.execute(
+            "SELECT id, kind, created_at, payload FROM task_events WHERE task_id = ? AND kind IN "
+            "('blocked', 'unblocked', 'gave_up', 'block_loop_detected', 'auto_resumed') ORDER BY id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if not last or last["kind"] != "blocked":
+            continue
+        blocked_id, blocked_at = int(last["id"]), int(last["created_at"])
+        blocked_payload = _json_dict(last["payload"])
+        if kind is None and not blocked_payload.get("auto_resumable"):
+            continue  # an operator parked it (dashboard drag, CLI without --kind): only a person unparks it
+        answers, held = _auto_resume_answers(conn, task_id, blocked_at)
+        trigger, detail = None, {}
+        if answers:
+            first = answers[0]
+            trigger = "answered"
+            detail = {"comment_id": int(first["id"]), "author": first["author"],
+                      "waited_seconds": int(first["created_at"]) - blocked_at}
+        elif kind == "transient" and TRANSIENT_TIMER_RESUMES and not held:
+            if requires_capacity_or_manual_recovery(blocked_payload):
+                continue  # a timer is not evidence that quota is back or that a HOLD was lifted
+            # Budget = timer resumes since the newest progress event, human unblock, or answered comment.
+            reset_row = conn.execute(
+                "SELECT MAX(id) FROM task_events WHERE task_id = ? AND ("
+                f"kind IN ({', '.join('?' for _ in _AUTO_RESUME_RESET_KINDS)}) "
+                "OR (kind = 'unblocked' AND (payload IS NULL OR payload NOT LIKE '%\"auto\": true%')) "
+                "OR (kind = 'auto_resumed' AND payload LIKE '%\"trigger\": \"answered\"%'))",
+                (task_id, *_AUTO_RESUME_RESET_KINDS),
+            ).fetchone()
+            reset_id = int(reset_row[0] or 0)
+            count = int(conn.execute(
+                "SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind = 'auto_resumed' AND id > ? "
+                "AND payload LIKE '%\"trigger\": \"transient_timeout\"%'",
+                (task_id, reset_id),
+            ).fetchone()[0])
+            if count >= max_auto_resumes:
+                already = conn.execute(
+                    "SELECT id FROM task_events WHERE task_id = ? AND kind = 'auto_resume_exhausted' AND id > ?",
+                    (task_id, blocked_id),
+                ).fetchone()
+                if not already:
+                    with write_txn(conn):
+                        _append_event(conn, task_id, "auto_resume_exhausted",
+                                      {"auto_resumes": count, "limit": max_auto_resumes, "kind": kind})
+                continue
+            base = int(blocked_payload.get("resume_after") or DEFAULT_TRANSIENT_RESUME_SECONDS)
+            wait = min(max(base, MIN_TRANSIENT_RESUME_SECONDS), MAX_TRANSIENT_RESUME_SECONDS)
+            if now - blocked_at >= wait:
+                trigger, detail = "transient_timeout", {"waited_seconds": now - blocked_at, "resume_after": wait}
+        if trigger is None:
+            continue
+        record = {"trigger": trigger, "kind": kind, "blocked_event_id": blocked_id, **detail}
+        if not unblock_task(conn, task_id, auto_resume=record):
+            continue
+        resumed.append({"task_id": task_id, **record})
+    return resumed
 
 
 def reopen_review_task(conn: sqlite3.Connection, task_id: str) -> bool:

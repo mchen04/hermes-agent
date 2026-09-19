@@ -168,15 +168,19 @@ KANBAN_BLOCK_SCHEMA = _schema(
     "kanban_block",
     (
         "Stop work on this task and route it according to WHY you're stuck. "
-        "Set ``kind`` to say which: 'dependency' (waiting on another task — "
-        "goes to todo and auto-resumes when that task finishes, no human "
-        "needed), 'needs_input' (you need a human decision/answer), "
-        "'capability' (a hard wall: no access, missing credentials, an action "
-        "no agent can do), or 'transient' (a flaky failure that may clear). "
-        "``reason`` is shown to the human on the board. If a task keeps "
-        "getting unblocked and re-blocked for the same reason, it is "
-        "auto-escalated to triage. Use for genuine blockers only — don't "
-        "block on things you can resolve yourself."
+        "``kind`` is required: 'needs_input' (a person must decide or answer, "
+        "including any sign-in, credential, approval or purchase; when they "
+        "answer as a comment the dispatcher re-runs this task), 'transient' "
+        "(you are waiting on a machine or process outside this board with a "
+        "known finish, e.g. a build or another agent's run; the dispatcher "
+        "re-runs this task after ``resume_after`` seconds, at least 10 minutes, "
+        "a bounded number of times, then asks a person), 'capability' (a hard "
+        "wall: no access, an action no agent can do; stays blocked until an "
+        "operator acts), or 'dependency' (waiting on a parent task on this "
+        "board; recorded as needs_input when no parent is open). Never mark a "
+        "wait on a person as transient. ``reason`` is shown to the human on the "
+        "board. Use for genuine blockers only — don't block on things you can "
+        "resolve yourself."
     ),
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
@@ -189,14 +193,22 @@ KANBAN_BLOCK_SCHEMA = _schema(
             "type": "string",
             "enum": ["dependency", "needs_input", "capability", "transient"],
             "description": (
-                "Why you're blocked. 'dependency' waits in todo and "
-                "resumes automatically when an incomplete parent finishes; "
-                "if no parent is open it is recorded as needs_input instead. "
-                "The others surface to a human. Omit only if none apply."
+                "Why you're blocked. 'needs_input' re-runs when a comment "
+                "answers you; 'transient' re-runs on a bounded timer (machine "
+                "waits only); 'capability' waits for an operator; 'dependency' "
+                "waits for an unfinished parent task."
+            ),
+        },
+        "resume_after": {
+            "type": "integer",
+            "description": (
+                "Only with kind='transient': seconds to wait before the "
+                "dispatcher re-runs this task (floored at 600, max 21600). Pick "
+                "the time you expect the outside work to take."
             ),
         },
     },
-    ["reason"],
+    ["reason", "kind"],
 )
 
 KANBAN_REQUEST_REVIEW_SCHEMA = _schema(

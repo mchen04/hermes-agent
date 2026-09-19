@@ -195,12 +195,14 @@ gateway:
       review_requested:    "handed off for review; the implementation is done"
       changes_requested:   "review requested changes (BLOCK); implementation is not approved"
       block_loop_detected: "routed to triage after repeated blocks; orchestration attention needed"
+      auto_resume_exhausted: "blocked again after repeated automatic resumes; needs a decision"
       status_default:      "status changed"
       status_joiner:       ", "
       message:             "[kanban] Task {task_id} {status}.\nTitle: {title}\nAssignee: @{assignee}\nBoard: {board}\n\nCheck the result or decide the next step."
       handoff:             "Result: {summary}"
       review_detail:       "Review feedback: {reason}\nInspect the existing card and its current review run; return work to the same implementation task. Do not treat this BLOCK as approval and do not create a duplicate task."
-      guidance:            "This is an automatic task-status notification, not a request to decompose the task again. Inspect the current board before creating follow-up tasks; do not recreate tasks or graphs that already exist."
+      block_detail:        "Block reason ({kind}): {reason}"
+      guidance:            "This is an automatic task-status notification, not a request to decompose the task again. Inspect the current board before creating follow-up tasks; do not recreate tasks or graphs that already exist.\nIf the task is blocked, act on the block kind: needs_input means a person must answer the question above — ask them that exact question; when they answer, post the answer as a comment on the card (the dispatcher then re-runs the same task). A comment that starts with HOLD: keeps the card parked. capability means the worker hit a hard wall — leave it blocked and tell the user exactly what access is missing. transient means the dispatcher re-runs the card on a bounded timer; say in plain words what it is waiting on and that a comment on the card resumes it sooner. A block whose reason says the work is still going on elsewhere is a stranded handoff: unblock it only once you can confirm that outside work reached its checkpoint. Reply that nothing is needed only when the task's work is finished; then complete or archive it.\nWrite for a person reading on a phone: three short parts — what happened, where it stands now, what (if anything) you need from them. Plain words, no field names, no JSON, no internal ids unless they must act on one."
 
   personality:
     none_configured:       "No personalities configured in `{path}/config.yaml`"

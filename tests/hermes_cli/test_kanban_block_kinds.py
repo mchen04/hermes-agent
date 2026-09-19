@@ -71,7 +71,9 @@ def _make_running_again(conn, tid):
 
 
 
-def test_block_loop_detected_event_emitted(kanban_home: Path) -> None:
+def test_block_loop_detected_event_emitted(kanban_home: Path, monkeypatch) -> None:
+    # LOCAL-PATCH kanban-no-triage raises the live limit to 1000; the breaker mechanics are tested at 2.
+    monkeypatch.setattr(kb, "BLOCK_RECURRENCE_LIMIT", 2)
     with kbc.connect_closing() as conn:
         tid = _running_task(conn)
         kb.block_task(conn, tid, reason="x", kind="capability")

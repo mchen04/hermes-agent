@@ -357,7 +357,7 @@ def _task_summary_dict(kb, conn, task) -> dict[str, Any]:
 
 # --- Goal-mode judge gate ---
 
-_GOAL_MODE_BLOCK_ALLOWED_KINDS = frozenset({"dependency", "needs_input"})
+_GOAL_MODE_BLOCK_ALLOWED_KINDS = frozenset({"dependency", "needs_input", "transient"})  # transient returns to the loop (LOCAL-PATCH kanban-stranded-resume)
 
 
 def _goal_judge_available() -> bool:
@@ -679,8 +679,9 @@ def _handle_block(args: dict, **kw) -> str:
         _require_text(args, "reason", "reason is required — explain what input you need"))
     kind = args.get("kind")
     with _board(args.get("board")) as (kb, conn):
-        _check(kind is None or kind in kb.VALID_BLOCK_KINDS,
-               f"kind must be one of {sorted(kb.VALID_BLOCK_KINDS)} (or omit it)")
+        _check(kind in kb.VALID_BLOCK_KINDS,  # LOCAL-PATCH kanban-stranded-resume: kind is required
+               f"kind is required and must be one of {sorted(kb.VALID_BLOCK_KINDS)}: transient (outside wait, "
+               "auto re-run), needs_input (a person answers), capability (hard wall), dependency (unfinished parent)")
         # The goal loop treats ANY blocked status as terminal, so kanban_block
         # would be an escape hatch around the completion judge: goal_mode tasks
         # may only block on genuine external blockers.
@@ -697,7 +698,15 @@ def _handle_block(args: dict, **kw) -> str:
                f"{sorted(_GOAL_MODE_BLOCK_ALLOWED_KINDS)} (got {kind!r}). If the task is actually "
                f"finished or cannot proceed for another reason, call kanban_complete instead — "
                f"the completion judge will evaluate it.")
-        ok = kb.block_task(conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id(tid))
+        resume_after = args.get("resume_after")
+        _check(resume_after is None or (isinstance(resume_after, int) and not isinstance(resume_after, bool)
+                                        and 0 < resume_after <= kb.MAX_TRANSIENT_RESUME_SECONDS),
+               f"resume_after must be a whole number of seconds between 1 and {kb.MAX_TRANSIENT_RESUME_SECONDS}")
+        try:
+            ok = kb.block_task(conn, tid, reason=reason, kind=kind, expected_run_id=_worker_run_id(tid),
+                               resume_after=resume_after)
+        except kb.BlockRejected as exc:
+            raise _Reject(f"kanban_block refused: {exc}")
         _check(ok, f"could not block {tid} (unknown id or not in running/ready)")
         landed_kind = kb.get_task(conn, tid).block_kind
         extra: dict = {"block_kind": landed_kind}

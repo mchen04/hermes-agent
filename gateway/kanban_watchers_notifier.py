@@ -33,10 +33,10 @@ def _kbn():
 # "status" covers dashboard drag-drop and `_set_status_direct()`.
 # ``review_requested`` wakes the origin like a block but is not one;
 # the task is not archived so later review cycles keep notifying.
-TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested")
+TERMINAL_KINDS = ("completed", "blocked", "gave_up", "crashed", "timed_out", "status", "archived", "unblocked", "block_loop_detected", "review_requested", "changes_requested", "auto_resumed", "auto_resume_exhausted")
 # Kinds that hand a decision back to the origin, which must take a turn.
 # status/archived/unblocked are bookkeeping.
-_WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "review_requested", "changes_requested", "block_loop_detected")
+_WAKE_KINDS = ("completed", "gave_up", "crashed", "timed_out", "blocked", "review_requested", "changes_requested", "block_loop_detected", "auto_resume_exhausted")
 
 
 def diagnostic_event(ev) -> bool:
@@ -444,6 +444,14 @@ _EVENT_FORMATTERS: dict[str, Callable[[Any, "_KanbanNotification"], tuple]] = {
     "review_requested": _fmt_review_requested,
     "changes_requested": _fmt_changes_requested,
     "block_loop_detected": _fmt_block_loop_detected,
+    # LOCAL-PATCH kanban-stranded-resume: the dispatcher resumed an answered /
+    # timed-out block on its own (passive), or gave up resuming (wakes).
+    # ``auto_resumed`` is claimed (cursor advances) but silent, like unblocked: a
+    # supervisor card cycling every few minutes must not page anyone.
+    "auto_resume_exhausted": lambda ev, n: (
+        f"🛑 {n.head} blocked again after {int(_payload(ev, 'auto_resumes') or 0)} automatic resumes — needs a decision",
+        None, None,
+    ),
 }
 
 
@@ -561,6 +569,13 @@ class _KanbanNotification:
             synth += "\n" + t("gateway.kanban.wake.handoff", summary=self.wake_handoff)
         if self.wake_review_detail:
             synth += "\n" + t("gateway.kanban.wake.review_detail", reason=self.wake_review_detail)
+        # LOCAL-PATCH kanban-stranded-resume: a blocked wake carries the block
+        # kind and reason so the woken session can act instead of just acknowledging.
+        blocked_ev = next((ev for ev in self.d["events"] if ev.kind == "blocked"), None)
+        if blocked_ev is not None:
+            synth += "\n" + t("gateway.kanban.wake.block_detail",
+                              kind=str(_payload(blocked_ev, "kind") or "untyped"),
+                              reason=_safe_review_reason(_payload(blocked_ev, "reason"), 220) or "(no reason given)")
         self.synth = synth + "\n\n" + t("gateway.kanban.wake.guidance")
 
     def _log_woke(self) -> None:

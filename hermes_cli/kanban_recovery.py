@@ -1,0 +1,68 @@
+"""Exact, explicitly authorized capacity recovery; prose is never attribution."""
+import json
+import math
+import re
+import time
+
+IDENTITY = ('provider', 'account', 'resource')
+
+
+def recovery_dependency(payload):
+    if not isinstance(payload, dict):
+        return None
+    reason = payload.get('reason') or payload.get('error') or ''
+    if isinstance(reason, str) and re.search(r'\b(?:STOP|HOLD)\b', reason, re.I):
+        return None
+    dependency = payload.get('recovery')
+    if dependency is None and isinstance(reason, str):
+        try:
+            dependency = json.loads(reason).get('recovery')
+        except (ValueError, AttributeError):
+            return None
+    if not isinstance(dependency, dict) or dependency.get('authorized') is not True:
+        return None
+    if any(not isinstance(dependency.get(k), str) or not dependency[k].strip()
+           for k in (*IDENTITY, 'owner')):
+        return None
+    deadline = dependency.get('retry_not_before')
+    if isinstance(deadline, bool) or not isinstance(deadline, (int, float)) or not math.isfinite(deadline):
+        return None
+    return dependency
+
+
+def capacity_allows(payload, capacity, *, owner, blocked_at, now=None):
+    now = time.time() if now is None else now
+    dep = recovery_dependency(payload)
+    if dep is None or dep['owner'] != owner or not isinstance(capacity, dict):
+        return False
+    if capacity.get('available') is not True or any(dep[k] != capacity.get(k) for k in IDENTITY):
+        return False
+    checked = capacity.get('checked_at')
+    if not isinstance(checked, (int, float)) or isinstance(checked, bool) or not 0 <= now - checked <= 60:
+        return False
+    delay = payload.get('resume_after', 3600)
+    if not isinstance(delay, (int, float)) or isinstance(delay, bool) or not math.isfinite(delay):
+        return False
+    return now >= max(dep['retry_not_before'], blocked_at + max(3600, delay))
+
+
+def requires_capacity_or_manual_recovery(payload):
+    """Automatic timers/comments are not capacity evidence or permission to release a HOLD."""
+    reason = payload.get('reason') or payload.get('error') or ''
+    if isinstance(reason, str):
+        # STOP/HOLD are operator markers and must be uppercase: prose like "not the old preflight hold"
+        # is not a hold (LOCAL-PATCH kanban-auto-loop 2026-09-16, t_19069c58 sat parked for hours on it).
+        if re.search(r'\b(?:STOP|HOLD)\b', reason):
+            return True
+        if re.search(r'\b(?:quota|(?:capacity|credits?)[-\s]+(?:exhausted|exceeded|unavailable|depleted|limit)|(?:insufficient|out[-\s]+of|no)[-\s]+credits?|usage[-\s]+limit|'
+                     r'rate[-\s]+limit(?:ed|ing)?|(?:HTTP\s*)?429|Too\s+Many\s+Requests)\b', reason, re.I):
+            return True
+        try:
+            detail = json.loads(reason)
+        except ValueError:
+            # Malformed structured recovery must not fall through to a timer retry.
+            return bool(re.search(r'"(?:recovery|retry_not_before)"\s*:', reason))
+    else:
+        detail = reason
+    keys = {'recovery', 'retry_not_before', 'provider', 'account', 'resource'}
+    return bool(keys.intersection(payload) or (isinstance(detail, dict) and keys.intersection(detail)))
