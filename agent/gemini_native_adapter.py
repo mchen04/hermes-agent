@@ -11,6 +11,7 @@ import base64
 import contextlib
 import json
 import logging
+import os
 import re
 import time
 import uuid
@@ -137,7 +138,12 @@ def normalize_gemini_base_url(base_url: Optional[str], api_key: str = "") -> str
     if not trimmed:
         trimmed = DEFAULT_GEMINI_BASE_URL
     if is_vertex_express_key(api_key) and "generativelanguage.googleapis.com" in trimmed.lower():
-        return VERTEX_EXPRESS_BASE_URL
+        # LOCAL-PATCH gemini-studio-host (2026-09-19): this account's AQ. keys are accepted by the AI Studio
+        # host, and the Google project has no Vertex / Agent Platform API, so the express redirect 403s every
+        # auxiliary call. An explicit GEMINI_BASE_URL on the Studio host wins over the redirect.
+        pinned = os.environ.get("GEMINI_BASE_URL", "")
+        if "generativelanguage.googleapis.com" not in pinned.lower():
+            return VERTEX_EXPRESS_BASE_URL
     if is_vertex_express_base_url(trimmed):
         if trimmed.lower().endswith("/publishers/google"):
             return trimmed
