@@ -3640,6 +3640,13 @@ def unblock_task(conn: sqlite3.Connection, task_id: str, *, auto_resume: Optiona
         )
         if auto_resume is not None:
             unblocked_payload = dict(unblocked_payload or {}, auto=True)
+        if auto_resume is None or auto_resume.get("trigger") == "answered":
+            # Bind an explicit continuation to the comments it answered, including
+            # same-second PR comments. Timer retries do not gain this permission.
+            latest_comment = conn.execute(
+                "SELECT COALESCE(MAX(id), 0) FROM task_comments WHERE task_id = ?", (task_id,),
+            ).fetchone()[0]
+            unblocked_payload = dict(unblocked_payload or {}, continuation_after_comment=latest_comment)
         _append_event(conn, task_id, "unblocked", unblocked_payload)
         if auto_resume is not None:
             _append_event(conn, task_id, "auto_resumed", auto_resume)

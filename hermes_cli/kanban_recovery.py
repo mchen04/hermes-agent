@@ -14,6 +14,31 @@ GOAL_WAIT_MESSAGE = (
 )
 
 
+def authorized_pr_continuation(conn, task_id, comment_id, commented_at):
+    """LOCAL-PATCH kanban-pr-continuation: a PR link cannot revoke an answered block."""
+    rows = conn.execute(
+        "SELECT kind, payload, created_at FROM task_events WHERE task_id = ? "
+        "AND kind IN ('unblocked', 'auto_resumed') AND created_at >= ? ORDER BY id DESC",
+        (task_id, commented_at),
+    ).fetchall()
+    for row in rows:
+        data = json.loads(row["payload"]) if row["payload"] else {}
+        if not isinstance(data, dict):
+            continue
+        watermark = data.get("continuation_after_comment")
+        if isinstance(watermark, int) and not isinstance(watermark, bool):
+            if watermark >= comment_id:
+                return True
+            continue
+        # Old records have second-granularity timestamps but no comment watermark.
+        if row["created_at"] > commented_at and (
+            (row["kind"] == "unblocked" and not data.get("auto"))
+            or (row["kind"] == "auto_resumed" and data.get("trigger") == "answered")
+        ):
+            return True
+    return False
+
+
 def guard_goal_transient_block(row, *, kind, force=False):
     """LOCAL-PATCH kanban-continuity: timers must not replace a live goal supervisor."""
     if row["goal_mode"] and kind == "transient" and not force:

@@ -1583,16 +1583,21 @@ def check_respawn_guard(
     #    Exception: a handoff AFTER the newest PR comment (operator reassign,
     #    reviewer changes_requested, review reopen) names the profile that must
     #    now work on THAT PR — a closer or the implementer finishing it, not a
-    #    duplicate implementation (#111910). A crash/reclaim is not a handoff,
+    #    duplicate implementation (#111910). An explicit or answered unblock
+    #    after that comment also authorizes continuation by the same owner.
+    #    A timer or crash/reclaim is not a handoff,
     #    so the worker that opened the PR is still not re-spawned against it.
     pr_cutoff = now - _RESPAWN_GUARD_PR_WINDOW
     for c in conn.execute(
-        "SELECT body, created_at FROM task_comments "
-        "WHERE task_id = ? AND created_at >= ? ORDER BY created_at DESC",
+        "SELECT id, body, created_at FROM task_comments "
+        "WHERE task_id = ? AND created_at >= ? ORDER BY created_at DESC, id DESC",
         (task_id, pr_cutoff),
     ).fetchall():
         if not (c["body"] and _RESPAWN_GUARD_PR_URL_RE.search(c["body"])):
             continue
+        from hermes_cli.kanban_recovery import authorized_pr_continuation
+        if authorized_pr_continuation(conn, task_id, c["id"], c["created_at"]):
+            return None
         events = conn.execute(
             # Strictly after: a same-second tie stays guarded (fail closed).
             "SELECT kind, payload FROM task_events "
