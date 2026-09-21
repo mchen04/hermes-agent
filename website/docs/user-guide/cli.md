@@ -30,6 +30,9 @@ hermes chat -q "Hello"
 hermes chat --query-file prompt.txt
 hermes chat --query-file - < prompt.txt
 
+# Final response only, with a usage receipt and the full prompt read from stdin
+hermes --usage-file usage.json -z - < prompt.txt
+
 # With a specific model
 hermes chat --model "anthropic/claude-sonnet-4"
 
@@ -57,6 +60,11 @@ hermes chat --verbose
 hermes -w                         # Interactive mode in worktree
 hermes -w -z "Fix issue #123"     # Single query in worktree
 ```
+
+For one-shot pipelines, `-z -` (or `--oneshot -`) reads stdin without trimming the
+prompt or placing its contents in command-line arguments. Empty or whitespace-only
+input exits with code 2 before an agent call and writes a failure receipt when
+`--usage-file` is supplied. Ordinary `-z "prompt text"` arguments remain literal.
 
 ### Worktree cleanup
 

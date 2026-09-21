@@ -251,8 +251,22 @@ def run_oneshot(
     Model/provider fall back to ``HERMES_INFERENCE_MODEL`` and config.yaml. ``usage_file`` gets a
     JSON usage report even when the run fails. ``resume`` is a session id (already normalized by
     the CLI layer: latest/title/--continue resolution) whose transcript is loaded and continued
-    by this turn. Returns the exit code; the caller owns process termination.
+    by this turn. A prompt of ``-`` reads stdin verbatim. Returns the exit code; the caller owns
+    process termination.
     """
+    # LOCAL-PATCH oneshot-stdin: large pipeline prompts must not become a literal dash.
+    if prompt == "-":
+        try:
+            prompt = sys.stdin.read()
+            if not prompt.strip():
+                raise ValueError("stdin prompt is empty")
+        except (OSError, ValueError) as exc:
+            failure = f"cannot read stdin prompt: {exc}"
+            _write_usage_file(usage_file, {"completed": False, "api_calls": 0, "total_tokens": 0,
+                                          "model": model, "provider": provider}, failure=failure)
+            sys.stderr.write(f"hermes -z: {failure}\n")
+            return 2
+
     # Silence every stdlib logger: AIAgent, tools and provider adapters log to stderr through the
     # root logger. File handlers from setup_logging() keep working (level-independent).
     logging.disable(logging.CRITICAL)

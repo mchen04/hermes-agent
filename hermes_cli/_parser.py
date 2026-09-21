@@ -132,7 +132,8 @@ def _add_top_level_flags(parser: argparse.ArgumentParser) -> None:
     add("--version", "-V", action="store_true", help="Show version and exit")
     add("-z", "--oneshot", metavar="PROMPT", default=None, help=(
         "One-shot mode: send a single prompt and print ONLY the final "
-        "response text to stdout. No banner, no spinner, no tool "
+        "response text to stdout. Use '-' to read the prompt from stdin. "
+        "No banner, no spinner, no tool "
         "previews, no session_id line. Tools, memory, rules, and "
         "AGENTS.md in the CWD are loaded as normal; approvals are "
         "auto-bypassed. Intended for scripts / pipes."))
