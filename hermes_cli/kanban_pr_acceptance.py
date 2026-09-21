@@ -87,12 +87,13 @@ def collect_acceptance(contract: str, published_pr: str | None) -> dict:
                 raise ValueError("Incomplete check-suite pagination")
             # GitHub auto-creates app suites on push even when an integration
             # never accepts work. An untouched optional placeholder is not CI.
-            unreported = [s for s in suites if _unreported_app_suite(s)]
+            unreported = {s["id"] for s in suites if _unreported_app_suite(s)}
             receipt["unreported_suites"] = [{"id": s["id"], "app": s["app"]["name"],
-                "head_sha": s["head_sha"], "status": s["status"]} for s in unreported]
+                "head_sha": s["head_sha"], "status": s["status"]}
+                for s in suites if s["id"] in unreported]
             selected_checks = runs + list(latest_statuses.values()) + [
-                {**suite, "name": f"{suite['app']['name']} suite", "kind": "check-suite"}
-                for suite in suites if not _unreported_app_suite(suite)]
+                {**suite, "name": f"{suite['app']['name']} suite"}
+                for suite in suites if suite["id"] not in unreported]
             receipt["policy"] = "all-reported-checks"
             if not selected_checks:
                 workflows = _api(f"repos/{repo}/actions/workflows?per_page=100", paginate=True)
