@@ -223,7 +223,8 @@ def _resolve_review_runtime(agent: Any, task_cfg: Optional[Dict[str, Any]] = Non
     """Resolve provider/model/credentials for the review fork. Default (auto / unset / same as
     parent): the parent's live runtime with ``routed=False`` (codex_app_server -> codex_responses
     downgrade applied). When ``auxiliary.background_review.{provider,model}`` names a different
-    concrete model, resolve that runtime and set ``routed=True``."""
+    concrete model, resolve that runtime and set ``routed=True``. An unavailable explicit
+    route fails the review; silently inheriting the parent would bypass the user's cost policy."""
     parent_runtime = agent._current_main_runtime()
     parent_api_mode = parent_runtime.get("api_mode") or None
     parent = {
@@ -243,21 +244,17 @@ def _resolve_review_runtime(agent: Any, task_cfg: Optional[Dict[str, Any]] = Non
         task_provider == (agent.provider or "") and task_model == (agent.model or "")  # same as parent
     ):
         return parent
-    try:
-        from hermes_cli.runtime_provider import resolve_runtime_provider
-        rp = resolve_runtime_provider(
-            requested=task_provider, target_model=task_model,
-            explicit_api_key=task_api_key, explicit_base_url=task_base_url,
-        )
-        return {
-            "provider": rp.get("provider") or task_provider, "model": rp.get("model") or task_model,
-            **{key: rp.get(key) for key in ("api_key", "base_url", "api_mode", "credential_pool", "command")},
-            "request_overrides": dict(rp.get("request_overrides") or {}),
-            "args": list(rp.get("args") or []), "routed": True,
-        }
-    except Exception as e:
-        logger.debug("background-review aux routing failed (%s); using main model", e)
-        return parent
+    from hermes_cli.runtime_provider import resolve_runtime_provider
+    rp = resolve_runtime_provider(
+        requested=task_provider, target_model=task_model,
+        explicit_api_key=task_api_key, explicit_base_url=task_base_url,
+    )
+    return {
+        "provider": rp.get("provider") or task_provider, "model": rp.get("model") or task_model,
+        **{key: rp.get(key) for key in ("api_key", "base_url", "api_mode", "credential_pool", "command")},
+        "request_overrides": dict(rp.get("request_overrides") or {}),
+        "args": list(rp.get("args") or []), "routed": True,
+    }
 
 
 def _parent_can_emit_tool_calls(agent: Any) -> bool:
@@ -1186,20 +1183,18 @@ def _run_review_in_thread(
         finish_background_review_run(agent, review_run)
         return
     _set_thread_approval_callback(_bg_review_auto_deny)
-    # A client that can't carry Hermes tool calls back would spawn a fork that cannot write
-    # anything. Checked BEFORE the thread-scoped silence so the warning is not swallowed; cheap
-    # check first so the normal path never resolves the runtime twice.
-    if not _parent_can_emit_tool_calls(agent) and not _resolve_review_runtime(agent, task_cfg).get("routed"):
-        logger.warning(
-            "Background review skipped: provider %r cannot emit Hermes tool calls, "
-            "so the review fork could not write memories or skills. Set "
-            "auxiliary.background_review.{provider,model} to route the review to a normal model.",
-            getattr(agent, "provider", "?"),
-        )
-        _set_thread_approval_callback(None)
-        return
     st = _ReviewForkState()
     try:
+        # Resolve inside the failure/cleanup boundary: a missing explicit route must finish
+        # the review token and report the failure even when the parent's shim cannot use tools.
+        if not _parent_can_emit_tool_calls(agent) and not _resolve_review_runtime(agent, task_cfg).get("routed"):
+            logger.warning(
+                "Background review skipped: provider %r cannot emit Hermes tool calls, "
+                "so the review fork could not write memories or skills. Set "
+                "auxiliary.background_review.{provider,model} to route the review to a normal model.",
+                getattr(agent, "provider", "?"),
+            )
+            return
         # Silence stdout/stderr for THIS thread only: a process-global redirect would blank every
         # other thread's console for the whole review.
         # A process-global ``contextlib.redirect_stdout(devnull)`` here would also blank

@@ -11,6 +11,8 @@ Pure-function / config-driven; no live model calls.
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from agent import background_review as br
 
 
@@ -98,7 +100,7 @@ def test_routing_same_model_as_parent_is_not_routed():
     assert rt["routed"] is False  # same model/provider → keep full-replay path
 
 
-def test_routing_resolution_failure_falls_back_to_parent():
+def test_explicit_routing_failure_does_not_fall_back_to_parent():
     agent = _FakeAgent()
     cfg = {"auxiliary": {"background_review": {
         "provider": "openrouter", "model": "google/gemini-3-flash-preview",
@@ -106,9 +108,8 @@ def test_routing_resolution_failure_falls_back_to_parent():
     with patch("hermes_cli.config.load_config", return_value=cfg), patch("hermes_cli.config.load_config_readonly", return_value=cfg), \
          patch("hermes_cli.runtime_provider.resolve_runtime_provider",
                side_effect=RuntimeError("boom")):
-        rt = br._resolve_review_runtime(agent)
-    assert rt["routed"] is False
-    assert rt["provider"] == "openai-codex"
+        with pytest.raises(RuntimeError, match="boom"):
+            br._resolve_review_runtime(agent)
 
 
 # ---------------------------------------------------------------------------

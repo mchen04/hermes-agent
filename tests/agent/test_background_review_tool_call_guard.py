@@ -123,3 +123,28 @@ def test_an_incapable_provider_still_reviews_when_the_review_is_routed_away():
     }
     with patch.object(bg, "_resolve_review_runtime", return_value=routed):
         assert _run(_fake_parent(_IncapableClient())).called
+
+
+def test_failed_explicit_route_finishes_review_without_spawning_main_model(monkeypatch):
+    class IncapableClient:
+        SUPPORTS_HERMES_TOOL_CALLS = False
+
+    parent = _fake_parent(IncapableClient())
+    parent._emit_auxiliary_failure = MagicMock()
+    run = bg.prepare_background_review_run(parent)
+    callbacks = []
+    monkeypatch.setattr(bg, "_set_thread_approval_callback", callbacks.append)
+    with (
+        patch("hermes_cli.runtime_provider.resolve_runtime_provider",
+              side_effect=RuntimeError("configured provider has no credentials")),
+        patch("run_agent.AIAgent") as fork,
+    ):
+        bg._run_review_in_thread(parent, [], "review please", {
+            "provider": "gemini", "model": "gemini-test",
+        }, review_run=run)
+    fork.assert_not_called()
+    parent._emit_auxiliary_failure.assert_called_once()
+    assert "no credentials" in str(parent._emit_auxiliary_failure.call_args.args[1])
+    assert run.request_done.is_set()
+    assert parent._background_review_run is None
+    assert callbacks[-1] is None
