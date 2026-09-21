@@ -13,6 +13,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -23,7 +24,8 @@ from hermes_time import now as _hermes_now
 # that temporarily enter another profile cannot leak that profile's records into the import-time
 # home.
 EXECUTIONS_FILE: Optional[Path] = None
-MAX_TERMINAL_EXECUTIONS = 1000
+# LOCAL-PATCH cron-execution-retention: a busy polling job must not erase yesterday's receipts.
+TERMINAL_EXECUTION_RETENTION_DAYS = 30
 HANDOFF_ADOPTION_GRACE_SECONDS = 30.0
 _TERMINAL_STATES = ("completed", "failed", "unknown")
 _lock = threading.RLock()
@@ -80,6 +82,11 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_executions_status_claimed "
         "ON executions(status, claimed_at DESC, id DESC)"
     )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_executions_terminal_finished "
+        "ON executions(julianday(finished_at)) "
+        "WHERE status IN ('completed','failed','unknown') AND handoff_pending=0"
+    )
     add_column_if_missing(conn, "executions", "delivery_outcome", "delivery_outcome TEXT")
     add_column_if_missing(conn, "executions", "scheduled_instant", "scheduled_instant TEXT")
     conn.execute(
@@ -135,13 +142,12 @@ def _owner_is_live(pid: int, started_at: Optional[int]) -> bool:
 
 
 def _prune_unlocked(conn: sqlite3.Connection) -> None:
+    cutoff = (_hermes_now() - timedelta(days=TERMINAL_EXECUTION_RETENTION_DAYS)).isoformat()
     conn.execute(
-        """DELETE FROM executions WHERE id IN (
-             SELECT id FROM executions
-             WHERE status IN ('completed','failed','unknown')
-             ORDER BY finished_at DESC, claimed_at DESC, id DESC LIMIT -1 OFFSET ?
-           )""",
-        (max(0, int(MAX_TERMINAL_EXECUTIONS)),),
+        """DELETE FROM executions
+           WHERE status IN ('completed','failed','unknown') AND handoff_pending=0
+             AND julianday(finished_at) < julianday(?)""",
+        (cutoff,),
     )
 
 
