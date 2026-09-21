@@ -1584,9 +1584,10 @@ def check_respawn_guard(
     #    reviewer changes_requested, review reopen) names the profile that must
     #    now work on THAT PR — a closer or the implementer finishing it, not a
     #    duplicate implementation (#111910). An explicit or answered unblock
-    #    after that comment also authorizes continuation by the same owner.
-    #    A timer or crash/reclaim is not a handoff,
-    #    so the worker that opened the PR is still not re-spawned against it.
+    #    after that comment is the same permission from the operator's side.
+    #    A timer, crash or reclaim is not a handoff, so the worker that opened
+    #    the PR is still not re-spawned against it.
+    from hermes_cli.kanban_recovery import authorized_pr_continuation
     pr_cutoff = now - _RESPAWN_GUARD_PR_WINDOW
     for c in conn.execute(
         "SELECT id, body, created_at FROM task_comments "
@@ -1595,7 +1596,6 @@ def check_respawn_guard(
     ).fetchall():
         if not (c["body"] and _RESPAWN_GUARD_PR_URL_RE.search(c["body"])):
             continue
-        from hermes_cli.kanban_recovery import authorized_pr_continuation
         if authorized_pr_continuation(conn, task_id, c["id"], c["created_at"]):
             return None
         events = conn.execute(

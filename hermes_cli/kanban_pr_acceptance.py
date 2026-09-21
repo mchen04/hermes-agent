@@ -80,18 +80,19 @@ def collect_acceptance(contract: str, published_pr: str | None) -> dict:
         # not erase actual CI evidence or turn a published task into local-only.
         selected_checks = []
         if not required:
-            latest_statuses = {}
-            for status in statuses:
-                context = status["context"]
-                if context not in latest_statuses or status["id"] > latest_statuses[context]["id"]:
-                    latest_statuses[context] = status
+            latest_statuses = {s["context"]: s for s in sorted(statuses, key=lambda s: s["id"])}
             suite_pages = _api(f"repos/{repo}/commits/{sha}/check-suites?per_page=100", paginate=True)
             suites = [suite for page in suite_pages for suite in page["check_suites"]]
             if len({s["id"] for s in suites}) != suite_pages[0]["total_count"]:
                 raise ValueError("Incomplete check-suite pagination")
+            # GitHub auto-creates app suites on push even when an integration
+            # never accepts work. An untouched optional placeholder is not CI.
+            unreported = [s for s in suites if _unreported_app_suite(s)]
+            receipt["unreported_suites"] = [{"id": s["id"], "app": s["app"]["name"],
+                "head_sha": s["head_sha"], "status": s["status"]} for s in unreported]
             selected_checks = runs + list(latest_statuses.values()) + [
                 {**suite, "name": f"{suite['app']['name']} suite", "kind": "check-suite"}
-                for suite in suites]
+                for suite in suites if not _unreported_app_suite(suite)]
             receipt["policy"] = "all-reported-checks"
             if not selected_checks:
                 workflows = _api(f"repos/{repo}/actions/workflows?per_page=100", paginate=True)
@@ -117,7 +118,9 @@ def collect_acceptance(contract: str, published_pr: str | None) -> dict:
             is_run = "conclusion" in check
             outcome = check.get("conclusion") if is_run else check["state"]
             classification = _classify(check, sha, outcome, is_run)
-            if (not required and is_run and check.get("status") == "completed"
+            # Without required contexts every reported check counts, so a check
+            # that deliberately did not run is not evidence of failure.
+            if (not required and check.get("status") == "completed"
                     and outcome in {"neutral", "skipped"} and check.get("head_sha") == sha):
                 classification = "success"
             outcomes.append(classification)
@@ -138,6 +141,13 @@ def collect_acceptance(contract: str, published_pr: str | None) -> dict:
         # Never persist gh stderr (credentials/host details); the failed phase is actionable.
         receipt.update(classification="infra", detail="GitHub acceptance evidence unavailable or incomplete; check gh authentication/API access and retry.")
         return receipt
+
+
+def _unreported_app_suite(suite: dict) -> bool:
+    return (suite.get("app", {}).get("slug") not in {None, "github-actions"}
+            and suite.get("status") == "queued" and suite.get("conclusion") is None
+            and suite.get("latest_check_runs_count") == 0
+            and bool(suite.get("created_at")) and suite.get("created_at") == suite.get("updated_at"))
 
 
 def _expects_head_checks(repo: str, sha: str, workflow: dict) -> bool:

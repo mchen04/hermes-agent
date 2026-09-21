@@ -48,9 +48,13 @@ def github(tmp_path, monkeypatch):
                 value = [[]]
             elif "/check-suites" in self.path:
                 suites = [] if not state.get("suite") else [{"id": 9, "head_sha": sha,
-                    "app": {"id": 1, "name": "CI"},
+                    "app": {"id": 1, "name": "CI", "slug": "github-actions"},
                     "status": "completed" if state["suite"] != "pending" else "queued",
                     "conclusion": None if state["suite"] == "pending" else state["suite"]}]
+                if state.get("unreported_app"):
+                    suites.append({"id": 10, "head_sha": sha, "app": {"id": 2, "name": "Optional integration", "slug": "optional-integration"},
+                        "status": "queued", "conclusion": None, "latest_check_runs_count": 0,
+                        "created_at": "2026-09-21T19:26:40Z", "updated_at": "2026-09-21T19:26:40Z"})
                 value = [{"total_count": len(suites), "check_suites": suites}]
             elif "/actions/workflows" in self.path:
                 workflows = [{"id": 1, "state": "active", "path": ".github/workflows/check.yml"}] if state.get("workflow") else []
@@ -169,9 +173,14 @@ def test_unprotected_pr_uses_actual_ci_and_distinguishes_absent_from_pending(git
 
 def test_unprotected_pr_cannot_hide_pending_or_failed_suites(github):
     github["required"] = False
+    github["unreported_app"] = True
     with connect() as conn:
         for empty in (True, False):
             for suite in ("pending", "startup_failure", "failure", "success"):
                 github.update(empty=empty, suite=suite)
                 tid = kb.create_task(conn, title="Wait for all CI", completion_contract="acme/repo")
                 assert kb.complete_task(conn, tid, metadata={"published_pr": "https://github.com/acme/repo/pull/7"}) is (suite == "success")
+                receipt = json.loads(conn.execute(
+                    "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance' ORDER BY id DESC", (tid,)
+                ).fetchone()[0])
+                assert receipt["unreported_suites"][0]["app"] == "Optional integration"
