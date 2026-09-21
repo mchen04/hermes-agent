@@ -186,7 +186,7 @@ def test_unprotected_pr_cannot_hide_pending_or_failed_suites(github):
                 assert receipt["unreported_suites"][0]["app"] == "Optional integration"
 
 
-@pytest.mark.parametrize("definition,expected", [
+@pytest.mark.parametrize("definition,completes", [
     ("on: release", True),
     ("on: issues", True),
     ("on: {push: {tags: ['v*']}}", True),
@@ -198,8 +198,8 @@ def test_unprotected_pr_cannot_hide_pending_or_failed_suites(github):
     ("on: {pull_request: {branches: ['**', '!main', main]}}", False),
     ("on: {pull_request: {types: [labeled]}}", True),
 ])
-def test_unrelated_workflows_do_not_require_pr_checks(github, definition, expected):
+def test_unrelated_workflows_do_not_require_pr_checks(github, definition, completes):
     github.update(required=False, empty=True, workflow=True, workflow_definition=definition+"\njobs: {}")
     with connect() as conn:
         tid = kb.create_task(conn, title="Publish without unrelated automation", completion_contract="acme/repo")
-        assert kb.complete_task(conn, tid, metadata={"published_pr": "https://github.com/acme/repo/pull/7"}) is expected
+        assert kb.complete_task(conn, tid, metadata={"published_pr": "https://github.com/acme/repo/pull/7"}) is completes

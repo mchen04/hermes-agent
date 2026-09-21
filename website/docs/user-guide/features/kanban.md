@@ -66,12 +66,15 @@ policy or GitHub API failures. A repository without required checks is still
 gated on the checks it actually reports: every exact-head check run, latest
 legacy status and active check suite must succeed, and a deliberately neutral or
 skipped run counts as success. If that head reports nothing at all, an active
-workflow that can trigger on it holds the card as pending; only when no workflow
-expects checks does the card complete. Untouched, zero-run queued third-party
-app suites are recorded as unreported placeholders; GitHub Actions suites and
-any suite that has started or reported results still gate completion. `gh` must
-be authenticated with read access to the repository's checks and rules; no
-remote writes are performed by this gate.
+workflow whose `pull_request` or `push` trigger applies to this PR — its branch
+filters match the base or head branch, and its `pull_request` types cover a head
+update — holds the card as pending. Release, issue, tag-only, scheduled and
+manual workflows do not, so the card completes when no applicable workflow
+expects checks. Untouched, zero-run queued third-party app suites are recorded
+as unreported placeholders; GitHub Actions suites and any suite that has started
+or reported results still gate completion. `gh` must be authenticated with read
+access to the repository's checks and rules; no remote writes are performed by
+this gate.
 
 Rejection retains the active card and workspace. Durable `pr_acceptance` events
 store PR URL, SHA, required contexts, check IDs/URLs, classifications and recovery
