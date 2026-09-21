@@ -197,6 +197,10 @@ def test_unprotected_pr_cannot_hide_pending_or_failed_suites(github):
     ("on: {pull_request: {branches: ['**', '!main']}}", True),
     ("on: {pull_request: {branches: ['**', '!main', main]}}", False),
     ("on: {pull_request: {types: [labeled]}}", True),
+    ("on: {pull_request: {types: opened}}", False),
+    ("on: {pull_request: {types: synchronize}}", False),
+    ("on: {pull_request: {branches: develop}}", True),
+    ("on: {pull_request: {branches-ignore: main}}", True),
 ])
 def test_unrelated_workflows_do_not_require_pr_checks(github, definition, completes):
     github.update(required=False, empty=True, workflow=True, workflow_definition=definition+"\njobs: {}")

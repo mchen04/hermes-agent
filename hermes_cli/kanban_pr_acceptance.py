@@ -179,7 +179,10 @@ def _expects_head_checks(repo: str, sha: str, workflow: dict, pr: dict) -> bool:
         if event == "push" and set(filters).intersection({"tags", "tags-ignore"}) and not set(filters).intersection({"branches", "branches-ignore"}):
             continue
         if event == "pull_request" and "types" in filters:
-            if not set(filters["types"]).intersection({"opened", "reopened", "synchronize", "ready_for_review"}):
+            activities = filters["types"]
+            if isinstance(activities, str):
+                activities = [activities]
+            if not set(activities).intersection({"opened", "reopened", "synchronize", "ready_for_review"}):
                 continue
         if "branches" in filters and not _matches_ref(branch, filters["branches"]):
             continue
@@ -191,8 +194,10 @@ def _expects_head_checks(repo: str, sha: str, workflow: dict, pr: dict) -> bool:
     return False
 
 
-def _matches_ref(branch: str, patterns: list) -> bool:
+def _matches_ref(branch: str, patterns: str | list) -> bool:
     """GitHub branch-filter globs, including ordered exclusion/re-inclusion."""
+    if isinstance(patterns, str):
+        patterns = [patterns]
     if not isinstance(patterns, list) or not patterns or any(not isinstance(p, str) or not p for p in patterns):
         raise ValueError("Workflow branch filters are unavailable")
     matched = False
