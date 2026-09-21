@@ -818,6 +818,12 @@ def resolve_compression_fallback_route() -> Optional[dict]:
     client's own exception path walks the rest. ``None`` when none is usable (skip compression)."""
     try:
         from agent.auxiliary_client import _fallback_entry_api_key, _get_auxiliary_task_config
+        # LOCAL-PATCH auxiliary-compression-stall-policy: a stall cannot authorize a different model.
+        from agent.auxiliary_fallback_policy import task_fallback_policy
+        # A stalled request proves neither a daily quota nor an HTTP 503. Strict routing keeps
+        # the transcript intact/cools down instead of bypassing the auxiliary error policy.
+        if task_fallback_policy("compression") is not None:
+            return None
         chain = _get_auxiliary_task_config("compression").get("fallback_chain")
     except Exception:
         logger.debug("compression fallback_chain lookup failed", exc_info=True)

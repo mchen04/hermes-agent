@@ -4286,6 +4286,9 @@ def _try_configured_fallback_for_unavailable_client(
     explicit = (failed_provider or "").strip().lower()
     if not task or not explicit or explicit in {"auto"}:
         return None, None, ""
+    from agent.auxiliary_fallback_policy import task_fallback_policy
+    if task_fallback_policy(task) is not None:
+        return None, None, ""
     return _try_configured_fallback_chain(task, explicit, reason="provider unavailable")
 
 
@@ -7009,7 +7012,7 @@ async def _acreate_with_progress(
 # response (or thrown exception), so rung ORDER and accept/re-raise contracts match on both wires.
 _ResolvedAuxRoute = NamedTuple("_ResolvedAuxRoute", [
     ("client", Any), ("final_model", Optional[str]), ("resolved_provider", str),
-    ("effective_provider", str)])
+    ("effective_provider", str), ("policy_fallback", bool)])
 
 
 def _resolve_call_client(
@@ -7020,6 +7023,17 @@ def _resolve_call_client(
 ) -> _ResolvedAuxRoute:
     """Resolve the client for one aux call: vision chain, or cached text client with the
     explicit-provider fallback_chain / auto-chain rescue; RuntimeError when nothing is configured."""
+    # LOCAL-PATCH auxiliary-client-policy: honor profile-scoped strict routing before selecting a client.
+    from agent.auxiliary_fallback_policy import cached_policy_fallback, task_fallback_policy
+    policy = task_fallback_policy(task)
+    if policy is not None:
+        cached = cached_policy_fallback(task, resolved_provider, resolved_model, resolved_base_url, policy)
+        if cached is not None:
+            client, final_model, label = cached
+            if async_mode:
+                client, final_model = _to_async_client(client, final_model or "", is_vision=(task == "vision"))
+            provider = _fallback_provider_from_label(label)
+            return _ResolvedAuxRoute(client, final_model, provider, provider, True)
     effective_provider = resolved_provider
     if task == "vision":
         effective_provider, client, final_model = resolve_vision_provider_client(
@@ -7027,7 +7041,7 @@ def _resolve_call_client(
             model=resolved_model or model, base_url=resolved_base_url or base_url,
             api_key=resolved_api_key or api_key, async_mode=async_mode, main_runtime=main_runtime,
         )
-        if client is None and resolved_provider != "auto" and not resolved_base_url:
+        if client is None and policy is None and resolved_provider != "auto" and not resolved_base_url:
             logger.warning("Vision provider %s unavailable, falling back to auto vision backends",
                            resolved_provider)
             effective_provider, client, final_model = resolve_vision_provider_client(
@@ -7041,6 +7055,8 @@ def _resolve_call_client(
             api_key=resolved_api_key, api_mode=resolved_api_mode, main_runtime=main_runtime,
             task=task)
         effective_provider = _effective_provider_for_client(client, resolved_provider)
+        if client is None and policy is not None:
+            raise AuxiliaryClientUnavailable(missing_provider_credentials_message(resolved_provider))
         if client is None:
             # Explicit provider with no credentials: honor the task fallback_chain before
             # raising (fallback entries may use OAuth / credential-pool auth).
@@ -7069,7 +7085,7 @@ def _resolve_call_client(
     if client is None:
         raise AuxiliaryClientUnavailable(f"No LLM provider configured for task={task} "
                                          f"provider={resolved_provider}. Run: hermes setup")
-    return _ResolvedAuxRoute(client, final_model, resolved_provider, effective_provider)
+    return _ResolvedAuxRoute(client, final_model, resolved_provider, effective_provider, False)
 
 
 _PreparedAuxRequest = NamedTuple("_PreparedAuxRequest", [
@@ -7097,12 +7113,16 @@ def _prepare_aux_request(
         resolved_api_mode = api_mode
     effective_extra_body = _get_task_extra_body(task)
     effective_extra_body.update(extra_body or {})
-    client, final_model, resolved_provider, effective_provider = _resolve_call_client(
+    client, final_model, resolved_provider, effective_provider, policy_fallback = _resolve_call_client(
         task, provider=provider, model=model, base_url=base_url, api_key=api_key,
         resolved_provider=resolved_provider, resolved_model=resolved_model,
         resolved_base_url=resolved_base_url, resolved_api_key=resolved_api_key,
         resolved_api_mode=resolved_api_mode, main_runtime=main_runtime, async_mode=async_mode,
     )
+    if policy_fallback:
+        resolved_model = final_model
+        resolved_base_url = str(getattr(client, "base_url", "") or "") or None
+        resolved_api_key = resolved_api_mode = None
     effective_timeout = _effective_aux_timeout(task, timeout)
     request_provider = effective_provider or resolved_provider
     if not async_mode:
@@ -7429,6 +7449,10 @@ def _ladder_provider_fallback(first_err: Exception, route: _LadderRoute):
     regardless of user intent. Auth errors from an explicit provider may only use the task's
     own configured fallback_chain; they never imply an unconfigured provider hop."""
     task, tag, resolved_provider = route.task, route.tag, route.resolved_provider
+    from agent.auxiliary_fallback_policy import configured_policy_fallback, task_fallback_policy
+    policy = task_fallback_policy(task)
+    if policy is not None:
+        return (yield from configured_policy_fallback(first_err, route, policy))
     # Respect explicit provider choice for transient errors (auth, request validation, etc.) but allow
     # fallback when the provider clearly cannot serve the request due to capacity: payment/quota exhaustion
     # and connection failures are capacity problems, not request constraints. See #26803: daily token quota

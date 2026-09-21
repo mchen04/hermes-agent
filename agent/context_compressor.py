@@ -3670,7 +3670,10 @@ Write only the summary body. Do not include any preamble or prefix."""
             )
         # A distinct summary model gets ONE main-model retry: a specific reason for known transient classes,
         # else a best-effort "failed" retry — losing N turns is worse than one extra summary attempt.
-        if self.summary_model and self.summary_model != self.model and not getattr(self, "_summary_model_fallen_back", False):
+        # LOCAL-PATCH auxiliary-compression-summary-policy: a failed helper must not escalate to the main model.
+        from agent.auxiliary_fallback_policy import task_fallback_policy
+        if (task_fallback_policy("compression") is None and self.summary_model
+                and self.summary_model != self.model and not getattr(self, "_summary_model_fallen_back", False)):
             self._fallback_to_main_for_compression(e, kind.fallback_reason())
             # Retry immediately on the main model.
             return self._generate_summary(turns_to_summarize, focus_topic=focus_topic, memory_context=memory_context)

@@ -1584,6 +1584,31 @@ Each entry supports the same three knobs as any auxiliary task config:
 
 `fallback_chain` is available on any auxiliary task — `compression`, `vision`, `approval`, `skills_hub`, `mcp`, etc.
 
+For a task with an explicit provider, set `fallback_on` to make its chain authoritative and
+restrict the errors that may use it:
+
+```yaml
+auxiliary:
+  compression:
+    provider: gemini
+    model: gemini-3.8-flash
+    fallback_on: [daily_quota, server_unavailable]
+    fallback_chain:
+      - provider: openai-codex
+        model: gpt-5.6-luna
+```
+
+`daily_quota` requires an explicit daily-limit HTTP 429 after credential-pool recovery is exhausted.
+`server_unavailable` permits HTTP 503 after the normal same-provider retries and holds that provider
+out for 60 seconds in the current profile. Later calls reuse the configured chain during that
+cooldown or while every pooled credential remains explicitly daily-quota exhausted. Missing credentials,
+authentication errors, short rate limits, other HTTP errors, and timeouts do not use the chain.
+Hermes stops when the configured chain is exhausted; it does not try the main model or discover
+other providers. Compression also respects this policy for stalled requests and summary retries.
+An empty list disables fallback. Omit the setting or use `null` to retain the legacy behavior above.
+This setting applies to auxiliary-client tasks; background review is a separate agent fork and
+reports an unavailable explicit route without silently inheriting the parent's model.
+
 ### Native vision embed budgets (top-level `vision:`)
 
 Separate from `auxiliary.vision` (which picks the describer model): when the *main* model is vision-capable, `vision_analyze` and browser screenshots embed real pixels into tool results that are re-sent every later turn. `vision.embed_target_bytes` (default `262144`, clamped 64 KiB..4 MiB) sizes one embed; `vision.max_calls_per_image` caps how often the same image may be embedded per session (unset = 3 inside delegated subagents, unlimited for the main agent; `0` = unlimited). See [Vision → Native embeds ride the session](./features/vision.md#native-embeds-ride-the-session-visionembed_target_bytes-and-visionmax_calls_per_image).
