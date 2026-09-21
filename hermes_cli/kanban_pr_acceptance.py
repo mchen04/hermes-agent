@@ -54,7 +54,7 @@ def collect_acceptance(contract: str, published_pr: str | None) -> dict:
         repo, number = match[1], int(match[2])
         receipt["pr_url"] = url
         owner, name = repo.split("/")
-        query = '''{repository(owner:%s,name:%s){pullRequest(number:%d){headRefOid baseRefName state
+        query = '''{repository(owner:%s,name:%s){pullRequest(number:%d){headRefOid headRefName baseRefName state
             baseRef{branchProtectionRule{requiredStatusChecks{context app{databaseId}}}}}}}''' % (
                 json.dumps(owner), json.dumps(name), number)
         pr = _api("graphql", query=query)["data"]["repository"]["pullRequest"]
@@ -100,7 +100,7 @@ def collect_acceptance(contract: str, published_pr: str | None) -> dict:
                 entries = [w for page in workflows for w in page["workflows"]]
                 if len({w["id"] for w in entries}) != workflows[0]["total_count"]:
                     raise ValueError("Incomplete workflow pagination")
-                if any(_expects_head_checks(repo, sha, w) for w in entries if w["state"] == "active"):
+                if any(_expects_head_checks(repo, sha, w, pr) for w in entries if w["state"] == "active"):
                     receipt.update(classification="pending", detail="CI workflows exist but this head has no check results yet.")
                     return receipt
                 receipt.update(policy="no-checks-configured", detail="No required or reported checks; no active workflow expects checks for this head.")
@@ -151,8 +151,8 @@ def _unreported_app_suite(suite: dict) -> bool:
             and bool(suite.get("created_at")) and suite.get("created_at") == suite.get("updated_at"))
 
 
-def _expects_head_checks(repo: str, sha: str, workflow: dict) -> bool:
-    """Manual/scheduled workflows alone do not promise PR CI; ambiguous triggers still do."""
+def _expects_head_checks(repo: str, sha: str, workflow: dict, pr: dict) -> bool:
+    """Only branch push/PR triggers promise head CI; unrelated automation does not."""
     path = workflow["path"]
     if not path.startswith(".github/workflows/") or ".." in path.split("/"):
         raise ValueError("Workflow definition is unavailable")
@@ -168,7 +168,55 @@ def _expects_head_checks(repo: str, sha: str, workflow: dict) -> bool:
         events = [events]
     if not isinstance(events, (list, dict)) or not events or any(not isinstance(e, str) for e in events):
         raise ValueError("Workflow triggers are unavailable")
-    return not set(events).issubset({"schedule", "workflow_dispatch", "repository_dispatch", "workflow_call"})
+    if isinstance(events, list):
+        events = dict.fromkeys(events)
+    for event, branch in (("pull_request", pr["baseRefName"]), ("push", pr["headRefName"])):
+        if event not in events:
+            continue
+        filters = events[event] or {}
+        if not isinstance(filters, dict):
+            raise ValueError("Workflow event filters are unavailable")
+        if event == "push" and set(filters).intersection({"tags", "tags-ignore"}) and not set(filters).intersection({"branches", "branches-ignore"}):
+            continue
+        if event == "pull_request" and "types" in filters:
+            if not set(filters["types"]).intersection({"opened", "reopened", "synchronize", "ready_for_review"}):
+                continue
+        if "branches" in filters and not _matches_ref(branch, filters["branches"]):
+            continue
+        if "branches-ignore" in filters and _matches_ref(branch, filters["branches-ignore"]):
+            continue
+        # Path/job expressions can still suppress a run. In the absence of
+        # reported evidence, do not invent success for an applicable trigger.
+        return True
+    return False
+
+
+def _matches_ref(branch: str, patterns: list) -> bool:
+    """GitHub branch-filter globs, including ordered exclusion/re-inclusion."""
+    if not isinstance(patterns, list) or not patterns or any(not isinstance(p, str) or not p for p in patterns):
+        raise ValueError("Workflow branch filters are unavailable")
+    matched = False
+    for pattern in patterns:
+        negative = pattern.startswith("!")
+        pattern = pattern[1:] if negative else pattern
+        parts = []
+        for token in re.findall(r"\\.|\*\*/|\*\*|\*|\[[A-Za-z0-9-]+\]|.", pattern):
+            if token.startswith("\\"):
+                parts.append(re.escape(token[1:]))
+            elif token in {"*", "**", "**/"}:
+                parts.append({"*": "[^/]*", "**": ".*", "**/": "(?:.*/)?"}[token])
+            elif token in {"?", "+"} or (token.startswith("[") and token.endswith("]")):
+                parts.append(token)
+            elif token in {"[", "]"}:
+                raise ValueError("Invalid workflow branch pattern")
+            else:
+                parts.append(re.escape(token))
+        try:
+            if re.fullmatch(''.join(parts), branch):
+                matched = not negative
+        except re.error as exc:
+            raise ValueError("Invalid workflow branch pattern") from exc
+    return matched
 
 
 def _classify(check: dict, sha: str, outcome: str | None, is_run: bool) -> str:

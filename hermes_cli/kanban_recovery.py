@@ -21,12 +21,14 @@ def authorized_pr_continuation(conn, task_id, comment_id, commented_at):
         "AND kind IN ('unblocked', 'auto_resumed') AND created_at >= ? ORDER BY id DESC",
         (task_id, commented_at),
     ).fetchall()
+    has_watermark = legacy_authorized = False
     for row in rows:
         data = json.loads(row["payload"]) if row["payload"] else {}
         if not isinstance(data, dict):
             continue
         watermark = data.get("continuation_after_comment")
         if isinstance(watermark, int) and not isinstance(watermark, bool):
+            has_watermark = True
             if watermark >= comment_id:
                 return True
             continue
@@ -35,8 +37,8 @@ def authorized_pr_continuation(conn, task_id, comment_id, commented_at):
             (row["kind"] == "unblocked" and not data.get("auto"))
             or (row["kind"] == "auto_resumed" and data.get("trigger") == "answered")
         ):
-            return True
-    return False
+            legacy_authorized = True
+    return legacy_authorized and not has_watermark
 
 
 def guard_goal_transient_block(row, *, kind, force=False):

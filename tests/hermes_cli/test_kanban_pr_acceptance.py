@@ -22,7 +22,7 @@ def github(tmp_path, monkeypatch):
             sha = state["head"]
             if self.path == "/graphql":
                 value = {"data": {"repository": {"pullRequest": {
-                    "headRefOid": sha, "baseRefName": "main", "state": "OPEN",
+                    "headRefOid": sha, "headRefName": "feature/fix", "baseRefName": "main", "state": "OPEN",
                     "baseRef": {"branchProtectionRule": {"requiredStatusChecks": [
                         {"context": "required", "app": {"databaseId": 1}}]
                         if state.get("required", True) else []}}}}}}
@@ -184,3 +184,22 @@ def test_unprotected_pr_cannot_hide_pending_or_failed_suites(github):
                     "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance' ORDER BY id DESC", (tid,)
                 ).fetchone()[0])
                 assert receipt["unreported_suites"][0]["app"] == "Optional integration"
+
+
+@pytest.mark.parametrize("definition,expected", [
+    ("on: release", True),
+    ("on: issues", True),
+    ("on: {push: {tags: ['v*']}}", True),
+    ("on: {push: {branches: [main]}}", True),
+    ("on: {push: {branches: ['feature/*']}}", False),
+    ("on: {pull_request: {branches: [develop]}}", True),
+    ("on: {pull_request: {branches: [main]}}", False),
+    ("on: {pull_request: {branches: ['**', '!main']}}", True),
+    ("on: {pull_request: {branches: ['**', '!main', main]}}", False),
+    ("on: {pull_request: {types: [labeled]}}", True),
+])
+def test_unrelated_workflows_do_not_require_pr_checks(github, definition, expected):
+    github.update(required=False, empty=True, workflow=True, workflow_definition=definition+"\njobs: {}")
+    with connect() as conn:
+        tid = kb.create_task(conn, title="Publish without unrelated automation", completion_contract="acme/repo")
+        assert kb.complete_task(conn, tid, metadata={"published_pr": "https://github.com/acme/repo/pull/7"}) is expected
