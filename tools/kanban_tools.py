@@ -327,16 +327,9 @@ def _opt_int(value: Any, default: Optional[int] = None) -> Optional[int]:
     return int(value) if value is not None else default
 
 
-_TASK_FIELDS = tuple(
-    "id title body assignee status tenant priority workspace_kind workspace_path created_by "
-    "created_at started_at completed_at result current_run_id model_override "
-    "provider_override completion_contract last_failure_error".split())
 _TASK_SUMMARY_FIELDS = tuple(
     "id title assignee status priority tenant workspace_kind workspace_path project_id created_by "
     "created_at started_at completed_at current_run_id model_override provider_override".split())
-_RUN_FIELDS = tuple("id profile status outcome summary error metadata started_at ended_at".split())
-_COMMENT_FIELDS = ("author", "body", "created_at")
-_EVENT_FIELDS = ("kind", "payload", "created_at", "run_id")
 _ATTACHMENT_FIELDS = tuple(
     "id filename content_type size uploaded_by stored_path created_at".split())
 _CREATED_FIELDS = ("status", "workspace_kind", "workspace_path", "project_id")
@@ -357,7 +350,7 @@ def _task_summary_dict(kb, conn, task) -> dict[str, Any]:
 
 # --- Goal-mode judge gate ---
 
-_GOAL_MODE_BLOCK_ALLOWED_KINDS = frozenset({"dependency", "needs_input", "transient"})  # transient returns to the loop (LOCAL-PATCH kanban-stranded-resume)
+_GOAL_MODE_BLOCK_ALLOWED_KINDS = frozenset({"dependency", "needs_input"})
 
 
 def _goal_judge_available() -> bool:
@@ -549,24 +542,15 @@ def inject_new_comments_from_env(agent: Any) -> bool:
 
 @_kanban_handler("kanban_show")
 def _handle_show(args: dict, **kw) -> str:
-    """Full task state: row, parents, children, comments, runs, last 50 events."""
+    """Full initial orientation, then bounded updates using the returned cursor."""
+    from tools.kanban_task_updates import build_task_read
+
     tid = _require_task_id(args)
     with _board(args.get("board")) as (kb, conn):
+        # One read snapshot: a comment arriving mid-read belongs to the next cursor.
+        conn.execute("BEGIN")
         task = _existing_task(kb, conn, tid)
-        return json.dumps({
-            "task": _fields(task, _TASK_FIELDS),
-            "parents": kb.parent_ids(conn, tid),
-            # Non-terminal parents; on a running card this means the dependency
-            # gate is not holding it and kanban_complete will refuse.
-            "unsatisfied_parents": [
-                {"id": pid, "status": status} for pid, status in kb.unsatisfied_parents(conn, tid)],
-            "children": kb.child_ids(conn, tid),
-            "comments": [_fields(c, _COMMENT_FIELDS) for c in kb.list_comments(conn, tid)],
-            # Capped; full log via CLI.
-            "events": [_fields(e, _EVENT_FIELDS) for e in kb.list_events(conn, tid)[-50:]],
-            "runs": [_fields(r, _RUN_FIELDS) for r in kb.list_runs(conn, tid)],
-            # Same string build_worker_context hands the dispatcher at spawn time.
-            "worker_context": kb.build_worker_context(conn, tid)})
+        return json.dumps(build_task_read(kb, conn, task, cursor=args.get("cursor")))
 
 
 @_kanban_handler("kanban_list")
@@ -680,19 +664,14 @@ def _handle_block(args: dict, **kw) -> str:
     kind = args.get("kind")
     with _board(args.get("board")) as (kb, conn):
         _check(kind in kb.VALID_BLOCK_KINDS,  # LOCAL-PATCH kanban-stranded-resume: kind is required
-               f"kind is required and must be one of {sorted(kb.VALID_BLOCK_KINDS)}: transient (outside wait, "
-               "auto re-run), needs_input (a person answers), capability (hard wall), dependency (unfinished parent)")
-        # The goal loop treats ANY blocked status as terminal, so kanban_block
-        # would be an escape hatch around the completion judge: goal_mode tasks
-        # may only block on genuine external blockers.
-        # Goal-mode block gate (Issue #38696, sibling of the kanban_complete judge gate in #38367).
-        # kanban_block is a second exit path out of the goal loop — run_kanban_goal_loop() treats ANY
-        # `blocked` status as terminal, identically to `done`, regardless of kind. Without this, a worker
-        # that learns kanban_complete is gated can just call kanban_block(reason="anything") to escape the
-        # loop instead. Restrict goal_mode tasks to the kinds that represent a genuine external blocker the
-        # worker cannot resolve itself; `capability` and `transient` (or an unset kind) route back through
-        # kanban_complete, which the judge now gates.
+               f"kind is required and must be one of {sorted(kb.VALID_BLOCK_KINDS)}: transient (non-goal retry), "
+               "needs_input (a person answers), capability (hard wall), dependency (unfinished parent)")
+        # Any blocked status ends the goal loop. Keep ordinary waits in the same
+        # supervisor, and require the completion judge for other exits.
         task = kb.get_task(conn, tid)
+        if task and task.goal_mode and kind == "transient":
+            from hermes_cli.kanban_recovery import GOAL_WAIT_MESSAGE
+            raise _Reject(GOAL_WAIT_MESSAGE)
         _check(not (task and task.goal_mode and kind not in _GOAL_MODE_BLOCK_ALLOWED_KINDS),
                f"goal_mode tasks can only block with kind in "
                f"{sorted(_GOAL_MODE_BLOCK_ALLOWED_KINDS)} (got {kind!r}). If the task is actually "

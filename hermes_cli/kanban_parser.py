@@ -304,7 +304,8 @@ _SPECS = [
                   "Repeated same-kind re-blocks after unblock route the task to "
                   "triage to break unblock loops. Omit for a generic block."),
         _arg("--resume-after", type=int, default=None, metavar="SECONDS",
-             help="With --kind transient: the dispatcher re-runs the task after this many seconds (floored at 600)."),
+             help="With --kind transient on non-goal tasks: retry after this many seconds (floored at 600). "
+                  "Goal supervisors keep ordinary waits in their current session."),
         _arg("--force", action="store_true",
              help="Block even when the task's worker is still alive (otherwise refused so the owner is not stranded)."),
     ], help="Mark one or more tasks blocked"),

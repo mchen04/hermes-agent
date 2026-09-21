@@ -47,11 +47,25 @@ KANBAN_SHOW_SCHEMA = _schema(
         "handoffs, your prior attempts on this task if any, comments, "
         "and recent events. Use this to (re)orient yourself before "
         "starting work, especially on retries. The response includes a "
-        "pre-formatted ``worker_context`` string suitable for inclusion "
-        "verbatim in your reasoning."
+        "pre-formatted ``worker_context`` and a cursor. Within the same session, "
+        "pass that cursor to read only new comments/events and current status. "
+        "Reuse each returned cursor until truncated flags are false. Omit it "
+        "on a new session to recover the complete brief and prior decisions."
     ),
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
+        "cursor": {
+            "type": "object",
+            "description": "The cursor returned by the previous read of this task in this session.",
+            "properties": {
+                "task_id": {"type": "string"},
+                "database": {"type": "string"},
+                "event_id": {"type": "integer", "minimum": 0},
+                "comment_id": {"type": "integer", "minimum": 0},
+            },
+            "required": ["task_id", "database", "event_id", "comment_id"],
+            "additionalProperties": False,
+        },
     },
     [],
 )
@@ -171,14 +185,15 @@ KANBAN_BLOCK_SCHEMA = _schema(
         "``kind`` is required: 'needs_input' (a person must decide or answer, "
         "including any sign-in, credential, approval or purchase; when they "
         "answer as a comment the dispatcher re-runs this task), 'transient' "
-        "(you are waiting on a machine or process outside this board with a "
-        "known finish, e.g. a build or another agent's run; the dispatcher "
-        "re-runs this task after ``resume_after`` seconds, at least 10 minutes, "
-        "a bounded number of times, then asks a person), 'capability' (a hard "
+        "(a retryable failure on a non-goal task; the dispatcher re-runs this "
+        "task after ``resume_after`` seconds, at least 10 minutes, a bounded "
+        "number of times, then asks a person), 'capability' (a hard "
         "wall: no access, an action no agent can do; stays blocked until an "
         "operator acts), or 'dependency' (waiting on a parent task on this "
         "board; recorded as needs_input when no parent is open). Never mark a "
-        "wait on a person as transient. ``reason`` is shown to the human on the "
+        "wait on a person as transient. Goal-mode supervisors cannot transiently "
+        "block: keep ordinary coding/build waits in the same session using the "
+        "existing process wait or completion notification. ``reason`` is shown to the human on the "
         "board. Use for genuine blockers only — don't block on things you can "
         "resolve yourself."
     ),
@@ -194,8 +209,8 @@ KANBAN_BLOCK_SCHEMA = _schema(
             "enum": ["dependency", "needs_input", "capability", "transient"],
             "description": (
                 "Why you're blocked. 'needs_input' re-runs when a comment "
-                "answers you; 'transient' re-runs on a bounded timer (machine "
-                "waits only); 'capability' waits for an operator; 'dependency' "
+                "answers you; 'transient' re-runs on a bounded timer (non-goal "
+                "tasks only); 'capability' waits for an operator; 'dependency' "
                 "waits for an unfinished parent task."
             ),
         },

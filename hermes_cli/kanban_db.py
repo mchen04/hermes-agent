@@ -3213,10 +3213,12 @@ def block_task(
             )
     with write_txn(conn):
         cur_row = conn.execute(
-            "SELECT status, block_kind, block_recurrences FROM tasks WHERE id = ?", (task_id,),
+            "SELECT status, block_kind, block_recurrences, goal_mode FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if cur_row is None:
             return False
+        from hermes_cli.kanban_recovery import guard_goal_transient_block
+        guard_goal_transient_block(cur_row, kind=kind, force=force)
         source_status = _retry_status_for_run(conn, task_id) if cur_row["status"] == "running" else "ready"
         requested_kind = kind
         rekind_reason = None

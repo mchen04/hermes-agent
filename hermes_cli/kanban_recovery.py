@@ -6,6 +6,21 @@ import time
 
 IDENTITY = ('provider', 'account', 'resource')
 
+GOAL_WAIT_MESSAGE = (
+    "Goal-mode workers keep ordinary machine/build/coding waits in the same session. "
+    "Keep the existing coding owner and claim; wait on its process or completion notification. "
+    "Use needs_input for a person's decision or dependency for an unfinished parent task. "
+    "A transient block would discard this supervisor and start another one."
+)
+
+
+def guard_goal_transient_block(row, *, kind, force=False):
+    """LOCAL-PATCH kanban-continuity: timers must not replace a live goal supervisor."""
+    if row["goal_mode"] and kind == "transient" and not force:
+        from hermes_cli.kanban_db import BlockRejected
+
+        raise BlockRejected(GOAL_WAIT_MESSAGE)
+
 
 def recovery_dependency(payload):
     if not isinstance(payload, dict):

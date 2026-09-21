@@ -330,15 +330,14 @@ def test_block_goal_mode_rejects_missing_kind(monkeypatch, tmp_path):
 
 def test_block_goal_mode_rejects_disallowed_kind(monkeypatch, tmp_path):
     """`capability` is a valid kind in general but must not let a goal_mode
-    worker exit the loop without going through the judge. (`transient` is
-    allowed since LOCAL-PATCH kanban-stranded-resume: it returns to the same
-    loop automatically, so it is not an escape.)"""
+    worker exit the loop without going through the judge. A transient block
+    would discard the supervisor's context instead of waiting in its session."""
     from tools import kanban_tools as kt
     from hermes_cli import kanban_db as kb
     from hermes_cli import kanban_db_connect as kbc
 
     tid = _make_goal_mode_worker_env(monkeypatch, tmp_path)
-    for kind in ("capability",):
+    for kind in ("capability", "transient"):
         out = kt._handle_block({"reason": "blocked", "kind": kind})
         d = json.loads(out)
         assert "error" in d, f"kind={kind} should be rejected for goal_mode"
