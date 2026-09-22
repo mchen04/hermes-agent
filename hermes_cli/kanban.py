@@ -881,6 +881,14 @@ def _goal_gate_error(conn, tid: str, evidence: str, handoff: str, blocked_hint: 
     None to allow."""
     verdict, rejection = _goal_mode_handoff_rejection(kb.get_task(conn, tid), evidence)
     if verdict == "blocked":
+        # LOCAL-PATCH kanban-judge-transient: a provider failure parks the card on a timer instead.
+        from hermes_cli.goals import block_provider_failure, provider_failure_reason
+
+        transient = provider_failure_reason(rejection or "", evidence)
+        if transient is not None and block_provider_failure(kb, conn, tid, transient,
+                                                            expected_run_id=_worker_run_id_for(tid)):
+            return (f"kanban: goal {handoff} of {tid} rejected: provider failure, not an unachievable "
+                    f"goal — {rejection}. The card is parked as a transient block for automatic retry.")
         return (f"kanban: goal {handoff} of {tid} rejected: judge ruled "
                 f"the goal unachievable — {rejection}. {blocked_hint}")
     if rejection is not None:

@@ -135,6 +135,11 @@ JUDGE_SYSTEM_PROMPT = (
     "itself names. Never infer one the response does not name — an unnamed "
     "401 belongs to the model provider the agent was calling, not to some "
     "other service's token.\n\n"
+    # LOCAL-PATCH kanban-judge-transient: a provider outage is a retry, not a verdict on the goal.
+    "A provider or transport failure the agent hit (a timeout, HTTP 529 Overloaded, a "
+    "rate limit, 'API call failed after N attempts') never makes a goal unachievable. "
+    "Still return BLOCKED and quote that error verbatim; the supervisor retries it later "
+    "instead of giving up.\n\n"
     "WAIT — the goal is NOT done, but the next step is to wait for async "
     "work to finish rather than act again. Choose this ONLY when the agent's "
     "progress is genuinely gated on something running on its own:\n"
@@ -1583,6 +1588,34 @@ KANBAN_GOAL_FINALIZE_TEMPLATE = (
 
 # Worker-driven terminal task statuses → loop outcome. The card's own acceptance criteria are the
 # goal; the worker already has the full task body, so these outcomes stop the loop cleanly.
+# LOCAL-PATCH kanban-judge-transient (2026-09-21): the judge saw the coder's provider fail ("Non-streaming API
+# call timed out after 1200s", "upstream Claude API 529 Overloaded") and ruled the goal unachievable, which
+# parked cards for a human. A provider failure is transient: park the card with a timer instead.
+PROVIDER_FAILURE_RE = re.compile(
+    r"timed out after \d+s|API call failed after|\b529\b|Overloaded|Request timed out|RESOURCE_EXHAUSTED"
+    r"|rate limit|Non-streaming API call|failed on (?:all )?three attempts",
+    re.IGNORECASE,
+)
+PROVIDER_FAILURE_RESUME_SECONDS = 600
+PROVIDER_FAILURE_PREFIX = "Provider failure (auto-retry): "
+
+
+def provider_failure_reason(reason: str, response: str = "") -> Optional[str]:
+    """The block reason for a judge BLOCKED verdict caused by a provider failure, else None.
+
+    Matches the judge's reason first, then the worker response it judged."""
+    if any(text and PROVIDER_FAILURE_RE.search(text) for text in (reason, response)):
+        return PROVIDER_FAILURE_PREFIX + (reason or "").strip()
+    return None
+
+
+def block_provider_failure(kb, conn, task_id: str, reason: str, *, expected_run_id: Optional[int] = None) -> bool:
+    """Park ``task_id`` as a timed transient block. ``force`` bypasses the goal-mode transient guard:
+    this supervisor is ending on purpose and the dispatcher brings the card back."""
+    return kb.block_task(conn, task_id, reason=reason, kind="transient", expected_run_id=expected_run_id,
+                         resume_after=PROVIDER_FAILURE_RESUME_SECONDS, force=True)
+
+
 _KANBAN_TERMINAL_STATUSES = {
     "done": ("completed_by_worker", "worker completed the task", "task {task_id} completed by worker after {turns} turn(s)"),
     "blocked": ("blocked_by_worker", "worker blocked the task", "task {task_id} blocked by worker after {turns} turn(s)"),
@@ -1602,8 +1635,13 @@ def run_kanban_goal_loop(
     max_turns: int = DEFAULT_MAX_TURNS,
     first_response: str = "",
     log=None,
+    transient_block_fn=None,
 ) -> Dict[str, Any]:
     """Drive a kanban worker through a Ralph-style goal loop.
+
+    ``transient_block_fn(reason, resume_after)`` parks the card on a timer when the judge's BLOCKED
+    verdict is really a provider failure (LOCAL-PATCH kanban-judge-transient); without it ``block_fn``
+    is used.
 
     Each iteration: stop if the worker already terminated the task (``kanban_complete`` /
     ``kanban_block`` / review hand-off); otherwise judge the latest response against ``goal_text``
@@ -1666,6 +1704,17 @@ def run_kanban_goal_loop(
         _log(f"kanban goal loop: turn {turns_used}/{max_turns} verdict={verdict} reason={_truncate(reason, 120)}")
 
         if verdict == "blocked":
+            transient = provider_failure_reason(reason, last_response)
+            if transient is not None:
+                _log(f"kanban goal loop: task {task_id} hit a provider failure; parking for auto-retry")
+                try:
+                    if transient_block_fn is not None:
+                        transient_block_fn(transient, PROVIDER_FAILURE_RESUME_SECONDS)
+                    else:
+                        block_fn(transient)
+                except Exception as exc:
+                    _log(f"kanban goal loop: transient block failed ({exc})")
+                return _result("blocked_transient", f"provider failure: {reason}")
             # Unachievable is NOT done: block the card with the judge's reason now instead of
             # re-poking an impossible goal, and never let it land in done.
             # The judge ruled the goal cannot be satisfied at all — this is NOT done (#100954).
@@ -1712,5 +1761,6 @@ __all__ = [
     "JUDGE_USER_PROMPT_WITH_SUBGOALS_TEMPLATE", "JUDGE_USER_PROMPT_WITH_CONTRACT_TEMPLATE",
     "DRAFT_CONTRACT_SYSTEM_PROMPT", "KANBAN_GOAL_CONTINUATION_TEMPLATE", "KANBAN_GOAL_FINALIZE_TEMPLATE",
     "DEFAULT_MAX_TURNS", "load_goal", "save_goal", "clear_goal", "migrate_goal_to_session", "judge_goal",
-    "run_kanban_goal_loop",
+    "run_kanban_goal_loop", "provider_failure_reason", "block_provider_failure",
+    "PROVIDER_FAILURE_RESUME_SECONDS", "PROVIDER_FAILURE_PREFIX",
 ]

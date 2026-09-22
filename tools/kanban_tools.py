@@ -16,7 +16,9 @@ from contextlib import contextmanager
 from typing import Any, Callable, Optional
 
 from agent.redact import redact_sensitive_text
-from hermes_cli.goals import judge_goal
+from hermes_cli.goals import (
+    PROVIDER_FAILURE_RESUME_SECONDS, block_provider_failure, judge_goal, provider_failure_reason,
+)
 from tools.registry import no_cache_check_fn, registry, tool_error
 from hermes_cli.config import cfg_get, load_config
 from tools.kanban_tools_schemas import (
@@ -385,7 +387,7 @@ _GOAL_GATE_MESSAGES = {
             "matching the card before requesting review.")}}
 
 
-def _goal_gate(tool_name: str, task, tid: str, evidence: str) -> None:
+def _goal_gate(tool_name: str, task, tid: str, evidence: str, *, kb=None, conn=None) -> None:
     """Goal-mode pre-handoff judge gate: a worker must not complete / request
     review before acceptance criteria are met. ``blocked`` gets its own
     guidance; any other non-``done`` verdict gets the ``continue`` guidance.
@@ -414,6 +416,16 @@ def _goal_gate(tool_name: str, task, tid: str, evidence: str) -> None:
         return
     if verdict == "done":
         return
+    if verdict == "blocked" and kb is not None:
+        # LOCAL-PATCH kanban-judge-transient: a provider failure is not an unachievable goal. Park the
+        # card on a timer here — kanban_block refuses transient on goal_mode, so the worker cannot.
+        transient = provider_failure_reason(reason, evidence)
+        if transient is not None and block_provider_failure(kb, conn, tid, transient,
+                                                            expected_run_id=_worker_run_id(tid)):
+            raise _Reject(
+                f"{tool_name} rejected: the judge saw a provider failure, not a finished goal — {reason}. "
+                f"The card is parked as a transient block and the dispatcher retries it in "
+                f"{PROVIDER_FAILURE_RESUME_SECONDS // 60} minutes. Stop work on this task now.")
     key = "blocked" if verdict == "blocked" else "continue"
     raise _Reject(_GOAL_GATE_MESSAGES[tool_name][key].format(reason=reason, tid=tid))
 
@@ -606,7 +618,7 @@ def _handle_complete(args: dict, **kw) -> str:
         # judge by calling kanban_complete before acceptance criteria are met. Only enforce when a judge is
         # actually reachable — see _goal_judge_available for why an unavailable judge fails open.
         task = kb.get_task(conn, tid)
-        _goal_gate("kanban_complete", task, tid, (summary or result or "").strip())
+        _goal_gate("kanban_complete", task, tid, (summary or result or "").strip(), kb=kb, conn=conn)
         try:
             ok = kb.complete_task(
                 conn, tid, result=result, summary=summary, metadata=metadata,
@@ -727,7 +739,7 @@ def _handle_request_review(args: dict, **kw) -> str:
                f"reviewer profile {reviewer!r} is not installed. "
                f"Installed profiles: {', '.join(list_profile_names())}")
     with _board(args.get("board")) as (kb, conn):
-        _goal_gate("kanban_request_review", kb.get_task(conn, tid), tid, summary)
+        _goal_gate("kanban_request_review", kb.get_task(conn, tid), tid, summary, kb=kb, conn=conn)
         try:
             ok, fail_reason = kb.request_review(
                 conn, tid, summary=summary, metadata=metadata, reviewer=reviewer,
