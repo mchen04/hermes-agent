@@ -945,6 +945,16 @@ def _cmd_complete(args: argparse.Namespace) -> int:
 
 
 def _cmd_edit(args: argparse.Namespace) -> int:
+    body, result = getattr(args, "body", None), getattr(args, "result", None)
+    if (body is None) == (result is None):
+        return _err("kanban: edit takes exactly one of --result (done task) or --body (open task)", 2)
+    if body is not None:
+        # LOCAL-PATCH kanban-amend: the brief of an open card changes with the objective.
+        reason = getattr(args, "reason", None) or "brief amended via CLI"
+        with kbc.connect_closing() as conn:
+            ok = kb.amend_task_body(conn, args.task_id, body=body, author=_profile_author(), reason=reason)
+        return _ok_or_err(ok, f"cannot amend {args.task_id} (unknown id or task is done/archived)",
+                          f"Amended {args.task_id}")
     metadata, rc = _parse_metadata_flag(getattr(args, "metadata", None))
     if rc:
         return rc

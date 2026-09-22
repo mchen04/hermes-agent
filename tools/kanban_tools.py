@@ -22,6 +22,7 @@ from hermes_cli.goals import (
 from tools.registry import no_cache_check_fn, registry, tool_error
 from hermes_cli.config import cfg_get, load_config
 from tools.kanban_tools_schemas import (
+    KANBAN_AMEND_SCHEMA,
     KANBAN_ATTACH_SCHEMA,
     KANBAN_ATTACH_URL_SCHEMA, KANBAN_ATTACHMENTS_SCHEMA, KANBAN_BLOCK_SCHEMA, KANBAN_COMMENT_SCHEMA,
     KANBAN_COMPLETE_SCHEMA, KANBAN_CREATE_SCHEMA, KANBAN_HEARTBEAT_SCHEMA, KANBAN_LINK_SCHEMA,
@@ -810,6 +811,22 @@ def _handle_comment(args: dict, **kw) -> str:
         return _ok(task_id=tid, comment_id=cid)
 
 
+@_kanban_handler("kanban_amend")
+def _handle_amend(args: dict, **kw) -> str:
+    """LOCAL-PATCH kanban-amend: replace the owned task's brief when the objective changed mid-card."""
+    tid = _worker_guard("kanban_amend", args)
+    body = _redact(_require_text(args, "body", "body is required — pass the full replacement brief"))
+    reason = _redact(_require_text(args, "reason", "reason is required — one line on why the brief changed"))
+    author = os.environ.get("HERMES_PROFILE") or "worker"
+    with _board(args.get("board")) as (kb, conn):
+        try:
+            ok = kb.amend_task_body(conn, tid, body=str(body), author=author, reason=str(reason))
+        except ValueError as exc:
+            raise _Reject(str(exc))
+        _check(ok, f"could not amend {tid} (unknown id, or the task is done/archived)")
+        return _ok(task_id=tid)
+
+
 def _store_attachment(board, tid, filename, data, content_type) -> str:
     """Store via ``kanban_db.store_attachment_bytes`` (shared size cap, per-task
     dir, metadata row) so agent, dashboard, and CLI surfaces stay in lockstep."""
@@ -1111,6 +1128,7 @@ _TOOLS = (
     ("kanban_request_changes", KANBAN_REQUEST_CHANGES_SCHEMA, _handle_request_changes, "↩"),
     ("kanban_heartbeat", KANBAN_HEARTBEAT_SCHEMA, _handle_heartbeat, "💓"),
     ("kanban_comment", KANBAN_COMMENT_SCHEMA, _handle_comment, "💬"),
+    ("kanban_amend", KANBAN_AMEND_SCHEMA, _handle_amend, "✏"),
     ("kanban_attach", KANBAN_ATTACH_SCHEMA, _handle_attach, "📎"),
     ("kanban_attach_url", KANBAN_ATTACH_URL_SCHEMA, _handle_attach_url, "📎"),
     ("kanban_attachments", KANBAN_ATTACHMENTS_SCHEMA, _handle_attachments, "📎"),

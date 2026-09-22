@@ -1636,12 +1636,14 @@ def run_kanban_goal_loop(
     first_response: str = "",
     log=None,
     transient_block_fn=None,
+    goal_text_fn=None,
 ) -> Dict[str, Any]:
     """Drive a kanban worker through a Ralph-style goal loop.
 
     ``transient_block_fn(reason, resume_after)`` parks the card on a timer when the judge's BLOCKED
     verdict is really a provider failure (LOCAL-PATCH kanban-judge-transient); without it ``block_fn``
-    is used.
+    is used. ``goal_text_fn()`` re-reads the brief before each judge call so an amended card
+    (LOCAL-PATCH kanban-amend) is judged on its current body.
 
     Each iteration: stop if the worker already terminated the task (``kanban_complete`` /
     ``kanban_block`` / review hand-off); otherwise judge the latest response against ``goal_text``
@@ -1689,6 +1691,12 @@ def run_kanban_goal_loop(
             # Reclaimed / archived / unexpected — let the dispatcher own it.
             _log(f"kanban goal loop: task {task_id} status={status!r}; stopping")
             return _result("stopped", f"status={status}")
+
+        if goal_text_fn is not None:
+            try:
+                goal_text = goal_text_fn() or goal_text
+            except Exception as exc:
+                _log(f"kanban goal loop: goal re-read failed ({exc}); keeping the previous brief")
 
         # The between-turns judge runs outside any agent turn: bind the per-task relay-affinity
         # scope (same shape as the handoff gates) so the relay does not reject the call (#113669).

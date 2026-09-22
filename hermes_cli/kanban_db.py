@@ -3172,6 +3172,32 @@ def edit_completed_task_result(
     return True
 
 
+def amend_task_body(
+    conn: sqlite3.Connection, task_id: str, *, body: str, author: str, reason: str,
+) -> bool:
+    """LOCAL-PATCH kanban-amend (2026-09-21): replace an open task's brief when the objective changed
+    mid-card, so the goal judge checks the new brief instead of rejecting completion against the old one.
+    Records an ``edited`` event (``build_task_read`` re-sends the full task on it) and an ``AMENDED: reason``
+    comment. False for an unknown, done, or archived task."""
+    if not reason or not reason.strip():
+        raise ValueError("amend reason is required")
+    if not author or not author.strip():
+        raise ValueError("amend author is required")
+    with write_txn(conn):
+        status = _task_status(conn, task_id)
+        if status is None or status in ("done", "archived"):
+            return False
+        conn.execute("UPDATE tasks SET body = ? WHERE id = ?", (body, task_id))
+        _insert_comment(conn, task_id, author.strip(), f"AMENDED: {reason.strip()}", int(time.time()))
+        _append_event(
+            conn, task_id, "edited",
+            {"fields": ["body"], "reason": reason.strip(), "author": author.strip(), "body_len": len(body or "")},
+            run_id=_current_run_id(conn, task_id),
+        )
+    notify_task_updated(conn, task_id, ("body",))
+    return True
+
+
 def block_task(
     conn: sqlite3.Connection, task_id: str, *, reason: Optional[str] = None,
     kind: Optional[str] = None, expected_run_id: Optional[int] = None,

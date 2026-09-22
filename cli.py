@@ -4073,6 +4073,14 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str, run_turn=None
     if not goal_text:
         return
 
+    def _goal_text() -> str:
+        # LOCAL-PATCH kanban-amend: the brief can change mid-card; judge the current one.
+        with _kbc.connect_closing() as c:
+            current = _kb.get_task(c, task_id)
+        if current is None:
+            return goal_text
+        return "\n\n".join(p for p in (current.title or "", current.body) if p).strip() or goal_text
+
     def _quiet_turn(prompt: str) -> str:
         result = cli.agent.run_conversation(user_message=prompt, conversation_history=cli.conversation_history)
         _sync_cli_session_id_from_agent(cli)
@@ -4098,6 +4106,7 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str, run_turn=None
     _run_loop(
         task_id=task_id, goal_text=goal_text, run_turn=run_turn or _quiet_turn,
         task_status_fn=_task_status, block_fn=_block, transient_block_fn=_block_transient,
+        goal_text_fn=_goal_text,
         max_turns=task.goal_max_turns or _DEF_TURNS, first_response=first_response or "",
         log=log or (lambda m: logger.info("%s", m)),
     )

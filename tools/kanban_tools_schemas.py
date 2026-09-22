@@ -334,6 +334,27 @@ KANBAN_COMMENT_SCHEMA = _schema(
     ["task_id", "body"],
 )
 
+# LOCAL-PATCH kanban-amend
+KANBAN_AMEND_SCHEMA = _schema(
+    "kanban_amend",
+    (
+        "Replace your current task's brief (body) when the objective changed "
+        "mid-card — for example a person commented that the experiments should "
+        "stop and the result be published as-is. The goal-mode completion judge "
+        "checks the task body, so after such a change amend it first, then "
+        "finish with kanban_complete. Pass the FULL replacement brief, not a "
+        "diff; keep any acceptance criteria that still apply. Records an "
+        "``edited`` event and an ``AMENDED: <reason>`` comment. Only your own "
+        "task can be amended, and not a done or archived one."
+    ),
+    {
+        "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
+        "body": _prop("string", "The full replacement brief (Markdown)."),
+        "reason": _prop("string", "One line on why the brief changed (who asked, what changed)."),
+    },
+    ["body", "reason"],
+)
+
 KANBAN_ATTACH_SCHEMA = _schema(
     "kanban_attach",
     (

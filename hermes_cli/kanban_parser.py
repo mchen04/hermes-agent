@@ -290,9 +290,13 @@ _SPECS = [
     ], help="Mark one or more tasks done"),
     _cmd("edit", [
         _TASK_ID,
-        _arg("--result", required=True, help="Backfilled task result text for a done task"),
+        _arg("--result", help="Backfilled task result text for a done task"),
         *_STEP_HANDOFF,
-    ], help="Edit recovery fields on an already-completed task"),
+        # LOCAL-PATCH kanban-amend
+        _arg("--body", help="Replacement brief for an open (not done) task: records an edited event "
+                            "and an AMENDED comment so a running goal-mode worker is judged on the new brief"),
+        _reason("With --body: one line on why the brief changed"),
+    ], help="Edit a done task's recovery fields (--result), or amend an open task's brief (--body)"),
     _cmd("block", [
         _TASK_ID,
         _arg("reason", nargs="*", help="Reason (also appended as a comment)"),
