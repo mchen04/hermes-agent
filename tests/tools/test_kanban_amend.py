@@ -103,7 +103,7 @@ def test_cli_edit_body_unknown_id_fails_cleanly(board, capsys):
     rc = kanban_cli._cmd_edit(_edit_args(task_id="t_nope", body="x", reason="y"))
     assert rc == 1 and "cannot amend t_nope" in capsys.readouterr().err
     rc = kanban_cli._cmd_edit(_edit_args(task_id="t_nope"))
-    assert rc == 2 and "exactly one of --result" in capsys.readouterr().err
+    assert rc == 2 and "provide --title, --body, --priority, or --result" in capsys.readouterr().err
 
 
 def test_cli_edit_result_still_backfills_a_done_task(board, capsys):

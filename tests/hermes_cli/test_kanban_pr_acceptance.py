@@ -100,7 +100,7 @@ def test_pr_completion_requires_current_required_evidence(github):
         for conclusion in ("failure", "pending", "cancelled", "timed_out", "action_required", "neutral", "skipped", None, "success"):
             github.update(conclusion=conclusion, head="a" * 40)
             tid = kb.create_task(conn, title="Publish", completion_contract="acme/repo")
-            ok = kb.complete_task(conn, tid, metadata={"published_pr": "https://github.com/acme/repo/pull/7"})
+            ok = kb.complete_task(conn, tid, result="done", metadata={"published_pr": "https://github.com/acme/repo/pull/7"})
             assert ok is (conclusion == "success")
             task = kb.get_task(conn, tid)
             assert (task.status == "done") is ok
@@ -115,13 +115,13 @@ def test_pr_completion_requires_current_required_evidence(github):
             github.update(conclusion="success", head="a" * 40)
             github[fault] = True
             tid = kb.create_task(conn, title=fault, completion_contract="acme/repo")
-            assert not kb.complete_task(conn, tid, metadata={"published_pr": "https://github.com/acme/repo/pull/7"})
+            assert not kb.complete_task(conn, tid, result="done", metadata={"published_pr": "https://github.com/acme/repo/pull/7"})
             assert kb.get_task(conn, tid).status != "done"
             github.pop(fault)
         # Omission and a sibling repository cannot downgrade the stored declaration.
         tid = kb.create_task(conn, title="publish", completion_contract="acme/repo")
         assert not kb.complete_task(conn, tid, summary="local green")
-        assert not kb.complete_task(conn, tid, metadata={"published_pr": "https://github.com/other/repo/pull/7"})
+        assert not kb.complete_task(conn, tid, result="done", metadata={"published_pr": "https://github.com/other/repo/pull/7"})
         before = len(github["requests"])
         local = kb.create_task(conn, title="local", completion_contract="local-only")
         assert kb.complete_task(conn, local, summary="https://github.com/acme/repo/pull/7 is background context")
@@ -140,7 +140,7 @@ def test_acceptance_receipts_and_terminal_write_share_run_ownership(github):
                     assert kb.unblock_task(rival, tid)
                     github["replacement"] = kb.claim_task(rival, tid).current_run_id
             github.update(conclusion=conclusion, race=reclaim)
-            assert not kb.complete_task(conn, tid, expected_run_id=run_id,
+            assert not kb.complete_task(conn, tid, result="done", expected_run_id=run_id,
                 metadata={"published_pr": "https://github.com/acme/repo/pull/7"})
             assert kb.get_task(conn, tid).current_run_id == github["replacement"]
             assert github["replacement"] != run_id
@@ -155,7 +155,7 @@ def test_unprotected_pr_uses_actual_ci_and_distinguishes_absent_from_pending(git
         for conclusion in ("failure", "pending", "cancelled", "timed_out", "success"):
             github.update(conclusion=conclusion, head="a" * 40)
             tid = kb.create_task(conn, title="Publish reviewed changes", completion_contract="acme/repo")
-            ok = kb.complete_task(conn, tid, metadata={"published_pr": "https://github.com/acme/repo/pull/7"})
+            ok = kb.complete_task(conn, tid, result="done", metadata={"published_pr": "https://github.com/acme/repo/pull/7"})
             assert ok is (conclusion == "success")
             receipt = json.loads(conn.execute(
                 "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance' ORDER BY id DESC", (tid,)
@@ -163,12 +163,12 @@ def test_unprotected_pr_uses_actual_ci_and_distinguishes_absent_from_pending(git
             assert receipt["checks"] and receipt["head_sha"] == "a" * 40
         github.update(empty=True, workflow=True)
         tid = kb.create_task(conn, title="CI has not started", completion_contract="acme/repo")
-        assert not kb.complete_task(conn, tid, metadata={"published_pr": "https://github.com/acme/repo/pull/7"})
+        assert not kb.complete_task(conn, tid, result="done", metadata={"published_pr": "https://github.com/acme/repo/pull/7"})
         github["workflow"] = False
-        assert kb.complete_task(conn, tid, metadata={"published_pr": "https://github.com/acme/repo/pull/7"})
+        assert kb.complete_task(conn, tid, result="done", metadata={"published_pr": "https://github.com/acme/repo/pull/7"})
         github.update(workflow=True, workflow_definition='on:\n  schedule:\n    - cron: "0 0 * * *"\n  workflow_dispatch:\njobs: {}')
         tid = kb.create_task(conn, title="Only scheduled/manual workflows", completion_contract="acme/repo")
-        assert kb.complete_task(conn, tid, metadata={"published_pr": "https://github.com/acme/repo/pull/7"})
+        assert kb.complete_task(conn, tid, result="done", metadata={"published_pr": "https://github.com/acme/repo/pull/7"})
 
 
 def test_unprotected_pr_cannot_hide_pending_or_failed_suites(github):
@@ -179,7 +179,7 @@ def test_unprotected_pr_cannot_hide_pending_or_failed_suites(github):
             for suite in ("pending", "startup_failure", "failure", "success"):
                 github.update(empty=empty, suite=suite)
                 tid = kb.create_task(conn, title="Wait for all CI", completion_contract="acme/repo")
-                assert kb.complete_task(conn, tid, metadata={"published_pr": "https://github.com/acme/repo/pull/7"}) is (suite == "success")
+                assert kb.complete_task(conn, tid, result="done", metadata={"published_pr": "https://github.com/acme/repo/pull/7"}) is (suite == "success")
                 receipt = json.loads(conn.execute(
                     "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance' ORDER BY id DESC", (tid,)
                 ).fetchone()[0])
@@ -206,4 +206,4 @@ def test_unrelated_workflows_do_not_require_pr_checks(github, definition, comple
     github.update(required=False, empty=True, workflow=True, workflow_definition=definition+"\njobs: {}")
     with connect() as conn:
         tid = kb.create_task(conn, title="Publish without unrelated automation", completion_contract="acme/repo")
-        assert kb.complete_task(conn, tid, metadata={"published_pr": "https://github.com/acme/repo/pull/7"}) is completes
+        assert kb.complete_task(conn, tid, result="done", metadata={"published_pr": "https://github.com/acme/repo/pull/7"}) is completes
