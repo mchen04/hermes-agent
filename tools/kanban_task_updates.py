@@ -9,6 +9,10 @@ _RUN_FIELDS = tuple("id profile status outcome summary error metadata started_at
 _COMMENT_FIELDS = ("id", "author", "body", "created_at")
 _EVENT_FIELDS = ("id", "kind", "payload", "created_at", "run_id")
 _UPDATE_LIMIT = 100
+# LOCAL-PATCH kanban-compact-read (2026-09-21): a cursor-less read returned every comment and run; cards with
+# 100+ comments produced 115-270 KB per read and spilled to disk each time. Orientation keeps the tail.
+_ORIENT_EVENTS, _ORIENT_COMMENTS, _ORIENT_RUNS = 50, 30, 10
+_ORIENT_NOTE = "older comments/runs omitted; use hermes kanban show <id> for full history"
 
 
 def _fields(obj, names):
@@ -67,8 +71,9 @@ def build_task_read(kb, conn, task, *, cursor=None):
     if cursor is None:
         events = kb.list_events(conn, task.id)
         comments, runs = kb.list_comments(conn, task.id), kb.list_runs(conn, task.id)
-        truncated = {"events": len(events) > 50, "comments": False}
-        events = events[-50:]
+        truncated = {"events": len(events) > _ORIENT_EVENTS, "comments": len(comments) > _ORIENT_COMMENTS,
+                     "runs": len(runs) > _ORIENT_RUNS}
+        events, comments, runs = events[-_ORIENT_EVENTS:], comments[-_ORIENT_COMMENTS:], runs[-_ORIENT_RUNS:]
     else:
         events, comments, runs, truncated = _read_updates(kb, conn, task, cursor, current)
     # A changed brief must be read in full; otherwise its original text is already in context.
@@ -87,4 +92,6 @@ def build_task_read(kb, conn, task, *, cursor=None):
     }
     if cursor is None:
         result["worker_context"] = kb.build_worker_context(conn, task.id)
+        if truncated["comments"] or truncated["runs"]:
+            result["note"] = _ORIENT_NOTE
     return result

@@ -137,3 +137,43 @@ def test_concurrent_comment_is_delivered_on_the_next_snapshot(board, monkeypatch
     monkeypatch.setattr(kb, "list_comments", original)
     second = json.loads(registry.dispatch("kanban_show", {"cursor": first["cursor"]}))
     assert [c["body"] for c in second["comments"]] == ["Decision arriving during a read."]
+
+
+def test_orientation_read_keeps_only_the_latest_comments_and_runs(board):
+    """LOCAL-PATCH kanban-compact-read: a cursor-less read is bounded; cursor reads are unchanged."""
+    from tools.registry import registry
+
+    kb, kbc, tid = board
+    with kbc.connect_closing() as conn:
+        for i in range(40):
+            kb.add_comment(conn, tid, "user", f"note {i}")
+        with kb.write_txn(conn):
+            for i in range(11):  # 1 live run + 11 closed ones
+                conn.execute("INSERT INTO task_runs (task_id, status, started_at, ended_at) VALUES (?, ?, ?, ?)",
+                             (tid, "crashed", 1_000 + i, 1_001 + i))
+    first = json.loads(registry.dispatch("kanban_show", {}))
+    assert len(first["comments"]) == 30
+    assert [c["body"] for c in first["comments"]][0] == "note 10"
+    assert first["comments"][-1]["body"] == "note 39"
+    assert len(first["runs"]) == 10 and first["runs"][0]["id"] == 4 and first["runs"][-1]["id"] == 1  # live run last
+    assert first["truncated"] == {"events": False, "comments": True, "runs": True}
+    assert first["note"].startswith("older comments/runs omitted")
+    assert first["task"]["body"] and first["worker_context"]
+    with kbc.connect_closing() as conn:
+        kb.add_comment(conn, tid, "user", "note 40")
+    second = json.loads(registry.dispatch("kanban_show", {"cursor": first["cursor"]}))
+    assert [c["body"] for c in second["comments"]] == ["note 40"]
+    assert second["truncated"] == {"events": False, "comments": False}
+    assert "note" not in second and "worker_context" not in second
+
+
+def test_orientation_read_without_overflow_has_no_note(board):
+    from tools.registry import registry
+
+    kb, kbc, tid = board
+    with kbc.connect_closing() as conn:
+        kb.add_comment(conn, tid, "user", "one note")
+    first = json.loads(registry.dispatch("kanban_show", {}))
+    assert len(first["comments"]) == 1
+    assert first["truncated"] == {"events": False, "comments": False, "runs": False}
+    assert "note" not in first
