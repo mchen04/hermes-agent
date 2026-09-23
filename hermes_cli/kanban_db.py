@@ -125,6 +125,21 @@ LIVE_OWNER_GRACE_SECONDS = 180
 _AUTO_RESUME_IGNORED_AUTHORS = frozenset({"auto-decomposer", "dispatcher", "system"})
 _AUTO_RESUME_IGNORED_PREFIXES = ("BLOCKED:", "SCHEDULED:", "CHANGES REQUESTED:", "HOLD:", "[swarm:blackboard] ")
 _HOLD_PREFIX = "HOLD:"
+# LOCAL-PATCH kanban-human-resume (2026-09-23): only a human-relayed author answers a block. Hermes writes comments
+# as its profile name, as "worker" (kanban_comment without HERMES_PROFILE: the root front door relaying Michael),
+# or as these person/operator labels. Any other author (an outside agent such as "Codex" passing --author) never
+# resumes a parked card.
+_HUMAN_RELAY_AUTHORS = frozenset({"michael", "user", "operator", "dashboard", "desktop", "worker"})
+
+
+def _human_relay_authors() -> frozenset:
+    names = set(_HUMAN_RELAY_AUTHORS) | {"default"}
+    try:
+        from hermes_cli.profiles import list_profile_names
+        names.update(n.lower() for n in list_profile_names())
+    except Exception:
+        pass
+    return frozenset(names)
 # Event kinds that mark real progress or a human decision; the timer budget counts only resumes after the newest one.
 _AUTO_RESUME_RESET_KINDS = ("completed", "review_requested", "changes_requested", "gave_up", "promoted_manual", "created")
 
@@ -3830,6 +3845,7 @@ def _auto_resume_answers(conn: sqlite3.Connection, task_id: str, blocked_at: int
     ).fetchall()
     held = False
     answers = []
+    humans = _human_relay_authors() if rows else frozenset()
     for c in rows:
         body = str(c["body"] or "")
         if body.startswith(_HOLD_PREFIX):
@@ -3837,6 +3853,8 @@ def _auto_resume_answers(conn: sqlite3.Connection, task_id: str, blocked_at: int
             continue
         if (c["author"] or "") in _AUTO_RESUME_IGNORED_AUTHORS or body.startswith(_AUTO_RESUME_IGNORED_PREFIXES):
             continue
+        if (c["author"] or "").strip().lower() not in humans:
+            continue  # LOCAL-PATCH kanban-human-resume: an agent's comment is not a person's answer
         answers.append(c)
     return answers, held
 

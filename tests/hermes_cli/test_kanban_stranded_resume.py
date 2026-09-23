@@ -132,7 +132,14 @@ def test_needs_input_resumes_when_a_comment_answers(kanban_home):
         assert _events(conn, tid)[-2:] == ["unblocked", "auto_resumed"]
 
 
+def _make_profile(home, name):
+    profile = home / "profiles" / name
+    profile.mkdir(parents=True)
+    (profile / "config.yaml").write_text("")
+
+
 def test_untyped_worker_block_resumes_on_answer_too(kanban_home):
+    _make_profile(kanban_home, "forge")  # a Hermes profile relays its operator's answer
     with kbc.connect_closing() as conn:
         tid = _running_task(conn)
         assert kb.block_task(conn, tid, reason="handoff pending", expected_run_id=1)
@@ -170,6 +177,44 @@ def test_hold_and_bookkeeping_comments_keep_the_card_parked(kanban_home):
         kb.add_comment(conn, tid, "michael", "continue")
         assert kb.resume_stranded_blocks(conn)
         assert _status(conn, tid) == "ready"
+
+
+# LOCAL-PATCH kanban-human-resume (2026-09-23): on 2026-09-22 00:06 and 00:16 two comments authored "Codex" (an
+# outside agent) on the parked ZergChat card each resumed it, and the worker re-blocked within 30 s. Only a
+# human-relayed author (a Hermes profile, the front door's "worker", or a person/operator/dashboard label) answers.
+def test_outside_agent_comment_does_not_resume_a_parked_card(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn)
+        assert kb.block_task(conn, tid, reason="User-requested stop; resume only on Michael's word",
+                             kind="needs_input", expected_run_id=1)
+        _backdate_all(conn, tid)
+        kb.add_comment(conn, tid, "Codex", "Finalization update: pushed cef398d; keep this card parked.")
+        kb.add_comment(conn, tid, "implementer", "Implementer turn finished; HEAD c9fe2a")
+        assert kb.resume_stranded_blocks(conn) == []
+        assert _status(conn, tid) == "blocked"
+        kb.add_comment(conn, tid, "default", "Michael: resume it")
+        resumed = kb.resume_stranded_blocks(conn)
+        assert resumed and resumed[0]["author"] == "default"
+        assert _status(conn, tid) == "ready"
+
+
+@pytest.mark.parametrize("author", ["michael", "operator", "user", "dashboard", "worker", "Default"])
+def test_human_relay_authors_resume(kanban_home, author):
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn)
+        assert kb.block_task(conn, tid, reason="q", kind="needs_input", expected_run_id=1)
+        _backdate_all(conn, tid)
+        kb.add_comment(conn, tid, author, "go ahead")
+        assert kb.resume_stranded_blocks(conn)
+
+
+def test_outside_agent_comment_does_not_cut_a_transient_timer_short(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn)
+        assert kb.block_task(conn, tid, reason="waiting on CI", kind="transient", expected_run_id=1)
+        _backdate_all(conn, tid)
+        kb.add_comment(conn, tid, "Claude", "CI still running")
+        assert kb.resume_stranded_blocks(conn) == []
 
 
 def test_capability_block_never_auto_resumes(kanban_home):
