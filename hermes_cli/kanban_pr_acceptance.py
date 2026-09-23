@@ -39,6 +39,26 @@ def _api(endpoint: str, *, query: str | None = None, paginate: bool = False):
     return value
 
 
+def supersede_check(contract: str | None, published_pr: str | None) -> tuple[bool, str | None]:
+    """LOCAL-PATCH kanban-pr-supersede (2026-09-23): may ``published_pr`` replace the PR bound in ``contract``?
+
+    ``(False, None)``: not a candidate (no bound PR, other repo, same or older number). ``(True, None)``: a newer
+    PR in the same repository and the bound PR is merged or closed; the caller rebinds and the newer PR's own
+    checks decide. ``(False, detail)``: a candidate that is refused, with the reason for the worker."""
+    bound = _PR.fullmatch(contract or "")
+    new = _PR.fullmatch(published_pr) if isinstance(published_pr, str) else None
+    if not bound or not new or new[1] != bound[1] or int(new[2]) <= int(bound[2]):
+        return False, None
+    try:
+        state = _api(f"repos/{bound[1]}/pulls/{int(bound[2])}").get("state")
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, AttributeError):
+        return False, "Could not read the bound PR's state from GitHub; retry completion."
+    if state != "closed":
+        return False, (f"The task is bound to {contract}, which is still open. Merge or close it before a newer PR "
+                       f"can replace it, or supply metadata.published_pr={contract}.")
+    return True, None
+
+
 def collect_acceptance(contract: str, published_pr: str | None) -> dict:
     receipt = {"ok": False, "classification": "missing", "head_sha": None,
                "pr_url": published_pr, "checks": [],

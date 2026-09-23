@@ -63,7 +63,11 @@ def github(tmp_path, monkeypatch):
                 definition = state.get("workflow_definition", "on: [push, pull_request]\njobs: {}")
                 value = {"encoding": "base64", "content": base64.b64encode(definition.encode()).decode()}
             elif "/pulls/" in self.path:
-                value = {"head": {"sha": sha}, "base": {"ref": "main"}, "state": "open"}
+                number = int(self.path.rsplit("/", 1)[1])
+                pr_state = state.get("pull_states", {}).get(number, "open")
+                value = {"head": {"sha": sha}, "base": {"ref": "main"}, "number": number,
+                         "state": "closed" if pr_state in {"closed", "merged"} else "open",
+                         "merged": pr_state == "merged"}
             else:
                 self.send_error(404)
                 return
@@ -207,3 +211,57 @@ def test_unrelated_workflows_do_not_require_pr_checks(github, definition, comple
     with connect() as conn:
         tid = kb.create_task(conn, title="Publish without unrelated automation", completion_contract="acme/repo")
         assert kb.complete_task(conn, tid, result="done", metadata={"published_pr": "https://github.com/acme/repo/pull/7"}) is completes
+
+
+# LOCAL-PATCH kanban-pr-supersede (2026-09-23): Pancake's card bound #69 (merged 09-21). The gate then rejected the
+# real follow-up #73 ("Supply metadata.published_pr matching the persisted completion contract"), the worker passed
+# #69 and the gate passed on #69's old head. A newer PR in the same repo replaces a bound PR that is no longer open,
+# and the newer PR's own checks decide.
+def _bound_task(conn, number=69):
+    tid = kb.create_task(conn, title="Pancake hardening", completion_contract="acme/repo")
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET completion_contract=? WHERE id=?",
+                     (f"https://github.com/acme/repo/pull/{number}", tid))
+    return tid
+
+
+def _receipts(conn, tid):
+    return [json.loads(r[0]) for r in conn.execute(
+        "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance' ORDER BY id", (tid,))]
+
+
+def test_newer_pr_supersedes_a_merged_bound_pr(github):
+    github.update(conclusion="success", pull_states={69: "merged"})
+    with connect() as conn:
+        tid = _bound_task(conn)
+        assert kb.complete_task(conn, tid, result="done", metadata={"published_pr": "https://github.com/acme/repo/pull/73"})
+        assert kb.get_task(conn, tid).completion_contract == "https://github.com/acme/repo/pull/73"
+        receipt = _receipts(conn, tid)[-1]
+        assert receipt["ok"] and receipt["pr_url"].endswith("/pull/73")
+        assert receipt["superseded_pr"] == "https://github.com/acme/repo/pull/69"
+        assert any(r.endswith("/pulls/73") for r in github["requests"])
+
+
+def test_superseding_pr_must_pass_its_own_checks(github):
+    github.update(conclusion="failure", pull_states={69: "merged"})
+    with connect() as conn:
+        tid = _bound_task(conn)
+        assert not kb.complete_task(conn, tid, result="done", metadata={"published_pr": "https://github.com/acme/repo/pull/73"})
+        assert kb.get_task(conn, tid).status != "done"
+        assert _receipts(conn, tid)[-1]["classification"] == "failure"
+
+
+@pytest.mark.parametrize("published, bound_state", [
+    ("https://github.com/acme/repo/pull/73", "open"),     # the bound PR is still live: no swap to a sibling
+    ("https://github.com/acme/repo/pull/60", "merged"),   # an older PR never replaces the bound one
+    ("https://github.com/other/repo/pull/73", "merged"),  # another repository never replaces it
+])
+def test_supersede_refusals_keep_the_bound_pr(github, published, bound_state):
+    github.update(conclusion="success", pull_states={69: bound_state})
+    with connect() as conn:
+        tid = _bound_task(conn)
+        assert not kb.complete_task(conn, tid, result="done", metadata={"published_pr": published})
+        assert kb.get_task(conn, tid).completion_contract == "https://github.com/acme/repo/pull/69"
+        assert kb.get_task(conn, tid).status != "done"
+        if bound_state == "open":
+            assert "still open" in _receipts(conn, tid)[-1]["detail"]

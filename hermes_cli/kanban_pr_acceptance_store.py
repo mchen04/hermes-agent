@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from hermes_cli.kanban_db_connect import write_txn
-from hermes_cli.kanban_pr_acceptance import _PR, collect_acceptance
+from hermes_cli.kanban_pr_acceptance import _PR, collect_acceptance, supersede_check
 
 
 def _snapshot(conn, task_id):
@@ -29,7 +29,22 @@ def prepare_acceptance(conn, task_id, expected_run_id, metadata):
             conn.execute("UPDATE tasks SET completion_contract=? WHERE id=?", (published_pr, task_id))
         snapshot = (run_id, status, published_pr)
         contract = published_pr
-    return snapshot, collect_acceptance(contract, published_pr)
+        return snapshot, collect_acceptance(contract, published_pr)
+    # LOCAL-PATCH kanban-pr-supersede: a newer PR in the same repo replaces a bound PR that is merged or closed
+    # (Pancake's merged #69 pinned the card and its real follow-up #73 was refused).
+    supersede, refusal = supersede_check(contract, published_pr)
+    if supersede:
+        with write_txn(conn):
+            if _snapshot(conn, task_id) != snapshot:
+                return False
+            conn.execute("UPDATE tasks SET completion_contract=? WHERE id=?", (published_pr, task_id))
+        receipt = collect_acceptance(published_pr, published_pr)
+        receipt["superseded_pr"] = contract
+        return (run_id, status, published_pr), receipt
+    receipt = collect_acceptance(contract, published_pr)
+    if refusal and not receipt["ok"]:
+        receipt["detail"] = refusal
+    return snapshot, receipt
 
 
 def record_acceptance(conn, task_id, acceptance):
