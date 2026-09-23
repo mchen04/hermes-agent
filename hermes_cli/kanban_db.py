@@ -3276,6 +3276,11 @@ def amend_task_body(
         status = _task_status(conn, task_id)
         if status is None or status in ("done", "archived"):
             return False
+        # LOCAL-PATCH kanban-amend-noop (2026-09-23): an identical body is not an amendment; refusing it keeps
+        # the worker from acting on an "AMENDED" notice with nothing changed.
+        current = conn.execute("SELECT body FROM tasks WHERE id = ?", (task_id,)).fetchone()[0]
+        if (current or "").strip() == (body or "").strip():
+            raise ValueError("new body is identical to the current brief; nothing to amend")
         conn.execute("UPDATE tasks SET body = ? WHERE id = ?", (body, task_id))
         _insert_comment(conn, task_id, author.strip(), f"AMENDED: {reason.strip()}", int(time.time()))
         _append_event(

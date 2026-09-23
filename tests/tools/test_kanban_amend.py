@@ -143,3 +143,31 @@ def test_goal_loop_judges_the_amended_brief_between_turns(monkeypatch, board):
                       "Ship the report\n\nPublish and close."]
     with kbc.connect_closing() as conn:
         assert kb.get_task(conn, tid).status == "done"
+
+
+# LOCAL-PATCH kanban-amend-noop (2026-09-23): on 2026-09-22 07:52 and 08:36 two amends wrote a body identical to
+# the current brief; the worker then saw an "amendment notice" with nothing changed. An identical body is refused.
+def test_amend_refuses_identical_body(board):
+    tid, _ = board
+    with kbc.connect_closing() as conn:
+        before = len(kb.list_events(conn, tid)), len(kb.list_comments(conn, tid))
+        with pytest.raises(ValueError, match="identical to the current brief"):
+            kb.amend_task_body(conn, tid, body="  Run all six experiments, then publish.\n", author="michael",
+                               reason="restate")
+        assert (len(kb.list_events(conn, tid)), len(kb.list_comments(conn, tid))) == before
+
+
+def test_worker_amend_identical_body_is_a_clear_error(board):
+    from tools.registry import registry
+
+    out = json.loads(registry.dispatch("kanban_amend", {
+        "body": "Run all six experiments, then publish.", "reason": "restate"}))
+    assert "identical to the current brief" in out["error"]
+
+
+def test_cli_edit_identical_body_is_a_clear_error(board, capsys):
+    tid, _ = board
+    rc = kanban_cli._cmd_edit(_edit_args(task_id=tid, body="Run all six experiments, then publish.", reason="x"))
+    assert rc == 1 and "identical to the current brief" in capsys.readouterr().err
+    with kbc.connect_closing() as conn:
+        assert [e.kind for e in kb.list_events(conn, tid)][-1] != "edited"
