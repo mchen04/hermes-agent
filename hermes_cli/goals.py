@@ -1616,6 +1616,51 @@ def block_provider_failure(kb, conn, task_id: str, reason: str, *, expected_run_
                          resume_after=PROVIDER_FAILURE_RESUME_SECONDS, force=True)
 
 
+# LOCAL-PATCH kanban-judge-memory (2026-09-23): each handoff gate judged the summary alone, so 34 s after the judge
+# rejected Kestrel card t_04dc2922 (no latency, optimization or interruption evidence) a reworded summary with no
+# new evidence passed. The gates record each rejection; the next judge call sees the latest one as a criterion.
+GOAL_REJECTION_EVENT = "goal_rejected"
+# Events after which an earlier rejection no longer applies: the brief changed, or the card finished.
+_GOAL_REJECTION_RESET_KINDS = ("edited", "completed", "created")
+
+
+def record_goal_rejection(kb, conn, task_id: str, reason: str, evidence: str) -> None:
+    """Append a ``goal_rejected`` event with the judge's reason and the rejected handoff text. Best effort."""
+    try:
+        with kb.write_txn(conn):
+            kb._append_event(conn, task_id, GOAL_REJECTION_EVENT,
+                             {"reason": _truncate(reason or "", 800), "evidence": _truncate(evidence or "", 1000)},
+                             run_id=kb._current_run_id(conn, task_id))
+    except Exception as exc:
+        logger.warning("goal judge: could not record rejection for %s: %s", task_id, exc)
+
+
+def prior_rejection_criteria(conn, task_id: str) -> List[str]:
+    """The latest still-applicable rejection as one judge criterion, or ``[]``."""
+    try:
+        marks = ", ".join("?" for _ in _GOAL_REJECTION_RESET_KINDS)
+        row = conn.execute(
+            f"SELECT payload FROM task_events WHERE task_id = ? AND kind = ? AND id > COALESCE("
+            f"(SELECT MAX(id) FROM task_events WHERE task_id = ? AND kind IN ({marks})), 0) "
+            "ORDER BY id DESC LIMIT 1",
+            (task_id, GOAL_REJECTION_EVENT, task_id, *_GOAL_REJECTION_RESET_KINDS),
+        ).fetchone()
+        payload = json.loads(row[0]) if row and row[0] else None
+    except Exception as exc:
+        logger.warning("goal judge: could not read prior rejection for %s: %s", task_id, exc)
+        return []
+    if not isinstance(payload, dict) or not payload.get("reason"):
+        return []
+    return [
+        "An earlier handoff of this card was REJECTED for: " + str(payload["reason"]).strip()
+        + "\nThe rejected handoff said: " + str(payload.get("evidence") or "").strip()
+        + "\nMark DONE only if the current response adds NEW concrete evidence (a new artifact, measurement, "
+        "command output or file excerpt) that resolves every point of that rejection; name that evidence per "
+        "point in your reason. A reworded or reorganised restatement of the rejected handoff is not new "
+        "evidence: return CONTINUE and list the points still unresolved."
+    ]
+
+
 _KANBAN_TERMINAL_STATUSES = {
     "done": ("completed_by_worker", "worker completed the task", "task {task_id} completed by worker after {turns} turn(s)"),
     "blocked": ("blocked_by_worker", "worker blocked the task", "task {task_id} blocked by worker after {turns} turn(s)"),
@@ -1771,4 +1816,5 @@ __all__ = [
     "DEFAULT_MAX_TURNS", "load_goal", "save_goal", "clear_goal", "migrate_goal_to_session", "judge_goal",
     "run_kanban_goal_loop", "provider_failure_reason", "block_provider_failure",
     "PROVIDER_FAILURE_RESUME_SECONDS", "PROVIDER_FAILURE_PREFIX",
+    "record_goal_rejection", "prior_rejection_criteria", "GOAL_REJECTION_EVENT",
 ]

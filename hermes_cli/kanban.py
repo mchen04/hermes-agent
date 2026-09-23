@@ -831,7 +831,7 @@ def _worker_run_id_for(task_id: str) -> Optional[int]:
         return None
 
 
-def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str):
+def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str, prior: Optional[list] = None):
     """Goal judge for every terminal worker handoff (including review).
 
     Returns ``(verdict, reason_or_None)``: ``"done"`` allows; ``"blocked"`` = judge ruled the goal
@@ -865,7 +865,7 @@ def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str):
         try:
             verdict, reason, _, _, transport_failed = judge_goal(
                 goal=f"{task.title}\n\n{task.body or ''}".strip(),
-                last_response=evidence.strip())
+                last_response=evidence.strip(), **({"subgoals": prior} if prior else {}))
         finally:
             if affinity_token is not None:
                 reset_affinity_scope(affinity_token)
@@ -889,7 +889,11 @@ def _goal_gate_error(conn, tid: str, evidence: str, handoff: str, blocked_hint: 
     """Goal-mode judge gate shared by ``complete`` / ``request-review`` (mirrors tools/kanban_tools.py);
     applied to every terminal handoff so request-review can't bypass it. Returns the error line, or
     None to allow."""
-    verdict, rejection = _goal_mode_handoff_rejection(kb.get_task(conn, tid), evidence)
+    # LOCAL-PATCH kanban-judge-memory: the judge sees the latest rejection of this card, and each rejection is kept.
+    from hermes_cli.goals import prior_rejection_criteria, record_goal_rejection
+
+    verdict, rejection = _goal_mode_handoff_rejection(kb.get_task(conn, tid), evidence,
+                                                      prior_rejection_criteria(conn, tid))
     if verdict == "blocked":
         # LOCAL-PATCH kanban-judge-transient: a provider failure parks the card on a timer instead.
         from hermes_cli.goals import block_provider_failure, provider_failure_reason
@@ -899,9 +903,11 @@ def _goal_gate_error(conn, tid: str, evidence: str, handoff: str, blocked_hint: 
                                                             expected_run_id=_worker_run_id_for(tid)):
             return (f"kanban: goal {handoff} of {tid} rejected: provider failure, not an unachievable "
                     f"goal — {rejection}. The card is parked as a transient block for automatic retry.")
+        record_goal_rejection(kb, conn, tid, rejection or "", evidence)
         return (f"kanban: goal {handoff} of {tid} rejected: judge ruled "
                 f"the goal unachievable — {rejection}. {blocked_hint}")
     if rejection is not None:
+        record_goal_rejection(kb, conn, tid, rejection, evidence)
         return f"kanban: goal {handoff} of {tid} rejected by judge: {rejection}. {continue_hint}"
     return None
 
