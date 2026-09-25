@@ -314,6 +314,14 @@ def _resolve_script_path(script_path: str) -> tuple[Optional[Path], Optional[str
     return path, None
 
 
+def _local_script_python() -> str:
+    """LOCAL-PATCH cron-venv-python: the managed launcher runs the gateway on a bare, isolated
+    interpreter, so user scripts that import Hermes modules or its dependencies fail there.
+    Run them on the project venv, as before 0.21.5, when it exists."""
+    venv_python = Path(__file__).resolve().parents[1] / "venv" / "bin" / "python"
+    return str(venv_python) if venv_python.is_file() else sys.executable
+
+
 def _script_argv(path: Path) -> tuple[Optional[list[str]], dict[str, str], Optional[str]]:
     """``(argv, env_overlay, error)`` for a validated script. Interpreter by extension — the
     shebang is deliberately NOT honoured (small, auditable surface): ``.sh``/``.bash`` → bash,
@@ -328,7 +336,7 @@ def _script_argv(path: Path) -> tuple[Optional[list[str]], dict[str, str], Optio
                 "or rewrite the script as Python (.py)."
             )
         return [_bash, str(path)], {}, None
-    python_exe, env_overlay = _windows_cron_python_invocation(sys.executable)
+    python_exe, env_overlay = _windows_cron_python_invocation(_local_script_python())
     if env_overlay:
         return _windows_cron_bootstrap_argv(python_exe, env_overlay, str(path)), env_overlay, None
     return [python_exe, str(path)], env_overlay, None
