@@ -151,6 +151,26 @@ def apply_stop_gates(
         logger.debug("pre_verify nudge issued (attempt %d)", agent._pre_verify_nudges)
         return verdict
 
+    # LOCAL-PATCH unbacked-claim-gate: the false claim is kept out of the chat (not emitted).
+    try:
+        from agent.claim_gate import build_claim_nudge
+
+        _claim_nudge = build_claim_nudge(
+            final_response=final_response, messages=messages,
+            has_tools=bool(getattr(agent, "valid_tool_names", None)),
+            attempts=getattr(agent, "_claim_gate_nudges", 0),
+        )
+    except Exception:
+        logger.debug("claim gate check failed", exc_info=True)
+        _claim_nudge = None
+    if _claim_nudge:
+        agent._claim_gate_nudges = getattr(agent, "_claim_gate_nudges", 0) + 1
+        final_msg["finish_reason"] = "unbacked_claim"
+        final_msg["_claim_gate_synthetic"] = True
+        append_message(messages, final_msg)
+        logger.info("unbacked-claim nudge issued: %.80r", str(final_response or ""))
+        return _continue(_claim_nudge, "_claim_gate_synthetic")
+
     _kanban_nudge = _kanban_stop_nudge(agent, messages)
     if _kanban_nudge:
         agent._kanban_stop_nudges = getattr(agent, "_kanban_stop_nudges", 0) + 1
