@@ -2456,8 +2456,12 @@ def _rotate_worker_log(
 
 def _module_hermes_argv() -> list[str]:
     """Interpreter-bound Hermes CLI invocation (``hermes_cli.main`` is the
-    console-script target — there is no top-level ``hermes`` package)."""
-    return [sys.executable, "-m", "hermes_cli.main"]
+    console-script target — there is no top-level ``hermes`` package).
+    LOCAL-PATCH kanban-venv-python: the managed launcher interpreter cannot import
+    ``hermes_cli``, so workers spawned with it crashed at once after 0.21.5."""
+    from hermes_cli.hermes_interpreter import hermes_python
+
+    return [hermes_python(), "-m", "hermes_cli.main"]
 
 
 def _absolute_hermes_path(path: str) -> str:
