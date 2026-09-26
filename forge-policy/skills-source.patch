@@ -1,0 +1,1080 @@
+diff --git a/evals/fleetturn-test.py b/evals/fleetturn-test.py
+index 15201fd..c1a0d73 100644
+--- a/evals/fleetturn-test.py
++++ b/evals/fleetturn-test.py
+@@ -11,6 +11,8 @@ done.
+ 
+ from __future__ import annotations
+ 
++import fcntl
++import hashlib
+ import importlib.util
+ import json
+ import os
+@@ -85,7 +87,7 @@ printf '{"type":"result","subtype":"success","is_error":false,"result":"OK: %s",
+ '''
+ 
+ FAKE_CODEX = '''#!/usr/bin/env python3
+-import json, sys
++import json, os, sys, time
+ args = sys.argv[1:]
+ if args[:2] == ["mcp", "list"] or (len(args) > 2 and args[2:4] == ["mcp", "list"]) or "mcp" in args:
+     # Discovery and proof: one stdio server, disabled when the -c flag says so.
+@@ -113,9 +115,16 @@ if "resume" in args:
+ else:
+     sid = "aaaaaaaa-2222-4333-8444-555555555555"
+     prompt = args[args.index("--") + 1] if "--" in args else ""
++if "resume" in args and os.environ.get("FAKE_CODEX_WRONG_SESSION"):
++    sid = "99999999-2222-4333-8444-555555555555"
+ if "-o" in args:
+     open(args[args.index("-o") + 1], "w").write("final: " + prompt)
++time.sleep(float(os.environ.get("FAKE_CODEX_BEFORE_START", "0")))
+ print(json.dumps({"type": "thread.started", "thread_id": sid}), flush=True)
++if os.environ.get("FAKE_CODEX_LATE_THREAD_ID"):
++    print(json.dumps({"type": "item.started", "thread_id": os.environ["FAKE_CODEX_LATE_THREAD_ID"],
++                      "item": {"type": "command_execution", "command": "wrong thread"}}), flush=True)
++time.sleep(float(os.environ.get("FAKE_CODEX_AFTER_START", "0")))
+ print(json.dumps({"type": "item.started", "item": {"type": "command_execution", "command": "ls"}}), flush=True)
+ print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "done: " + prompt}}), flush=True)
+ print(json.dumps({"type": "turn.completed", "usage": {}}), flush=True)
+@@ -543,6 +552,10 @@ class TurnRunTest(TurnCommandTest):
+         report = json.loads(result.stdout)
+         self.assertFalse(report["verified"])
+         self.assertEqual(OTHER, report["agent_session_id"])
++        for flags in (("--status",), ("--status", "--wait", "--timeout", "1")):
++            status = self.turn(*flags, "--json")
++            self.assertEqual(7, status.returncode, status.stdout)
++            self.assertEqual("done", json.loads(status.stdout)["status"])
+ 
+     def test_agent_error_is_reported_as_an_error(self):
+         result = self.run_turn("--runtime", "claude", "--resume", UUID, "--model", "claude-opus-5",
+@@ -686,6 +699,242 @@ class TurnRunTest(TurnCommandTest):
+         self.assertLess(time.time() - started, 4)
+         self.assertEqual("done", self.wait_status()["status"])
+ 
++    def test_new_codex_turn_uses_the_runtime_generated_session_id(self):
++        result = self.run_turn("--runtime", "codex", "--new", "--session-id", UUID,
++                               "--model", "gpt-6-sol", "--effort", "medium", "--text", "Go.")
++        self.assertEqual(0, result.returncode, result.stderr + result.stdout)
++        report = json.loads(result.stdout)
++        self.assertTrue(report["verified"])
++        self.assertEqual("aaaaaaaa-2222-4333-8444-555555555555", report["session_id"])
++        self.assertEqual(report["session_id"], report["agent_session_id"])
++        self.assertEqual("done: Go.", report["final_text"])
++
++    def test_stop_before_codex_reports_its_id_does_not_offer_a_resume_id(self):
++        started = self.turn("--runtime", "codex", "--new", "--session-id", UUID,
++                            "--model", "gpt-6-sol", "--effort", "medium", "--text", "Go.", "--json",
++                            env={"FAKE_CODEX_BEFORE_START": "120"})
++        self.assertEqual(0, started.returncode, started.stderr + started.stdout)
++        self.assertIsNone(json.loads(started.stdout)["session_id"])
++        latest = self.root / "turns" / "turn-test" / "latest.json"
++        deadline = time.time() + 10
++        while time.time() < deadline:
++            record = json.loads(latest.read_text())
++            if isinstance(record.get("agent_pid"), int):
++                break
++            time.sleep(0.05)
++        self.assertIsInstance(record.get("agent_pid"), int)
++        self.assertIsNone(record["session_id"])
++        refused = self.turn("--session", "second-turn", "--runtime", "codex", "--resume", OTHER,
++                            "--model", "gpt-6-sol", "--effort", "medium", "--text", "Continue.", "--json")
++        self.assertEqual(3, refused.returncode, refused.stderr + refused.stdout)
++        self.assertIn("workspace is already held by a live turn", refused.stderr)
++        stopped = self.turn("--stop", "--json")
++        self.assertEqual(0, stopped.returncode, stopped.stderr + stopped.stdout)
++        report = json.loads(stopped.stdout)
++        self.assertTrue(report["verified"])
++        self.assertIsNone(report["session_id"])
++        self.assertFalse(report["resume_id_known"])
++        self.assertIsNone(json.loads(latest.read_text())["session_id"])
++        panes = subprocess.run(["tmux", "list-panes", "-t", "=turn-test", "-F", "#{pane_id}"],
++                               env=self.env, capture_output=True, text=True)
++        self.assertEqual(0, panes.returncode, panes.stderr)
++        pane = subprocess.run(["tmux", "capture-pane", "-p", "-S", "-100", "-t", panes.stdout.strip()],
++                              env=self.env, capture_output=True, text=True)
++        self.assertEqual(0, pane.returncode, pane.stderr)
++        self.assertIn("runtime session id unknown; do not resume", pane.stdout)
++        self.assertNotIn(f"resume session {UUID}", pane.stdout)
++
++    def test_codex_takeover_requires_the_observed_id_and_rejects_an_override(self):
++        early = self.turn("--runtime", "codex", "--new", "--session-id", UUID,
++                          "--model", "gpt-6-sol", "--effort", "medium", "--text", "Go.", "--json",
++                          env={"FAKE_CODEX_BEFORE_START": "120"})
++        self.assertEqual(0, early.returncode, early.stderr + early.stdout)
++        unknown = self.turn("--takeover", "--resume", UUID, "--dry-run", "--json")
++        self.assertEqual(7, unknown.returncode, unknown.stderr + unknown.stdout)
++        self.assertIn("runtime session id unknown", unknown.stderr)
++        self.assertEqual(0, self.turn("--stop", "--json").returncode)
++
++        completed = self.run_turn("--runtime", "codex", "--new", "--session-id", UUID,
++                                  "--model", "gpt-6-sol", "--effort", "medium", "--text", "Go.")
++        self.assertEqual(0, completed.returncode, completed.stderr + completed.stdout)
++        actual = json.loads(completed.stdout)["session_id"]
++        self.assertNotEqual(OTHER, actual)
++        override = self.turn("--takeover", "--resume", OTHER, "--dry-run", "--json")
++        self.assertEqual(7, override.returncode, override.stderr + override.stdout)
++        self.assertIn("differs from", override.stderr)
++        matching = self.turn("--takeover", "--resume", actual, "--dry-run", "--json")
++        self.assertEqual(0, matching.returncode, matching.stderr + matching.stdout)
++        self.assertEqual(actual, json.loads(matching.stdout)["session_id"])
++
++    def test_stop_after_codex_start_persists_id_and_resumes_that_session(self):
++        runtime_id = "aaaaaaaa-2222-4333-8444-555555555555"
++        started = self.turn("--runtime", "codex", "--new", "--session-id", UUID,
++                            "--model", "gpt-6-sol", "--effort", "medium", "--text", "Go.", "--json",
++                            env={"FAKE_CODEX_AFTER_START": "120"})
++        self.assertEqual(0, started.returncode, started.stderr + started.stdout)
++        latest = self.root / "turns" / "turn-test" / "latest.json"
++        deadline = time.time() + 10
++        while time.time() < deadline:
++            record = json.loads(latest.read_text())
++            if record.get("agent_session_id") == runtime_id:
++                break
++            time.sleep(0.05)
++        self.assertEqual(runtime_id, record.get("agent_session_id"))
++        self.assertEqual("running", record["status"])
++        self.assertEqual(runtime_id, record["session_id"])
++        stopped = self.turn("--stop", "--json")
++        self.assertEqual(0, stopped.returncode, stopped.stderr + stopped.stdout)
++        report = json.loads(stopped.stdout)
++        self.assertEqual(runtime_id, report["session_id"])
++        self.assertTrue(report["resume_id_known"])
++        resumed = self.run_turn("--runtime", "codex", "--resume", report["session_id"],
++                                "--model", "gpt-6-sol", "--effort", "medium", "--text", "Continue.")
++        self.assertEqual(0, resumed.returncode, resumed.stderr + resumed.stdout)
++        self.assertEqual(runtime_id, json.loads(resumed.stdout)["session_id"])
++
++    def test_new_codex_runtime_id_is_owned_without_inspector_binding(self):
++        runtime_id = "aaaaaaaa-2222-4333-8444-555555555555"
++        started = self.turn("--runtime", "codex", "--new", "--session-id", UUID,
++                            "--model", "gpt-6-sol", "--effort", "medium", "--text", "Go.", "--json",
++                            env={"FAKE_CODEX_AFTER_START": "120"})
++        self.assertEqual(0, started.returncode, started.stderr + started.stdout)
++        latest = self.root / "turns" / "turn-test" / "latest.json"
++        deadline = time.time() + 10
++        while time.time() < deadline:
++            record = json.loads(latest.read_text())
++            if record.get("session_id") == runtime_id:
++                break
++            time.sleep(0.05)
++        self.assertEqual(runtime_id, record.get("session_id"))
++        probe = subprocess.run(
++            [sys.executable, "-c", "import sys; sys.path.insert(0, sys.argv[1]); import fleetturn; "
++             "lease = fleetturn.try_lease(sys.argv[2]); print('free' if lease else 'busy'); "
++             "lease and lease.close()", str(SCRIPTS), runtime_id],
++            env=self.env, capture_output=True, text=True,
++        )
++        self.assertEqual(0, probe.returncode, probe.stderr)
++        self.assertEqual("busy", probe.stdout.strip())
++        workspace_probe = subprocess.run(
++            [sys.executable, "-c", "import sys; from pathlib import Path; "
++             "sys.path.insert(0, sys.argv[1]); import fleetturn; "
++             "key = fleetturn.workspace_lease_key(Path(sys.argv[2]), 'writer'); "
++             "lease = fleetturn.try_lease(key); print('free' if lease else 'busy'); "
++             "lease and lease.close()", str(SCRIPTS), str(self.workspace)],
++            env=self.env, capture_output=True, text=True,
++        )
++        self.assertEqual(0, workspace_probe.returncode, workspace_probe.stderr)
++        self.assertEqual("busy", workspace_probe.stdout.strip())
++        other_workspace = self.root / "other-ws"
++        other_workspace.mkdir()
++        subprocess.run(["git", "-C", str(other_workspace), "init", "-q"], check=True)
++        refused = self.turn("--session", "second-turn", "--workspace", str(other_workspace),
++                            "--runtime", "codex", "--resume", runtime_id,
++                            "--model", "gpt-6-sol", "--effort", "medium", "--text", "Continue.", "--json")
++        self.assertEqual(3, refused.returncode, refused.stderr + refused.stdout)
++        self.assertIn("already held by a live turn", refused.stderr)
++        self.assertFalse((self.root / "turns" / "second-turn" / "latest.json").exists())
++        stopped = self.turn("--stop", "--json")
++        self.assertEqual(0, stopped.returncode, stopped.stderr + stopped.stdout)
++
++    def test_same_workspace_cannot_enter_during_the_runner_start_gap(self):
++        real = shutil.which("tmux")
++        gate = self.root / "tmux-gate"
++        write_executable(self.root / "shim" / "tmux", f'''#!/usr/bin/env bash
++if [ "$1" = "new-session" ] && [ -n "${{FLEETTURN_TEST_GATE:-}}" ]; then
++  touch "${{FLEETTURN_TEST_GATE}}.ready"
++  while [ ! -e "${{FLEETTURN_TEST_GATE}}.release" ]; do sleep 0.05; done
++fi
++exec "{real}" -L "{self.socket}" "$@"
++''')
++        first = subprocess.Popen(
++            [sys.executable, str(TURN), "--session", "turn-test", "--workspace", str(self.workspace),
++             "--runtime", "claude", "--resume", UUID, "--model", "claude-opus-5",
++             "--effort", "low", "--text", "first", "--json"],
++            env={**self.env, "FLEETTURN_TEST_GATE": str(gate), "FAKE_CLAUDE_SLEEP": "120"},
++            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
++        )
++        try:
++            deadline = time.time() + 10
++            while not Path(str(gate) + ".ready").exists() and time.time() < deadline:
++                time.sleep(0.05)
++            self.assertTrue(Path(str(gate) + ".ready").exists())
++            initial = json.loads((self.root / "turns" / "turn-test" / "latest.json").read_text())
++            self.assertIsNone(initial["runner_pid"])
++            nested = self.workspace / "src"
++            nested.mkdir()
++            second = self.turn("--session", "second-turn", "--workspace", str(nested),
++                               "--runtime", "claude", "--resume", OTHER,
++                               "--model", "claude-opus-5", "--effort", "low", "--text", "second")
++            self.assertEqual(3, second.returncode, second.stderr + second.stdout)
++            self.assertIn("workspace launch is already in progress", second.stderr)
++            self.assertFalse((self.root / "turns" / "second-turn" / "latest.json").exists())
++        finally:
++            Path(str(gate) + ".release").touch()
++            stdout, stderr = first.communicate(timeout=20)
++            self.assertEqual(0, first.returncode, stderr + stdout)
++            self.turn("--stop", "--json")
++
++    def test_new_codex_stops_if_runtime_id_is_already_leased(self):
++        runtime_id = "aaaaaaaa-2222-4333-8444-555555555555"
++        leases = self.root / "turns"
++        leases.mkdir()
++        key = hashlib.sha256(runtime_id.encode()).hexdigest()
++        with (leases / f"lease-{key}.lock").open("a+") as held:
++            fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
++            result = self.run_turn("--runtime", "codex", "--new", "--session-id", UUID,
++                                   "--model", "gpt-6-sol", "--effort", "medium", "--text", "Go.",
++                                   env={"FAKE_CODEX_AFTER_START": "120"})
++        self.assertEqual(6, result.returncode, result.stderr + result.stdout)
++        report = json.loads(result.stdout)
++        self.assertEqual("error", report["status"])
++        self.assertFalse(report["verified"])
++        self.assertIsNone(report["session_id"])
++        self.assertIn("held by another turn", report["error"])
++        record = json.loads((leases / "turn-test" / "latest.json").read_text())
++        self.assertFalse(fleetturn_alive(record["agent_pid"]))
++
++    def test_stopped_codex_resume_with_wrong_observed_id_is_not_recommended(self):
++        started = self.turn("--runtime", "codex", "--resume", UUID,
++                            "--model", "gpt-6-sol", "--effort", "medium", "--text", "Go.", "--json",
++                            env={"FAKE_CODEX_WRONG_SESSION": "1", "FAKE_CODEX_AFTER_START": "120"})
++        self.assertEqual(0, started.returncode, started.stderr + started.stdout)
++        latest = self.root / "turns" / "turn-test" / "latest.json"
++        deadline = time.time() + 10
++        while time.time() < deadline:
++            record = json.loads(latest.read_text())
++            if record.get("agent_session_id") == OTHER:
++                break
++            time.sleep(0.05)
++        self.assertEqual(OTHER, record.get("agent_session_id"))
++        stopped = self.turn("--stop", "--json")
++        self.assertEqual(0, stopped.returncode, stopped.stderr + stopped.stdout)
++        report = json.loads(stopped.stdout)
++        self.assertIsNone(report["session_id"])
++        self.assertFalse(report["resume_id_known"])
++        self.assertIn("mismatch; do not resume", report["identity_error"])
++        panes = subprocess.run(["tmux", "list-panes", "-t", "=turn-test", "-F", "#{pane_id}"],
++                               env=self.env, capture_output=True, text=True)
++        self.assertEqual(0, panes.returncode, panes.stderr)
++        pane = subprocess.run(["tmux", "capture-pane", "-p", "-S", "-100", "-t", panes.stdout.strip()],
++                              env=self.env, capture_output=True, text=True)
++        self.assertEqual(0, pane.returncode, pane.stderr)
++        self.assertIn("runtime session id mismatch; do not resume", pane.stdout)
++        self.assertNotIn(f"resume session {OTHER}", pane.stdout)
++
++    def test_codex_resume_rejects_a_later_event_that_spoofs_the_requested_id(self):
++        result = self.run_turn("--runtime", "codex", "--resume", UUID,
++                               "--model", "gpt-6-sol", "--effort", "medium", "--text", "Go.",
++                               env={"FAKE_CODEX_WRONG_SESSION": "1", "FAKE_CODEX_LATE_THREAD_ID": UUID})
++        self.assertEqual(6, result.returncode, result.stderr + result.stdout)
++        report = json.loads(result.stdout)
++        self.assertEqual("error", report["status"])
++        self.assertFalse(report["verified"])
++        latest = json.loads((self.root / "turns" / "turn-test" / "latest.json").read_text())
++        self.assertEqual(OTHER, latest["agent_session_id"])
++        self.assertIn("conflicting thread id", latest["identity_error"])
++        status = self.turn("--status", "--json")
++        self.assertEqual(6, status.returncode, status.stderr + status.stdout)
++
+     def test_codex_and_ztc_turns_complete(self):
+         codex = self.run_turn("--runtime", "codex", "--resume", UUID, "--model", "gpt-6-astra",
+                               "--effort", "high", "--text", "Go.")
+diff --git a/evals/freshctx-contract-test.py b/evals/freshctx-contract-test.py
+index d2cb8c2..b71fd33 100644
+--- a/evals/freshctx-contract-test.py
++++ b/evals/freshctx-contract-test.py
+@@ -153,6 +153,62 @@ class VerdictParsing(unittest.TestCase):
+         self.assertIsNone(MODULE.parse_verdict(""))
+ 
+ 
++class ForgeReviewDispatch(unittest.TestCase):
++    def test_default_route_runs_read_only_codex_and_captures_findings(self):
++        route_spec = importlib.util.spec_from_file_location(
++            "forge_route", ROOT / "skills" / "supervise" / "scripts" / "forge_route.py")
++        route = importlib.util.module_from_spec(route_spec)
++        route_spec.loader.exec_module(route)
++        with tempfile.TemporaryDirectory() as temp:
++            root = Path(temp)
++            repo = root / "repo"
++            repo.mkdir()
++            charter = root / "charter.txt"
++            artifact = root / "change.txt"
++            charter.write_text("Check the change", encoding="utf-8")
++            artifact.write_text("A changed line", encoding="utf-8")
++            out = root / "review"
++            argv_path = root / "argv.json"
++            fake = root / "codex"
++            fake.write_text(
++                "#!/usr/bin/env python3\n"
++                "import json, sys\n"
++                "from pathlib import Path\n"
++                f"record = Path({str(argv_path)!r})\n"
++                "args = sys.argv[1:]\n"
++                "if args == ['login', 'status']:\n"
++                "    print('Logged in with fixture')\n"
++                "elif args == ['--version']:\n"
++                "    print('codex fixture')\n"
++                "else:\n"
++                "    record.write_text(json.dumps(args))\n"
++                "    Path(args[args.index('--output-last-message') + 1]).write_text("
++                "'Fixture finding\\nVERDICT: BLOCK\\n')\n",
++                encoding="utf-8",
++            )
++            fake.chmod(0o755)
++            plan = route.review(repo, charter, artifact, out, "codex")
++            output = io.StringIO()
++            with patch.object(MODULE, "binary", side_effect=lambda family: str(fake) if family == "codex" else None), \
++                    contextlib.redirect_stdout(output):
++                result = MODULE.main([*plan["dispatch_args"], "--retries", "0"])
++            self.assertEqual(0, result)
++            report = json.loads(output.getvalue())
++            self.assertEqual("VERDICT: BLOCK", report["verdict"])
++            self.assertEqual("codex", report["family"])
++            self.assertEqual("gpt-6-sol", report["model"])
++            argv = json.loads(argv_path.read_text())
++            self.assertEqual("read-only", argv[argv.index("--sandbox") + 1])
++            self.assertEqual(str(repo.resolve()), argv[argv.index("--cd") + 1])
++            self.assertEqual("gpt-6-sol", argv[argv.index("--model") + 1])
++            self.assertIn('model_reasoning_effort="high"', argv)
++            self.assertIn("--ephemeral", argv)
++            self.assertIn("--ignore-user-config", argv)
++            self.assertIn("--ignore-rules", argv)
++            self.assertIn("Check the change", (out / "prompt.txt").read_text())
++            self.assertEqual("Fixture finding\nVERDICT: BLOCK\n", (out / "response-1.txt").read_text())
++
++
+ class RecordingParsers(unittest.TestCase):
+     def test_worker_receipt_records_resolved_requested_effort_even_on_failure(self):
+         for family, model, default in (("claude", "claude-opus-5-5", "medium"),
+diff --git a/evals/supervise-control-test.py b/evals/supervise-control-test.py
+index 2758ecc..4717fb4 100755
+--- a/evals/supervise-control-test.py
++++ b/evals/supervise-control-test.py
+@@ -72,7 +72,7 @@ class EffortDefaults(unittest.TestCase):
+         for model in ("claude-opus-5-5", "claude-opus-5-5[1m]", "claude-opus-5", "claude-fable-5-1"):
+             args = self.parse("claude", model)
+             self.assertEqual((args.model, args.effort), (model, "medium"))
+-        self.assertEqual(self.parse("codex", "gpt-6-sol").effort, "xhigh")
++        self.assertEqual(self.parse("codex", "gpt-6-sol", "--effort", "high").effort, "high")
+         self.assertEqual(self.parse("codex", "gpt-6-astra").effort, "xhigh")
+         self.assertEqual(self.parse("claude", "claude-opus-5-5", "--effort", "xhigh").effort, "xhigh")
+         self.assertEqual(self.parse("codex", "gpt-6-astra", "--effort", "medium").effort, "medium")
+@@ -80,6 +80,7 @@ class EffortDefaults(unittest.TestCase):
+     def test_resume_and_other_models_require_explicit_effort(self):
+         for runtime, model, extra in (
+                 ("codex", "gpt-6-luna", []),
++                ("codex", "gpt-6-sol", []),
+                 ("claude", "claude-haiku-4-5", []),
+                 ("codex", "gpt-6-astra", ["--resume", "11111111-2222-4333-8444-555555555555"])):
+             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+diff --git a/skills/create-goal/references/model-prompting.md b/skills/create-goal/references/model-prompting.md
+index e82f96e..85f4a79 100644
+--- a/skills/create-goal/references/model-prompting.md
++++ b/skills/create-goal/references/model-prompting.md
+@@ -116,8 +116,9 @@ pages when a model changes; the rules below are the ones that change goal outcom
+ - Output: paragraphs over lists, main point first, active voice, the banned-word list above.
+ - Short machine-read summaries: a JSON schema (`codex exec --output-schema`, or Structured Outputs
+   in the API), Luna at low effort.
+-- Supervised implementation requests gpt-6-sol xhigh. Existing Hermes profile Sol medium
+-  defaults and Broker xhigh stay configured; do not change profile routing for a coding launch.
++- Supervised GPT-6 Sol implementation states an explicit effort and task-specific reason.
++  Select medium for local direct checks, high for integration work, and xhigh for difficult or
++  security-sensitive work. Existing Hermes profile and Broker defaults stay configured.
+ 
+ ## Game and auxiliary routes
+ 
+diff --git a/skills/supervise/SKILL.md b/skills/supervise/SKILL.md
+index 42ed9e3..143285a 100644
+--- a/skills/supervise/SKILL.md
++++ b/skills/supervise/SKILL.md
+@@ -15,6 +15,10 @@ probes. User instructions override skill defaults within permission and safety b
+ For remote reachability or missing tools, read [references/remote-machines.md](references/remote-machines.md).
+ 
+ Every helper below is EXECUTED. Preview a mutating helper with `--dry-run` first.
++For new Forge sessions on the default Codex route, run `scripts/forge_route.py implementation`
++before the preview.
++For independent review, run `scripts/forge_route.py review` and dispatch its explicit settings
++through fresh-eyes. Keep the review output outside the implementation checkout.
+ 
+ ## Scope before operations
+ 
+diff --git a/skills/supervise/references/starting.md b/skills/supervise/references/starting.md
+index c84444c..714009c 100644
+--- a/skills/supervise/references/starting.md
++++ b/skills/supervise/references/starting.md
+@@ -1,10 +1,13 @@
+ ## Start or resume safely
+ 
+-New supervised Codex implementation sessions use `gpt-6-sol` with `xhigh`; Opus 5.5 and
+-Fable use `medium`. The helpers fill these efforts when omitted for a new session with an
+-explicit model. Other models and resumes still require `--effort`; preserve existing session
+-settings unless a change is authorized. Explicit launch efforts take precedence. No Fable for
+-security or adversarial work. These operation defaults do not change Hermes profile routes.
++New supervised GPT-6 Sol implementation sessions require an explicit effort chosen from
++task scope, verification difficulty, and security or data risk. Use medium for a local
++change with a direct check, high for multiple components or integration checks, and xhigh
++for system-wide, uncertain, security, auth, migration, or data-loss work. State the level
++and task-specific reason before launch. `forge_route.py implementation` records the decision.
++Opus 5.5 and Fable still default to medium; Astra still defaults to xhigh. On a resume,
++pass the recorded settings unchanged. No Fable for security or adversarial work.
++These operation rules do not change Hermes profile routes.
+ 
+ ```bash
+ python3 <skill-dir>/scripts/fleetstart.py \
+diff --git a/skills/supervise/references/steering.md b/skills/supervise/references/steering.md
+index cc5ce25..f14a59c 100644
+--- a/skills/supervise/references/steering.md
++++ b/skills/supervise/references/steering.md
+@@ -1,10 +1,13 @@
+ # Steering and closing
+ 
+-New supervised Codex implementation sessions use `gpt-6-sol` with `xhigh`; Opus 5.5 and
+-Fable use `medium`. The helpers fill these efforts when omitted for a new session with an
+-explicit model. Other models and resumes still require `--effort`; preserve existing session
+-settings unless a change is authorized. Explicit launch efforts take precedence. No Fable for
+-security or adversarial work. These operation defaults do not change Hermes profile routes.
++New supervised GPT-6 Sol implementation sessions require an explicit effort chosen from
++task scope, verification difficulty, and security or data risk. Use medium for a local
++change with a direct check, high for multiple components or integration checks, and xhigh
++for system-wide, uncertain, security, auth, migration, or data-loss work. State the level
++and task-specific reason before launch. `forge_route.py implementation` records the decision.
++Opus 5.5 and Fable still default to medium; Astra still defaults to xhigh. On a resume,
++pass the recorded settings unchanged. No Fable for security or adversarial work.
++These operation rules do not change Hermes profile routes.
+ 
+ ## Contents
+ 
+@@ -30,13 +33,16 @@ python3 <skill-dir>/scripts/fleetturn.py --status --session <tmux-name>
+ A turn appends one instruction to an existing session through the runtime's own resume
+ interface: `claude -p --resume`, `codex exec resume`, or `ztc --headless --session-id`. Nothing is
+ typed, so there is no composer to prove, no length limit, and no draft. `--new --session-id <id>`
+-opens a session instead (Claude needs an exact UUID; ZTC and Codex take the id the helper prints).
+-`--text` carries a short instruction; `--file` carries a whole brief.
++opens a session instead. Claude and ZTC use the supplied ID. Codex generates its own UUID;
++resume only with the runtime ID reported at `thread.started`. `--text` carries a short
++instruction; `--file` carries a whole brief.
+ 
+ The turn runs detached in a tmux session named by `--session`, so the user can attach and read it
+-and the turn outlives you. It refuses to start while a turn is still running there, while any
+-other live process holds the same session id (the user's own interactive copy, for example), or,
+-for a new session, in a worktree another live agent writes or a dirty tree without `--allow-dirty`.
++and the turn outlives you. It refuses to start while a turn is still running there, another live
++turn owns the session id or workspace, or another process holds the same session id (the user's
++own interactive copy, for example). The launcher holds admission locks until the runner claims
++the checkout's writer lease. The runner holds that lease while the CLI runs. A new session also
++refuses a worktree where another live agent writes, or a dirty tree without `--allow-dirty`.
+ 
+ Wait for a coder with `--wait --timeout <expected turn length, up to 3600>` in one terminal
+ call, on the launch itself or on `--status`, with the same number as the terminal tool's
+@@ -46,7 +52,11 @@ completion wake, so nothing else fills that time: no status polls, no polling lo
+ no keystrokes, no explicit `kanban_heartbeat`. When the wait returns, read the result, then the
+ repo. Exit 0 with `running` means the turn outlived the estimate: wait once more. Other
+ outcomes: `done`, `error`, `launch_failed`, `stopped`, with the final text and error. `done`
+-needs the requested session id (`verified: true`); a different id exits 7. One 21-hour run once
++needs `verified: true`. A new Codex turn persists the ID from `thread.started` and checks it
++at completion; a stop before that event leaves the resume ID unknown. A Codex resume with a
++different started ID ends unverified; a conflicting later ID fails the turn. `--status` and
++`--status --wait` also exit 7 for unverified `done`.
++A stopped Codex resume with a mismatched observed ID offers no resume ID. One 21-hour run once
+ spent 330 short status polls and 31M context tokens; that pattern is retired.
+ 
+ Any new instruction from Michael that changes what the coder should do next means `--stop` now,
+@@ -72,8 +82,9 @@ coder Michael can type to. When he wants to take over, or asks why tcd shows pyt
+ and reopens the same tmux name with the interactive runtime resuming the same conversation:
+ `claude --resume <id>` or `codex resume <id>` with the recorded model, effort, and permission
+ flags. It reports success only once the pane runs the runtime, not python. Tell him the exact
+-command it prints: `tcd <name>`. Give `--runtime`, `--resume`, `--workspace`, `--model`, or
+-`--effort` only when the session has no recorded turn; it refuses when the runtime is unknown.
++command it prints: `tcd <name>`. Claude can use explicit settings when no turn was recorded.
++Codex takeover requires a persisted runtime ID from `thread.started`; an explicit `--resume`
++must match it. A stop before that event leaves the Codex takeover ID unknown.
+ After a takeover the session is his: send no turn there until he hands it back.
+ 
+ ## Type into an attached terminal (only when asked)
+@@ -164,4 +175,3 @@ Once he does, the sequence is: secret scan on the working tree and the outgoing
+ open the PR, squash-merge, confirm main, and report the PR URL. Keep separate logical changes in
+ separate worktrees and pull requests. Delete stale branches, PRs, or sessions only with permission,
+ then without further questions.
+-
+diff --git a/skills/supervise/scripts/fleetstart.py b/skills/supervise/scripts/fleetstart.py
+index 75c0ace..e650d8a 100755
+--- a/skills/supervise/scripts/fleetstart.py
++++ b/skills/supervise/scripts/fleetstart.py
+@@ -1357,7 +1357,7 @@ def default_effort(runtime: str, model: str) -> str | None:
+     if runtime == "claude" and (re.fullmatch(r"claude-opus-5(?:[-.]\d+)*", model)
+                                 or model.startswith("claude-fable-")):
+         return "medium"
+-    if runtime == "codex" and model in ("gpt-6-sol", "gpt-6-astra"):
++    if runtime == "codex" and model == "gpt-6-astra":
+         return "xhigh"
+     return None
+ 
+diff --git a/skills/supervise/scripts/fleetturn.py b/skills/supervise/scripts/fleetturn.py
+index a549eb2..5b04dc1 100644
+--- a/skills/supervise/scripts/fleetturn.py
++++ b/skills/supervise/scripts/fleetturn.py
+@@ -103,6 +103,14 @@ def try_lease(session_id: str):
+     return handle
+ 
+ 
++def workspace_lease_key(workspace: Path, kind: str) -> str:
++    try:
++        root = fleetstart.git_root(workspace)
++    except fleetstart.StartError:
++        root = workspace.resolve()
++    return f"workspace-{kind}:{root}"
++
++
+ def write_json(path: Path, data: dict) -> None:
+     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+     temporary.write_text(json.dumps(data, indent=1, sort_keys=True) + "\n", encoding="utf-8")
+@@ -118,6 +126,27 @@ def read_json(path: Path) -> dict | None:
+     return data if isinstance(data, dict) else None
+ 
+ 
++def resumable_session(record: dict) -> tuple[str | None, str | None]:
++    """Expose a Codex resume ID only after its runtime identity is observed and owned."""
++    requested = record.get("requested_session_id") or record.get("session_id")
++    observed = record.get("agent_session_id")
++    if record.get("runtime") == "codex":
++        if record.get("identity_error"):
++            return None, "runtime session id conflict; do not resume"
++        if record.get("new_session"):
++            claimed = record.get("session_id")
++            if (isinstance(claimed, str) and fleetstart.UUID_RE.fullmatch(claimed)
++                    and observed == claimed):
++                return claimed, None
++            return None, None
++        if isinstance(observed, str) and fleetstart.UUID_RE.fullmatch(observed):
++            if not isinstance(requested, str) or observed.lower() != requested.lower():
++                return None, "runtime session id mismatch; do not resume"
++            return requested, None
++        return None, None
++    return observed or requested, None
++
++
+ # --- command construction -------------------------------------------------
+ 
+ 
+@@ -229,6 +258,8 @@ class EventReader:
+     def __init__(self, runtime: str):
+         self.runtime = runtime
+         self.session_id: str | None = None
++        self.started_session_id: str | None = None
++        self.identity_error: str | None = None
+         self.final_text: str | None = None
+         self.error: str | None = None
+         self.events = 0
+@@ -285,12 +316,26 @@ class EventReader:
+     def _codex(self, event: dict) -> list[str]:
+         kind = event.get("type") or ""
+         out: list[str] = []
+-        for key in ("thread_id", "threadId"):
+-            if isinstance(event.get(key), str):
+-                self.session_id = event[key].lower()
++        reported_ids = {event[key].lower() for key in ("thread_id", "threadId")
++                        if isinstance(event.get(key), str)}
++        reported = next(iter(reported_ids)) if len(reported_ids) == 1 else None
++        if len(reported_ids) > 1:
++            self.identity_error = "runtime reported conflicting thread ids"
+         if kind == "thread.started":
+-            out.append(f"codex thread {self.session_id}")
+-        elif kind in {"item.completed", "item.started"}:
++            if not reported or not fleetstart.UUID_RE.fullmatch(reported):
++                self.identity_error = "runtime thread.started did not report a valid thread id"
++            elif self.started_session_id and reported != self.started_session_id:
++                self.identity_error = "runtime reported a conflicting thread id after thread.started"
++            else:
++                self.started_session_id = reported
++                self.session_id = reported
++                out.append(f"codex thread {reported}")
++        elif reported and self.started_session_id and reported != self.started_session_id:
++            self.identity_error = "runtime reported a conflicting thread id after thread.started"
++        if self.identity_error:
++            self.error = self.identity_error
++            return [f"✖ {self.identity_error}"]
++        if kind in {"item.completed", "item.started"}:
+             item = event.get("item") or {}
+             item_type = item.get("type")
+             if kind == "item.completed" and item_type == "agent_message" and item.get("text"):
+@@ -436,10 +481,13 @@ def run_turn(payload_path: Path) -> int:
+     command = payload["command"]
+     runtime = payload["runtime"]
+     requested_id = payload["session_id"]
++    codex_new = runtime == "codex" and payload.get("new_session")
+     record = {
+         "status": "running",
+         "runtime": runtime,
+-        "session_id": requested_id,
++        "new_session": bool(payload.get("new_session")),
++        "session_id": None if codex_new else requested_id,
++        "requested_session_id": requested_id,
+         "tmux_session": payload["tmux_session"],
+         "workspace": str(workspace),
+         "instruction_sha256": payload["instruction_sha256"],
+@@ -450,6 +498,8 @@ def run_turn(payload_path: Path) -> int:
+         "ended": None,
+         "exit_code": None,
+         "agent_session_id": None,
++        "identity_error": None,
++        "workspace_lease_claimed": False,
+         "verified": False,
+         "final_text": None,
+         "error": None,
+@@ -462,18 +512,28 @@ def run_turn(payload_path: Path) -> int:
+         write_json(result_path, record)
+         write_json(latest_path, record)
+ 
++    workspace_lease = try_lease(workspace_lease_key(workspace, "writer"))
++    if workspace_lease is None:
++        record.update({"status": "launch_failed", "error": "another turn holds this workspace", "ended": time.time()})
++        publish()
++        print("fleetturn: another turn already holds this workspace", file=sys.stderr)
++        return 3
+     lease = try_lease(requested_id)
+     if lease is None:
++        workspace_lease.close()
+         record.update({"status": "launch_failed", "error": "another turn holds this session", "ended": time.time()})
+         publish()
+         print("fleetturn: another turn already holds this session", file=sys.stderr)
+         return 3
++    record["workspace_lease_claimed"] = True
+     publish()
+     print(f"fleetturn: {runtime} turn on session {requested_id}")
+     print(f"fleetturn: workspace {workspace}")
+     print(f"fleetturn: instruction {record['instruction_preview']}")
+     print("─" * 60, flush=True)
+     reader = EventReader(runtime)
++    runtime_lease = None
++    runtime_claimed = False
+     try:
+         with stderr_path.open("ab") as stderr_handle:
+             process = subprocess.Popen(
+@@ -493,9 +553,38 @@ def run_turn(payload_path: Path) -> int:
+             for line in process.stdout:
+                 for shown in reader.feed(line):
+                     print(shown, flush=True)
++                if reader.identity_error:
++                    record["identity_error"] = reader.identity_error
++                    publish()
++                    left = signal_all(process_tree(process.pid), 15, 2)
++                    if left:
++                        signal_all(left, 9, 1)
++                    break
++                started_id = reader.started_session_id
++                if (runtime == "codex" and started_id and record["agent_session_id"] != started_id
++                        and fleetstart.UUID_RE.fullmatch(started_id)):
++                    if codex_new:
++                        if record["session_id"] and record["session_id"] != started_id:
++                            reader.error = "runtime changed its session id during the turn"
++                            runtime_claimed = False
++                        else:
++                            runtime_lease = lease if started_id == requested_id else try_lease(started_id)
++                            if runtime_lease is None:
++                                reader.error = f"runtime session {started_id} is held by another turn"
++                            else:
++                                runtime_claimed = True
++                                record["session_id"] = started_id
++                    if reader.error:
++                        left = signal_all(process_tree(process.pid), 15, 2)
++                        if left:
++                            signal_all(left, 9, 1)
++                        break
++                    record["agent_session_id"] = started_id
++                    publish()
++                    last_publish = time.time()
+                 if time.time() - last_publish > 15:
+                     record.update({"events": reader.events, "tool_calls": reader.tool_calls,
+-                                   "agent_session_id": reader.session_id})
++                                   "agent_session_id": reader.started_session_id if runtime == "codex" else reader.session_id})
+                     publish()
+                     last_publish = time.time()
+             exit_code = process.wait()
+@@ -505,6 +594,8 @@ def run_turn(payload_path: Path) -> int:
+         print(f"fleetturn: cannot start {runtime}: {error}", file=sys.stderr)
+         return 5
+     finally:
++        if runtime_lease is not None and runtime_lease is not lease:
++            runtime_lease.close()
+         try:
+             lease.close()
+         except OSError:
+@@ -513,6 +604,7 @@ def run_turn(payload_path: Path) -> int:
+         if reaped:
+             record["browsers_reaped"] = len(reaped)
+             print(f"fleetturn: closed {len(reaped)} headless browser processes the turn left running")
++        workspace_lease.close()
+     last_message = payload.get("last_message")
+     if runtime == "codex" and reader.final_text is None and last_message:
+         try:
+@@ -522,7 +614,12 @@ def run_turn(payload_path: Path) -> int:
+         except OSError:
+             pass
+     observed = reader.session_id
+-    verified = bool(observed) and observed.lower() == requested_id.lower()
++    # Codex exec creates its own UUID; only resumes can match a requested UUID.
++    verified = bool(observed) and not reader.identity_error and (
++        runtime_claimed and observed == reader.started_session_id and bool(fleetstart.UUID_RE.fullmatch(observed))
++        if codex_new else (reader.started_session_id == requested_id.lower() if runtime == "codex"
++                           else observed.lower() == requested_id.lower())
++    )
+     if reader.error is None and exit_code != 0:
+         tail = ""
+         try:
+@@ -537,7 +634,9 @@ def run_turn(payload_path: Path) -> int:
+         "status": "stopped" if stopped else "error" if reader.error else "done",
+         "ended": time.time(),
+         "exit_code": exit_code,
+-        "agent_session_id": observed,
++        "agent_session_id": observed if verified or not codex_new else None,
++        "identity_error": reader.identity_error,
++        "session_id": (observed if verified else None) if codex_new else requested_id,
+         "verified": verified,
+         "final_text": reader.final_text,
+         "error": reader.error,
+@@ -547,7 +646,13 @@ def run_turn(payload_path: Path) -> int:
+     publish()
+     print("─" * 60)
+     if stopped:
+-        print(f"fleetturn: turn stopped on request; resume session {observed or requested_id} to continue")
++        resume_id, identity_error = resumable_session(record)
++        if identity_error:
++            print(f"fleetturn: turn stopped on request; {identity_error}")
++        elif resume_id:
++            print(f"fleetturn: turn stopped on request; resume session {resume_id} to continue")
++        else:
++            print("fleetturn: turn stopped on request; runtime session id unknown; do not resume")
+         return 8
+     if reader.error:
+         print(f"fleetturn: turn ended with an error: {reader.error}")
+@@ -601,6 +706,27 @@ def other_live_processes(session_id: str) -> list[str]:
+     return found
+ 
+ 
++def other_live_turns(session_id: str, workspace: Path) -> list[str]:
++    """Find active session or checkout owners when transcript inspection is unbound."""
++    found = []
++    needle = session_id.lower()
++    for path in turn_root().glob("*/latest.json"):
++        record = read_json(path)
++        if not record or record.get("status") != "running":
++            continue
++        ids = (record.get("requested_session_id"), record.get("session_id"), record.get("agent_session_id"))
++        same_id = needle in {value.lower() for value in ids if isinstance(value, str)}
++        recorded_workspace = record.get("workspace")
++        same_workspace = (isinstance(recorded_workspace, str)
++                          and Path(recorded_workspace).resolve() == workspace)
++        if not same_id and not same_workspace:
++            continue
++        runner = record.get("runner_pid")
++        if isinstance(runner, int) and running(runner):
++            found.append(f"{path.parent.name} (runner {runner})")
++    return found
++
++
+ def load_text(args: argparse.Namespace) -> str:
+     if args.file:
+         try:
+@@ -711,9 +837,14 @@ def stop_turn(session: str, as_json: bool) -> int:
+         print(json.dumps(report, indent=1, sort_keys=True))
+     elif remaining:
+         print(f"fleetturn: stop NOT verified; still running: {remaining}", file=sys.stderr)
+-    else:
++    elif report.get("identity_error"):
++        print(f"fleetturn: turn stopped ({report['stopped_pids']} processes); {report['identity_error']}")
++    elif report["resume_id_known"]:
+         print(f"fleetturn: turn stopped ({report['stopped_pids']} processes); "
+               f"resume session {report['session_id']} to continue")
++    else:
++        print(f"fleetturn: turn stopped ({report['stopped_pids']} processes); "
++              "runtime session id unknown; do not resume")
+     return 0 if not remaining else 7
+ 
+ 
+@@ -744,8 +875,10 @@ def stop_running_turn(session: str, latest: dict) -> dict:
+     write_json(latest_path, record)
+     if record.get("result"):
+         write_json(Path(record["result"]), record)
+-    session_id = record.get("agent_session_id") or record.get("session_id")
++    session_id, identity_error = resumable_session(record)
+     return {"session": session, "status": "stopped", "verified": not remaining,
++            "resume_id_known": bool(session_id),
++            "identity_error": identity_error,
+             "remaining_pids": remaining, "stopped_pids": len(tree),
+             "runtime": record.get("runtime"), "session_id": session_id,
+             "browsers_reaped": record.get("browsers_reaped", 0)}
+@@ -844,7 +977,17 @@ def takeover(args: argparse.Namespace, tmux_bin: str, inspector: Path) -> int:
+     if runtime not in {"claude", "codex"}:
+         raise TurnError("cannot determine the runtime; give --runtime claude or codex"
+                         if not runtime else f"takeover supports claude and codex, not {runtime}")
+-    session_id = args.resume or latest.get("agent_session_id") or latest.get("session_id")
++    persisted_id, identity_error = resumable_session(latest)
++    if identity_error:
++        raise TurnError(identity_error, 7)
++    if runtime == "codex":
++        if not persisted_id:
++            raise TurnError("runtime session id unknown; do not resume or take over", 7)
++        if args.resume and args.resume.lower() != persisted_id.lower():
++            raise TurnError("explicit --resume differs from the observed runtime session id", 7)
++        session_id = persisted_id
++    else:
++        session_id = args.resume or persisted_id
+     if not session_id or not fleetstart.UUID_RE.fullmatch(session_id):
+         raise TurnError("cannot determine the persisted session id; give --resume <uuid>")
+     session_id = session_id.lower()
+@@ -870,6 +1013,8 @@ def takeover(args: argparse.Namespace, tmux_bin: str, inspector: Path) -> int:
+     stop = stop_running_turn(args.session, turn) if turn else None
+     if stop and stop["remaining_pids"]:
+         raise TurnError(f"stop NOT verified; still running: {stop['remaining_pids']}", 7)
++    if runtime == "codex" and stop and stop.get("session_id") != session_id:
++        raise TurnError("observed runtime session id changed during takeover; do not resume", 7)
+     live = other_live_processes(session_id)
+     if live:
+         raise TurnError("this session is open in another live process; attach to that one:\n  "
+@@ -963,7 +1108,9 @@ def status_report(session: str, as_json: bool, args: argparse.Namespace) -> int:
+     status = latest.get("status")
+     if status == "running":
+         return running_exit(args)
+-    return {"done": 0, "error": 6, "launch_failed": 5, "stopped": 8}.get(status, 7)
++    if status == "done":
++        return 0 if latest.get("verified") is True else 7
++    return {"error": 6, "launch_failed": 5, "stopped": 8}.get(status, 7)
+ 
+ 
+ def wait_for_result(latest_path: Path, timeout: float, runner_pid: int | None) -> dict | None:
+@@ -1107,6 +1254,10 @@ def main() -> int:
+         state = tmux_state(tmux_bin, args.session)
+         if state == "live":
+             raise TurnError(f"a turn is still running in tmux session '{args.session}'", 3)
++        live_turns = other_live_turns(session_id, workspace)
++        if live_turns:
++            raise TurnError("this session or workspace is already held by a live turn:\n  "
++                            + "\n  ".join(live_turns), 3)
+         live = other_live_processes(session_id)
+         if live:
+             raise TurnError(
+@@ -1160,41 +1311,77 @@ def main() -> int:
+                 print(f"would run in tmux '{args.session}' at {workspace} ({plan['permissions']}):")
+                 print("  " + shlex.join(command))
+             return 0
+-        if state == "ended":
+-            fleetstart.run([tmux_bin, "kill-session", "-t", f"={args.session}"], timeout=5)
+-        payload = {
+-            **plan,
+-            "latest": str(directory / "latest.json"),
+-            "stderr": str(directory / f"{stamp}.stderr.log"),
+-            "last_message": str(last_message),
+-        }
+-        stop_marker(directory).unlink(missing_ok=True)
+-        payload_path = directory / f"{stamp}.payload.json"
+-        write_json(payload_path, payload)
+-        write_json(Path(payload["latest"]), {**payload, "status": "running", "started": time.time(),
+-                                             "runner_pid": None, "ended": None})
+-        runner = shlex.join([sys.executable, str(Path(__file__).resolve()), "--internal-run", str(payload_path)])
++        admission_keys = (
++            (f"session-admission:{args.session}", "session"),
++            (workspace_lease_key(workspace, "admission"), "workspace"),
++        )
++        admissions = []
+         try:
+-            started = fleetstart.run(
+-                [
+-                    tmux_bin, "new-session", "-d", "-s", args.session, "-c", str(workspace), runner, ";",
+-                    "set-option", "-w", "-t", f"={args.session}:", "remain-on-exit", "on",
+-                ],
+-                timeout=15,
+-            )
+-        except (OSError, subprocess.TimeoutExpired) as error:
+-            raise TurnError(f"tmux could not start the turn: {error}", 5)
+-        if started.returncode != 0:
+-            raise TurnError(f"tmux refused the turn: {started.stderr.strip()}", 5)
+-        latest_path = Path(payload["latest"])
+-        latest = read_json(latest_path)
++            for key, scope in admission_keys:
++                held = try_lease(key)
++                if held is None:
++                    raise TurnError(f"{scope} launch is already in progress", 3)
++                admissions.append(held)
++            if tmux_state(tmux_bin, args.session) == "live":
++                raise TurnError(f"a turn is still running in tmux session '{args.session}'", 3)
++            live_turns = other_live_turns(session_id, workspace)
++            if live_turns:
++                raise TurnError("this session or workspace is already held by a live turn:\n  "
++                                + "\n  ".join(live_turns), 3)
++            writer_probe = try_lease(workspace_lease_key(workspace, "writer"))
++            if writer_probe is None:
++                raise TurnError("this workspace is already held by a live turn", 3)
++            writer_probe.close()
++            if state == "ended":
++                fleetstart.run([tmux_bin, "kill-session", "-t", f"={args.session}"], timeout=5)
++            payload = {
++                **plan,
++                "latest": str(directory / "latest.json"),
++                "stderr": str(directory / f"{stamp}.stderr.log"),
++                "last_message": str(last_message),
++            }
++            stop_marker(directory).unlink(missing_ok=True)
++            payload_path = directory / f"{stamp}.payload.json"
++            write_json(payload_path, payload)
++            initial_id = None if args.new and args.runtime == "codex" else session_id
++            latest_path = Path(payload["latest"])
++            write_json(latest_path, {**payload, "session_id": initial_id,
++                                     "agent_session_id": None, "status": "running",
++                                     "workspace_lease_claimed": False,
++                                     "started": time.time(), "runner_pid": None, "ended": None})
++            runner = shlex.join([sys.executable, str(Path(__file__).resolve()), "--internal-run", str(payload_path)])
++            try:
++                started = fleetstart.run(
++                    [
++                        tmux_bin, "new-session", "-d", "-s", args.session, "-c", str(workspace), runner, ";",
++                        "set-option", "-w", "-t", f"={args.session}:", "remain-on-exit", "on",
++                    ],
++                    timeout=15,
++                )
++            except (OSError, subprocess.TimeoutExpired) as error:
++                raise TurnError(f"tmux could not start the turn: {error}", 5)
++            if started.returncode != 0:
++                raise TurnError(f"tmux refused the turn: {started.stderr.strip()}", 5)
++            deadline = time.monotonic() + 10
++            while True:
++                latest = read_json(latest_path)
++                if latest and (latest.get("workspace_lease_claimed") or latest.get("status") != "running"):
++                    break
++                if time.monotonic() >= deadline:
++                    fleetstart.run([tmux_bin, "kill-session", "-t", f"={args.session}"], timeout=5)
++                    raise TurnError("runner did not claim the workspace lease", 5)
++                time.sleep(0.05)
++        finally:
++            for held in reversed(admissions):
++                held.close()
+         waiting = wait_plan(args)
+         wait_started = time.time()
+         if waiting["seconds"]:
+             latest = wait_for_result(latest_path, waiting["seconds"], None)
+         report = latest or {"status": "unknown"}
+         if args.json:
+-            print(json.dumps(annotate_wait({**plan, "status": report.get("status"), "verified": report.get("verified"),
++            print(json.dumps(annotate_wait({**plan, "session_id": report.get("session_id"),
++                              "status": report.get("status"), "verified": report.get("verified"),
+                               "agent_session_id": report.get("agent_session_id"), "error": report.get("error"),
+                               "final_text": report.get("final_text"), "exit_code": report.get("exit_code"),
+                               "attach": f"tmux attach -t {args.session}"}, waiting, wait_started),
+@@ -1205,7 +1392,8 @@ def main() -> int:
+                 print(f"fleetturn: turn running in tmux '{args.session}' (attach: tmux attach -t {args.session})")
+                 print(f"fleetturn: wait with --status --wait --session {args.session}")
+             elif status == "done":
+-                print(f"fleetturn: turn done and verified on session {report.get('agent_session_id')}")
++                proof = "verified" if report.get("verified") else "unverified"
++                print(f"fleetturn: turn done and {proof} on session {report.get('agent_session_id')}")
+                 if report.get("final_text"):
+                     print(str(report["final_text"]).strip())
+             else:
+diff --git a/skills/supervise/scripts/forge_route.py b/skills/supervise/scripts/forge_route.py
+new file mode 100644
+index 0000000..88778e0
+--- /dev/null
++++ b/skills/supervise/scripts/forge_route.py
+@@ -0,0 +1,91 @@
++"""Plan new Forge coding sessions and independent review without changing live profiles."""
++
++import argparse
++import json
++from pathlib import Path
++
++
++def implementation(scope: str, verification: str, hazard: str, evidence: str) -> dict:
++    if not evidence.strip():
++        raise ValueError("task evidence is required")
++    level = "medium"
++    factors = []
++    if scope == "multi":
++        level = "high"
++        factors.append("multiple components")
++    elif scope == "system":
++        level = "xhigh"
++        factors.append("system-wide behavior")
++    if verification == "integration":
++        if level == "medium":
++            level = "high"
++        factors.append("integration verification")
++    elif verification == "uncertain":
++        level = "xhigh"
++        factors.append("hard-to-reproduce verification")
++    if hazard != "none":
++        level = "xhigh"
++        factors.append(f"{hazard} risk")
++    if not factors:
++        factors.append("local change with a direct check")
++    return {
++        "model": "gpt-6-sol",
++        "effort": level,
++        "reason": f"{'; '.join(factors)}: {evidence.strip()}",
++        "launch_args": ["--runtime", "codex", "--model", "gpt-6-sol", "--effort", level],
++    }
++
++
++def review(repo: Path, charter: Path, artifact: Path, out: Path, reviewer: str) -> dict:
++    repo = repo.resolve()
++    out = out.resolve()
++    if reviewer not in {"codex", "claude"}:
++        raise ValueError("reviewer must be codex or claude")
++    if not repo.is_dir() or not charter.is_file() or not artifact.is_file():
++        raise ValueError("review needs an existing checkout, charter, and artifact")
++    if out == repo or repo in out.parents:
++        raise ValueError("review output must stay outside the implementation checkout")
++    if reviewer == "codex":
++        model, effort = "gpt-6-sol", "high"
++    else:
++        model, effort = "claude-opus-5-5", "medium"
++    return {
++        "reviewer": reviewer,
++        "model": model,
++        "effort": effort,
++        "status": "planned",
++        "required_isolation": "fresh read-only",
++        "dispatch_args": [
++            "dispatch", "--family", reviewer, "--model", model, "--effort", effort,
++            "--repo", str(repo), "--charter", str(charter.resolve()),
++            "--artifact", str(artifact.resolve()), "--out", str(out),
++        ],
++    }
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser(description=__doc__)
++    commands = parser.add_subparsers(dest="command", required=True)
++    launch = commands.add_parser("implementation")
++    launch.add_argument("--scope", choices=("local", "multi", "system"), required=True)
++    launch.add_argument("--verification", choices=("direct", "integration", "uncertain"), required=True)
++    launch.add_argument("--hazard", choices=("none", "security", "auth", "data-loss", "migration"), required=True)
++    launch.add_argument("--evidence", required=True)
++    review_parser = commands.add_parser("review")
++    review_parser.add_argument("--repo", type=Path, required=True)
++    review_parser.add_argument("--charter", type=Path, required=True)
++    review_parser.add_argument("--artifact", type=Path, required=True)
++    review_parser.add_argument("--out", type=Path, required=True)
++    review_parser.add_argument("--reviewer", choices=("codex", "claude"), default="codex")
++    args = parser.parse_args()
++    try:
++        result = (implementation(args.scope, args.verification, args.hazard, args.evidence)
++                  if args.command == "implementation"
++                  else review(args.repo, args.charter, args.artifact, args.out, args.reviewer))
++    except ValueError as exc:
++        parser.error(str(exc))
++    print(json.dumps(result, indent=2))
++
++
++if __name__ == "__main__":
++    main()
