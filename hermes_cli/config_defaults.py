@@ -1932,6 +1932,13 @@ DEFAULT_CONFIG = {
         # On boards that never archive, the notifier GC purges subscriptions for tasks done with no
         # activity for this many days so stale rows aren't scanned forever. 0 = off.
         "done_sub_retention_days": 30,
+        # LOCAL-PATCH learn-workers: a worker reviews its session (memory + skills) once at a
+        # normal exit and waits up to this many seconds for it; 0 = no exit review. The dispatcher
+        # holds off reaping a finished worker for this long plus 60 s.
+        "worker_review_wait_seconds": 180,
+        # The exit review runs when the session made at least this many tool calls besides
+        # kanban_* board calls, or when the normal review nudge came due during the session.
+        "worker_review_min_tool_calls": 3,
     },
     # Bot Mode cross-connection relay (tools/bot_relay.py): envelopes queued by message_agent for
     # agents on other connections wait in an on-disk outbox until the Desktop drains them.

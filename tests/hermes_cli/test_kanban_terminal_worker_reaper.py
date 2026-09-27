@@ -121,7 +121,7 @@ def test_fresh_terminal_run_is_left_alone_until_grace_passes(conn):
         assert run["worker_pid"] == proc.pid  # evidence kept for a later tick
         conn.execute(
             "UPDATE task_runs SET ended_at = ended_at - ? WHERE id=?",
-            (kbd.TERMINAL_WORKER_REAP_GRACE_SECONDS, run_id),
+            (kbd._terminal_worker_reap_grace_seconds(), run_id),
         )
         assert kbd.reap_terminal_workers(conn, signal_fn=signal_fn) == [tid]
         assert [pid for pid, _ in signals] == [proc.pid]
@@ -147,3 +147,24 @@ def test_one_failing_row_does_not_abort_the_sweep(conn):
         for p in (broken, healthy):
             p.kill()
             p.wait()
+
+
+def test_worker_waiting_for_its_exit_review_is_not_reaped(conn, monkeypatch):
+    """LOCAL-PATCH learn-workers: a finished worker may wait kanban.worker_review_wait_seconds
+    for its exit review; the reaper leaves it that long plus a minute."""
+    import agent.background_review_exit as bre
+
+    proc = _sleeper()
+    try:
+        tid, _run_id = _completed_card_with_worker(conn, proc, ended_ago=150)
+        signals = []
+        assert kbd._terminal_worker_reap_grace_seconds() == 240
+        assert kbd.reap_terminal_workers(conn, signal_fn=lambda pid, sig: signals.append(pid)) == []
+        assert signals == [] and proc.poll() is None
+
+        monkeypatch.setattr(bre, "worker_review_wait_seconds", lambda: 0.0)
+        assert kbd._terminal_worker_reap_grace_seconds() == kbd.TERMINAL_WORKER_REAP_GRACE_SECONDS
+        assert kbd.reap_terminal_workers(conn, signal_fn=lambda pid, sig: os.kill(pid, sig)) == [tid]
+    finally:
+        proc.kill()
+        proc.wait()
