@@ -3308,6 +3308,8 @@ def amend_task_body(
                      (*changes.values(), task_id))
         if "body" in changes:
             _insert_comment(conn, task_id, author.strip(), f"AMENDED: {reason.strip()}", int(time.time()))
+        if "priority" in changes:  # same audit trail as edit_task
+            _append_event(conn, task_id, "reprioritized", {"priority": changes["priority"]})
         _append_event(
             conn, task_id, "edited",
             {"fields": list(changes), "reason": reason.strip(), "author": author.strip(), "body_len": len(body or "")},
