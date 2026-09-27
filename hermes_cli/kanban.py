@@ -978,10 +978,12 @@ def _cmd_edit(args: argparse.Namespace) -> int:
                     amended = kb.amend_task_body(conn, args.task_id, body=body, author=_profile_author(), reason=reason,
                                                  title=title, priority=priority,
                                                  expected_run_id=_worker_run_id_for(args.task_id))
-                except ValueError as exc:  # LOCAL-PATCH kanban-amend-noop: identical body
+                except ValueError as exc:
                     return _err(f"cannot amend {args.task_id}: {exc}")
                 if not amended:
                     return _err(f"cannot amend {args.task_id} (unknown id or task is done/archived)")
+                if amended == kb.AMEND_UNCHANGED:  # LOCAL-PATCH kanban-amend-noop
+                    return _ok_or_err(True, "", f"Unchanged {args.task_id}: the brief already says this")
                 return _ok_or_err(True, "", f"Amended {args.task_id}")
         ok = kb.edit_task(
             conn, args.task_id, title=title, body=body, priority=priority,

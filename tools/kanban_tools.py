@@ -903,7 +903,9 @@ def _handle_amend(args: dict, **kw) -> str:
         except ValueError as exc:
             raise _Reject(str(exc))
         _check(ok, f"could not amend {tid} (unknown id, or the task is done/archived)")
-        return _ok(task_id=tid)
+        if ok == kb.AMEND_UNCHANGED:  # LOCAL-PATCH kanban-amend-noop
+            return _ok(task_id=tid, outcome="unchanged", note="The brief already says this; nothing was recorded.")
+        return _ok(task_id=tid, outcome="amended")
 
 
 def _store_attachment(board, tid, filename, data, content_type) -> str:

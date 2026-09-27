@@ -146,31 +146,35 @@ def test_goal_loop_judges_the_amended_brief_between_turns(monkeypatch, board):
 
 
 # LOCAL-PATCH kanban-amend-noop (2026-09-23): on 2026-09-22 07:52 and 08:36 two amends wrote a body identical to
-# the current brief; the worker then saw an "amendment notice" with nothing changed. An identical body is refused.
-def test_amend_refuses_identical_body(board):
+# the current brief; the worker then saw an "amendment notice" with nothing changed. An identical body records
+# nothing. Since 2026-09-26 it succeeds as "unchanged" instead of failing the relay that restated the brief.
+def test_amend_identical_body_is_unchanged_and_records_nothing(board, monkeypatch):
     tid, _ = board
+    notices = []
+    monkeypatch.setattr(kb, "notify_task_updated", lambda *a, **k: notices.append(a))
     with kbc.connect_closing() as conn:
         before = len(kb.list_events(conn, tid)), len(kb.list_comments(conn, tid))
-        with pytest.raises(ValueError, match="identical to the current brief"):
-            kb.amend_task_body(conn, tid, body="  Run all six experiments, then publish.\n", author="michael",
-                               reason="restate")
+        assert kb.amend_task_body(conn, tid, body="  Run all six experiments, then publish.\n", author="michael",
+                                  reason="restate") == kb.AMEND_UNCHANGED
         assert (len(kb.list_events(conn, tid)), len(kb.list_comments(conn, tid))) == before
+    assert notices == []
 
 
-def test_worker_amend_identical_body_is_a_clear_error(board):
+def test_worker_amend_identical_body_succeeds_unchanged(board):
     from tools.registry import registry
 
     out = json.loads(registry.dispatch("kanban_amend", {
         "body": "Run all six experiments, then publish.", "reason": "restate"}))
-    assert "identical to the current brief" in out["error"]
+    assert out.get("ok") is True and out["outcome"] == "unchanged" and "error" not in out
 
 
-def test_cli_edit_identical_body_is_a_clear_error(board, capsys):
+def test_cli_edit_identical_body_succeeds_unchanged(board, capsys):
     tid, _ = board
     rc = kanban_cli._cmd_edit(_edit_args(task_id=tid, body="Run all six experiments, then publish.", reason="x"))
-    assert rc == 1 and "identical to the current brief" in capsys.readouterr().err
+    assert rc == 0 and capsys.readouterr().out.startswith(f"Unchanged {tid}")
     with kbc.connect_closing() as conn:
         assert [e.kind for e in kb.list_events(conn, tid)][-1] != "edited"
+        assert not kb.list_comments(conn, tid)
 
 
 def test_stale_worker_cannot_amend_successor_run(board):

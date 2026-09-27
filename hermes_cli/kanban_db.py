@@ -3271,14 +3271,17 @@ def edit_task(
     return True
 
 
+AMEND_UNCHANGED = "unchanged"
+
+
 def amend_task_body(
     conn: sqlite3.Connection, task_id: str, *, body: str, author: str, reason: str,
     expected_run_id: Optional[int] = None, title: Optional[str] = None, priority: Optional[int] = None,
-) -> bool:
+) -> bool | str:
     """LOCAL-PATCH kanban-amend (2026-09-21): replace an open task's brief when the objective changed
     mid-card, so the goal judge checks the new brief instead of rejecting completion against the old one.
     Records an ``edited`` event (``build_task_read`` re-sends the full task on it) and an ``AMENDED: reason``
-    comment. False for an unknown, done, or archived task."""
+    comment. ``AMEND_UNCHANGED`` when nothing differs; False for an unknown, done, or archived task."""
     if not reason or not reason.strip():
         raise ValueError("amend reason is required")
     if not author or not author.strip():
@@ -3290,14 +3293,15 @@ def amend_task_body(
             return False
         if expected_run_id is not None and row["current_run_id"] != expected_run_id:
             return False
-        # LOCAL-PATCH kanban-amend-noop (2026-09-23): an identical body is not an amendment; refusing it keeps
-        # the worker from acting on an "AMENDED" notice with nothing changed.
+        # LOCAL-PATCH kanban-amend-noop (2026-09-23, softened 2026-09-26): an identical body is not an amendment.
+        # It records nothing, so no worker acts on an "AMENDED" notice with nothing changed, and it succeeds, so
+        # a relay that restates the brief is not told it failed.
         changes = {key: value for key, value in (("body", body), ("title", title), ("priority", priority))
                    if value is not None and value != row[key]}
         if (row["body"] or "").strip() == (body or "").strip():
             changes.pop("body", None)
         if not changes:
-            raise ValueError("new body is identical to the current brief; nothing to amend")
+            return AMEND_UNCHANGED
         conn.execute(f"UPDATE tasks SET {', '.join(key + ' = ?' for key in changes)} WHERE id = ?",
                      (*changes.values(), task_id))
         if "body" in changes:

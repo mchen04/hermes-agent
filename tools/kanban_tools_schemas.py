@@ -346,8 +346,9 @@ KANBAN_AMEND_SCHEMA = _schema(
         "checks the task body, so after such a change amend it first, then "
         "finish with kanban_complete. Pass the FULL replacement brief, not a "
         "diff; keep any acceptance criteria that still apply. Records an "
-        "``edited`` event and an ``AMENDED: <reason>`` comment. Only your own "
-        "task can be amended, and not a done or archived one."
+        "``edited`` event and an ``AMENDED: <reason>`` comment. A brief identical "
+        "to the current one records nothing and returns outcome 'unchanged'. "
+        "Only your own task can be amended, and not a done or archived one."
     ),
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
