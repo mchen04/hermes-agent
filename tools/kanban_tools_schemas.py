@@ -184,7 +184,9 @@ KANBAN_BLOCK_SCHEMA = _schema(
         "Stop work on this task and route it according to WHY you're stuck. "
         "``kind`` is required: 'needs_input' (a person must decide or answer, "
         "including any sign-in, credential, approval or purchase; when they "
-        "answer as a comment the dispatcher re-runs this task), 'transient' "
+        "answer as a comment, typed on the card or relayed by the front door, "
+        "the dispatcher re-runs this task; comments from agents, including "
+        "yours, do not), 'transient' "
         "(a retryable failure on a non-goal task; the dispatcher re-runs this "
         "task after ``resume_after`` seconds, at least 10 minutes, a bounded "
         "number of times, then asks a person), 'capability' (a hard "
@@ -208,8 +210,8 @@ KANBAN_BLOCK_SCHEMA = _schema(
             "type": "string",
             "enum": ["dependency", "needs_input", "capability", "transient"],
             "description": (
-                "Why you're blocked. 'needs_input' re-runs when a comment "
-                "answers you; 'transient' re-runs on a bounded timer (non-goal "
+                "Why you're blocked. 'needs_input' re-runs when a person's "
+                "comment answers you; 'transient' re-runs on a bounded timer (non-goal "
                 "tasks only); 'capability' waits for an operator; 'dependency' "
                 "waits for an unfinished parent task."
             ),

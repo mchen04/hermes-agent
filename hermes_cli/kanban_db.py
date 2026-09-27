@@ -124,6 +124,13 @@ AUTO_RESUME_LIMIT = 8
 LIVE_OWNER_GRACE_SECONDS = 180
 # Event kinds that mark real progress or a human decision; the timer budget counts only resumes after the newest one.
 _AUTO_RESUME_RESET_KINDS = ("completed", "review_requested", "changes_requested", "gave_up", "promoted_manual", "created")
+# LOCAL-PATCH kanban-human-resume: a comment answers a block only when a person wrote or relayed it. Michael's
+# Discord answers arrive through the root front door ("default"; "worker" on older rows), the untriage cron and
+# CLI/dashboard edits write the labels below. Worker profiles (forge, argus, ...) and outside coders ("Codex",
+# "implementer") are not relays: their comments on a parked card re-blocked it within seconds (2026-09-22).
+_HUMAN_RELAY_AUTHORS = frozenset({"michael", "user", "operator", "dashboard", "desktop", "worker", "default"})
+_HOLD_PREFIXES = ("HOLD:", "STOP:")
+_ANSWER_IGNORED_PREFIXES = ("BLOCKED:", "SCHEDULED:", "CHANGES REQUESTED:", "AMENDED:", "UNBLOCK:", "[swarm:blackboard] ")
 
 
 class BlockRejected(ValueError):
@@ -3789,8 +3796,11 @@ def unblock_task(conn: sqlite3.Connection, task_id: str, *, auto_resume: Optiona
     human unblock stays distinguishable."""
     now = int(time.time())
     with write_txn(conn):
-        if (auto_resume is not None and auto_resume.get("trigger") == "transient_timeout"
-                and not _timer_resume_allowed(conn, task_id, auto_resume.get("blocked_event_id"))):
+        trigger = (auto_resume or {}).get("trigger")
+        if trigger == "transient_timeout" and not _timer_resume_allowed(conn, task_id, auto_resume.get("blocked_event_id")):
+            return False
+        if (trigger == "answered" and "blocked_event_id" in auto_resume
+                and not _answer_resume_allowed(conn, task_id, auto_resume["blocked_event_id"])):
             return False
         resume_status = (
             _resume_status_from_events(conn, task_id)
@@ -3842,55 +3852,118 @@ def unblock_task(conn: sqlite3.Connection, task_id: str, *, auto_resume: Optiona
         return True
 
 
+def _latest_block_event(conn, task_id):
+    return conn.execute(
+        "SELECT id, kind, payload, created_at FROM task_events WHERE task_id = ? "
+        "AND kind IN ('blocked', 'unblocked', 'gave_up', 'block_loop_detected', 'auto_resumed') "
+        "ORDER BY id DESC LIMIT 1", (task_id,),
+    ).fetchone()
+
+
+def _comments_since_block(conn, task_id, blocked_row, *, inclusive_second=False):
+    """Comments newer than the block: by the comment-id watermark, else by timestamp for legacy rows."""
+    watermark = _json_dict(blocked_row["payload"]).get("blocked_after_comment")
+    if isinstance(watermark, int) and not isinstance(watermark, bool):
+        predicate, value = "id > ?", watermark
+    else:
+        predicate, value = ("created_at >= ?" if inclusive_second else "created_at > ?"), blocked_row["created_at"]
+    return conn.execute(
+        f"SELECT id, author, body, created_at FROM task_comments WHERE task_id = ? AND {predicate} ORDER BY id",
+        (task_id, value),
+    ).fetchall()
+
+
+def _block_answer(conn, task_id, blocked_row):
+    """The first comment since the block that a person wrote or relayed, or ``None``.
+
+    A ``HOLD:``/``STOP:`` comment pins the card and drops earlier answers; a later relay comment lifts it.
+    Bookkeeping prefixes never count. LOCAL-PATCH kanban-human-resume."""
+    answer = None
+    for comment in _comments_since_block(conn, task_id, blocked_row):
+        body = str(comment["body"] or "").lstrip()
+        if body.startswith(_HOLD_PREFIXES):
+            answer = None
+            continue
+        if body.startswith(_ANSWER_IGNORED_PREFIXES):
+            continue
+        if str(comment["author"] or "").strip().lower() not in _HUMAN_RELAY_AUTHORS:
+            continue
+        if answer is None:
+            answer = comment
+    return answer
+
+
+def _answer_resume_allowed(conn, task_id, blocked_event):
+    """Recheck, under the caller's transaction, that the exact block is still open and still answered."""
+    row = conn.execute("SELECT status, block_kind FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    latest = _latest_block_event(conn, task_id)
+    if (not row or row["status"] != "blocked" or row["block_kind"] == "capability"
+            or not latest or latest["kind"] != "blocked" or latest["id"] != blocked_event):
+        return False
+    if row["block_kind"] is None and not _json_dict(latest["payload"]).get("auto_resumable"):
+        return False  # an operator parked it (dashboard drag, CLI without --kind): only a person unparks it
+    return _block_answer(conn, task_id, latest) is not None
+
+
 def _timer_resume_allowed(conn, task_id, blocked_event):
     """Recheck one blocked generation and every later HOLD under the caller's transaction."""
     from hermes_cli.kanban_recovery import requires_capacity_or_manual_recovery
 
     row = conn.execute("SELECT status, block_kind FROM tasks WHERE id = ?", (task_id,)).fetchone()
-    latest = conn.execute(
-        "SELECT id, kind, payload, created_at FROM task_events WHERE task_id = ? "
-        "AND kind IN ('blocked', 'unblocked', 'gave_up', 'block_loop_detected', 'auto_resumed') "
-        "ORDER BY id DESC LIMIT 1", (task_id,),
-    ).fetchone()
+    latest = _latest_block_event(conn, task_id)
     if (not row or row["status"] != "blocked" or row["block_kind"] != "transient"
             or not latest or latest["kind"] != "blocked" or latest["id"] != blocked_event):
         return False
-    payload = _json_dict(latest["payload"])
-    if requires_capacity_or_manual_recovery(payload):
+    if requires_capacity_or_manual_recovery(_json_dict(latest["payload"])):
         return False
-    watermark = payload.get("blocked_after_comment")
-    predicate, value = ("id > ?", watermark) if isinstance(watermark, int) else ("created_at >= ?", latest["created_at"])
-    comments = conn.execute(f"SELECT body FROM task_comments WHERE task_id = ? AND {predicate}",
-                            (task_id, value)).fetchall()
-    return not any(str(comment["body"] or "").lstrip().startswith(("HOLD:", "STOP:")) for comment in comments)
+    comments = _comments_since_block(conn, task_id, latest, inclusive_second=True)
+    return not any(str(comment["body"] or "").lstrip().startswith(_HOLD_PREFIXES) for comment in comments)
 
 
 def resume_stranded_blocks(
     conn: sqlite3.Connection, *, now: Optional[int] = None, max_auto_resumes: int = AUTO_RESUME_LIMIT,
 ) -> list[dict]:
-    """Retry temporary outages on a bounded timer. Decisions require explicit unblock.
+    """Dispatcher phase (LOCAL-PATCH kanban-stranded-resume): return blocked tasks to their resumable phase
+    when a person answered them or a temporary outage timed out. Call OUTSIDE any write txn.
 
-    Comments supply context, never permission. Quota, STOP, HOLD, capability, and
-    needs_input blocks stay parked. The unblock transaction rechecks the exact block.
+    * A comment newer than the block from a person or their relay (``_HUMAN_RELAY_AUTHORS``) resumes
+      ``needs_input``, ``transient`` and worker-filed untyped blocks; the answer is in the next worker's
+      context. Worker profiles and outside coders never answer a block. ``HOLD:``/``STOP:`` pins the card
+      until a later relay comment. A person's answer also resumes a quota block.
+    * ``transient`` also resumes on a timer: ``resume_after`` floored at ``MIN_TRANSIENT_RESUME_SECONDS``,
+      capped at ``MAX_TRANSIENT_RESUME_SECONDS``, at most ``max_auto_resumes`` timer resumes since the newest
+      progress event, human unblock or answer; then one ``auto_resume_exhausted`` wake. Quota wording and
+      HOLD/STOP pins never resume on the timer.
+    * ``capability`` and operator parks (no kind, not filed by the owning run) never resume.
+    The unblock transaction rechecks the exact block before it moves the card.
     """
-    if not TRANSIENT_TIMER_RESUMES:
-        return []
     now = int(now or time.time())
     resumed = []
-    rows = conn.execute("SELECT id FROM tasks WHERE status = 'blocked' AND block_kind = 'transient' ORDER BY id").fetchall()
+    rows = conn.execute(
+        "SELECT id, block_kind FROM tasks WHERE status = 'blocked' "
+        "AND (block_kind IS NULL OR block_kind != 'capability') ORDER BY id"
+    ).fetchall()
     for row in rows:
-        task_id = row["id"]
-        last = conn.execute(
-            "SELECT id, created_at, payload FROM task_events WHERE task_id = ? AND kind = 'blocked' "
-            "ORDER BY id DESC LIMIT 1", (task_id,),
-        ).fetchone()
-        if not last or not _timer_resume_allowed(conn, task_id, last["id"]):
+        task_id, kind = row["id"], row["block_kind"]
+        last = _latest_block_event(conn, task_id)
+        if not last or last["kind"] != "blocked":
             continue
         blocked_id, blocked_at = int(last["id"]), int(last["created_at"])
+        if _answer_resume_allowed(conn, task_id, blocked_id):
+            answer = _block_answer(conn, task_id, last)
+            record = {"trigger": "answered", "kind": kind, "blocked_event_id": blocked_id,
+                      "comment_id": int(answer["id"]), "author": answer["author"],
+                      "waited_seconds": int(answer["created_at"]) - blocked_at}
+            if unblock_task(conn, task_id, auto_resume=record):
+                resumed.append({"task_id": task_id, **record})
+            continue
+        if kind != "transient" or not TRANSIENT_TIMER_RESUMES or not _timer_resume_allowed(conn, task_id, blocked_id):
+            continue
         reset_row = conn.execute(
             "SELECT MAX(id) FROM task_events WHERE task_id = ? AND ("
             f"kind IN ({', '.join('?' for _ in _AUTO_RESUME_RESET_KINDS)}) "
-            "OR (kind = 'unblocked' AND (payload IS NULL OR payload NOT LIKE '%\"auto\": true%')))",
+            "OR (kind = 'unblocked' AND (payload IS NULL OR payload NOT LIKE '%\"auto\": true%')) "
+            "OR (kind = 'auto_resumed' AND payload LIKE '%\"trigger\": \"answered\"%'))",
             (task_id, *_AUTO_RESUME_RESET_KINDS),
         ).fetchone()
         count = int(conn.execute(
