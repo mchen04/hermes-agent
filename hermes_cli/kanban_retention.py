@@ -13,7 +13,7 @@ def digest(path):
 
 def manifest_entries(workspace):
     root=Path(workspace).resolve()
-    manifest=json.loads((root/'evidence-manifest.json').read_text())
+    manifest=json.loads((root/'evidence-manifest.json').read_text(encoding='utf-8'))
     entries=manifest['entries']
     if not entries or not any(e.get('kind')=='raw_source' for e in entries):
         raise ValueError('complete raw-source evidence manifest required')
@@ -32,7 +32,7 @@ def manifest_entries(workspace):
         raise ValueError('evidence manifest does not cover the complete workspace inventory')
     cited=set()
     for source_list in root.rglob('sources.md'):
-        cited.update(re.findall(r'https?://[^\s)>]+',source_list.read_text()))
+        cited.update(re.findall(r'https?://[^\s)>]+',source_list.read_text(encoding='utf-8')))
     if cited-{e.get('url') for e in entries if e.get('kind')=='raw_source'}:
         raise ValueError('cited sources missing raw evidence in manifest')
     return manifest
@@ -66,7 +66,7 @@ def archive_research(workspace, archive):
         for entry in manifest['entries']: z.write(root/entry['path'],entry['path'])
     sha=digest(dest);verify_archive(dest,sha)
     receipt={'archive':str(dest),'sha256':sha,'manifest_sha256':digest(root/'evidence-manifest.json')}
-    (root/'retention-verified.json').write_text(json.dumps(receipt,indent=2)+'\n')
+    (root/'retention-verified.json').write_text(json.dumps(receipt,indent=2)+'\n',encoding='utf-8')
     return receipt
 
 
@@ -76,7 +76,7 @@ def require_retention(workspace, *, research=False):
         'retention-required.json', 'retention-verified.json', 'evidence-manifest.json', 'gauntlet.json'))
     if not (research or evidence or any(root.rglob('sources.md'))):
         return
-    receipt=json.loads((root/'retention-verified.json').read_text())
+    receipt=json.loads((root/'retention-verified.json').read_text(encoding='utf-8'))
     archive=Path(receipt['archive']).resolve()
     if archive.is_relative_to(root.resolve()): raise ValueError('archive is inside disposable workspace')
     if receipt['manifest_sha256']!=digest(root/'evidence-manifest.json'):
