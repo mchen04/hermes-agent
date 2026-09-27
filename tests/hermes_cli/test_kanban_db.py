@@ -551,6 +551,7 @@ def test_respawn_guard_ignores_auth_words_in_crashed_worker_output(kanban_home):
         assert kbd.check_respawn_guard(conn, spawn_failed_id) == "blocker_auth"
 
 
+@pytest.mark.platforms("linux")
 def test_infrastructure_spawn_refusal_never_charges_the_card(
     kanban_home, monkeypatch, all_assignees_spawnable,
 ):
@@ -1551,18 +1552,26 @@ def test_connect_heals_reduced_tasks_schema_seeded_by_external_harness(kanban_ho
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_hermes_argv_prefers_module_form_over_path_shim(monkeypatch):
+def test_resolve_hermes_argv_prefers_module_form_over_path_shim(monkeypatch, tmp_path):
     """A `hermes` on PATH must not shadow the running install (#111569):
     the module argv wins whenever ``hermes_cli`` is importable; only an
     explicit ``$HERMES_BIN`` overrides it."""
     import shutil
     import sys
     from hermes_cli import kanban_db_dispatch as kbd
+    from tests.installation_launcher_fixture import publish_fixture_launcher
+
+    root = tmp_path / "installation"
+    publish_fixture_launcher(root, "print('correct installation')\n")
+    monkeypatch.setattr(kbd, "__file__", str(root / "hermes_cli/kanban_db_dispatch.py"))
 
     monkeypatch.delenv("HERMES_BIN", raising=False)
     monkeypatch.setattr(shutil, "which", lambda name: "/tmp/planted/hermes")
     monkeypatch.setattr(kbd, "_safe_which_no_cwd", lambda name: "/tmp/planted/hermes")
-    assert kbd._resolve_hermes_argv() == [sys.executable, "-m", "hermes_cli.main"]
+    import subprocess
+    result = subprocess.run(kbd._resolve_hermes_argv(), cwd=tmp_path, capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "correct installation"
 
     monkeypatch.setenv("HERMES_BIN", "/opt/hermes/bin/hermes")
     assert kbd._resolve_hermes_argv() == ["/opt/hermes/bin/hermes"]

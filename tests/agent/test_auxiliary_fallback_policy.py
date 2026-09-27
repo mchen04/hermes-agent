@@ -9,7 +9,7 @@ import threading
 import time
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 from openai import InternalServerError
 
 
@@ -170,3 +170,37 @@ def test_strict_compression_policy_has_no_auth_stall_or_main_model_escape(tmp_pa
     monkeypatch.setattr(compressor, "_generate_summary", forbidden_main_retry)
     assert compressor._on_summary_failure(RuntimeError("invalid API key"), [], None, "") is None
     assert compressor.summary_model == "summary-model"
+
+
+@pytest.mark.parametrize("async_mode", [False, True])
+def test_exhausted_pool_does_not_replace_explicit_key(tmp_path, monkeypatch, async_mode):
+    from agent import auxiliary_client as aux
+    from hermes_cli.auth import write_credential_pool
+    from gateway.run import _profile_runtime_scope
+
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    task = {"provider": "gemini", "model": "gemini-test", "api_key": "valid-explicit-key",
+            "base_url": "http://127.0.0.1:1/v1", "fallback_on": ["daily_quota"],
+            "fallback_chain": [{"provider": "custom", "model": "backup", "api_key": "backup-key",
+                                "base_url": "http://127.0.0.1:2/v1"}]}
+    second = tmp_path / "profiles/second"
+    second.mkdir(parents=True)
+    try:
+        for home in [tmp_path, second, tmp_path]:
+            (home / "config.yaml").write_text(yaml.safe_dump({"auxiliary": {"approval": task}}))
+            with _profile_runtime_scope(home, hydrate_secrets=False):
+                write_credential_pool("gemini", [{"id": "exhausted", "source": "manual", "auth_type": "api_key",
+                    "access_token": "unrelated-key", "priority": 0, "last_status": "exhausted",
+                    "last_status_at": time.time(), "last_error_code": 429,
+                    "last_error_message": "daily quota exhausted", "last_error_reset_at": time.time()+86400}])
+                for key, endpoint in [("valid-explicit-key", task["base_url"]), ("changed-key", "http://127.0.0.1:3/v1")]:
+                    route = aux._resolve_call_client("approval", provider="gemini", model="gemini-test",
+                        base_url=endpoint, api_key=key, resolved_provider="gemini", resolved_model="gemini-test",
+                        resolved_base_url=endpoint, resolved_api_key=key, resolved_api_mode=None,
+                        main_runtime=None, async_mode=async_mode)
+                    assert route.resolved_provider == "gemini"
+                    assert route.final_model == "gemini-test"
+                    assert not route.policy_fallback
+    finally:
+        aux.shutdown_cached_clients()

@@ -54,7 +54,7 @@ def _allowed_failure(error: Exception, provider: str, policy: frozenset[str]) ->
 
 
 def cached_policy_fallback(task: str, provider: str, model: str | None, base_url: str | None,
-                           policy: frozenset[str]):
+                           policy: frozenset[str], *, api_key: str | None = None):
     """Honor a confirmed outage or persisted daily exhaustion before sending another request."""
     from agent import auxiliary_client as aux
     from agent.credential_pool import load_pool
@@ -64,7 +64,7 @@ def cached_policy_fallback(task: str, provider: str, model: str | None, base_url
         key = aux._unhealthy_cache_key(provider, base_url)
         if aux._aux_unhealthy_reason.get(key) == _OUTAGE_REASON:
             reason = _OUTAGE_REASON
-    if reason is None and "daily_quota" in policy:
+    if reason is None and "daily_quota" in policy and not api_key:
         pool = load_pool(provider)
         if pool.has_credentials() and not pool.has_available():
             entries = pool.entries()

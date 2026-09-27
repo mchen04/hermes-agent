@@ -7221,7 +7221,8 @@ def _resolve_call_client(
     from agent.auxiliary_fallback_policy import cached_policy_fallback, task_fallback_policy
     policy = task_fallback_policy(task)
     if policy is not None:
-        cached = cached_policy_fallback(task, resolved_provider, resolved_model, resolved_base_url, policy)
+        cached = cached_policy_fallback(task, resolved_provider, resolved_model, resolved_base_url, policy,
+                                        api_key=resolved_api_key or api_key)
         if cached is not None:
             client, final_model, label = cached
             if async_mode:

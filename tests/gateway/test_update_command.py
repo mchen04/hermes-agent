@@ -92,19 +92,26 @@ class TestHandleUpdateCommand:
 
 
     @pytest.mark.asyncio
-    async def test_resolve_hermes_bin_module_argv(self):
+    async def test_resolve_hermes_bin_module_argv(self, tmp_path, monkeypatch):
         """_resolve_hermes_bin uses the running interpreter's module argv when hermes_cli is
         importable, even when PATH also offers a ``hermes`` binary (#111569: a PATH-first
         lookup would re-exec an attacker-planted executable on /update and /restart)."""
-        import sys
+        import subprocess
+        from tests.installation_launcher_fixture import publish_fixture_launcher
         from gateway.run import _resolve_hermes_bin
+
+        root = tmp_path / "installation"
+        publish_fixture_launcher(root, "print('correct installation')\n")
+        monkeypatch.setattr("gateway.run.__file__", str(root / "gateway/run.py"))
 
         fake_spec = MagicMock()
         with patch("shutil.which", return_value="/tmp/attacker/hermes"), \
              patch("importlib.util.find_spec", return_value=fake_spec):
             result = _resolve_hermes_bin()
 
-        assert result == [sys.executable, "-m", "hermes_cli.main"]
+        completed = subprocess.run(result, cwd=tmp_path, capture_output=True, text=True, timeout=20)
+        assert completed.returncode == 0, completed.stderr
+        assert completed.stdout.strip() == "correct installation"
 
     @pytest.mark.asyncio
     async def test_resolve_hermes_bin_falls_back_to_path_then_none(self):

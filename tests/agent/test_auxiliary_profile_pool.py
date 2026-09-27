@@ -11,7 +11,7 @@ import time
 from types import SimpleNamespace
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 
 def test_native_compression_and_review_resolve_profile_pool_across_worker_threads(tmp_path, monkeypatch):

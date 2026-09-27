@@ -888,14 +888,6 @@ def _goal_gate_error(conn, tid: str, evidence: str, handoff: str, blocked_hint: 
     verdict, rejection = _goal_mode_handoff_rejection(kb.get_task(conn, tid), evidence,
                                                       prior_rejection_criteria(conn, tid))
     if verdict == "blocked":
-        # LOCAL-PATCH kanban-judge-transient: a provider failure parks the card on a timer instead.
-        from hermes_cli.goals import block_provider_failure, provider_failure_reason
-
-        transient = provider_failure_reason(rejection or "", evidence)
-        if transient is not None and block_provider_failure(kb, conn, tid, transient,
-                                                            expected_run_id=_worker_run_id_for(tid)):
-            return (f"kanban: goal {handoff} of {tid} rejected: provider failure, not an unachievable "
-                    f"goal — {rejection}. The card is parked as a transient block for automatic retry.")
         record_goal_rejection(kb, conn, tid, rejection or "", evidence)
         return (f"kanban: goal {handoff} of {tid} rejected: judge ruled "
                 f"the goal unachievable — {rejection}. {blocked_hint}")
@@ -979,16 +971,18 @@ def _cmd_edit(args: argparse.Namespace) -> int:
             if current is None:
                 return _err(f"cannot amend {args.task_id} (unknown id or task is done/archived)")
             if current.status not in ("done", "archived"):
+                if result is not None:
+                    return _err(f"cannot edit {args.task_id} (--result requires a done task)")
                 reason = getattr(args, "reason", None) or "brief amended via CLI"
                 try:
-                    amended = kb.amend_task_body(conn, args.task_id, body=body, author=_profile_author(), reason=reason)
+                    amended = kb.amend_task_body(conn, args.task_id, body=body, author=_profile_author(), reason=reason,
+                                                 title=title, priority=priority,
+                                                 expected_run_id=_worker_run_id_for(args.task_id))
                 except ValueError as exc:  # LOCAL-PATCH kanban-amend-noop: identical body
                     return _err(f"cannot amend {args.task_id}: {exc}")
                 if not amended:
                     return _err(f"cannot amend {args.task_id} (unknown id or task is done/archived)")
-                body = None
-                if all(value is None for value in (title, priority, result)):
-                    return _ok_or_err(True, "", f"Amended {args.task_id}")
+                return _ok_or_err(True, "", f"Amended {args.task_id}")
         ok = kb.edit_task(
             conn, args.task_id, title=title, body=body, priority=priority,
             result=result, summary=summary, metadata=metadata,

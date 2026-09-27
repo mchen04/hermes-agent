@@ -17,8 +17,7 @@ from typing import Any, Callable, Optional
 
 from agent.redact import redact_sensitive_text
 from hermes_cli.goals import (
-    PROVIDER_FAILURE_RESUME_SECONDS, block_provider_failure, judge_goal, prior_rejection_criteria,
-    provider_failure_reason, record_goal_rejection,
+    judge_goal, prior_rejection_criteria, record_goal_rejection,
 )
 from tools.registry import no_cache_check_fn, registry, tool_error
 from hermes_cli.config import cfg_get, load_config
@@ -113,7 +112,7 @@ def _check_kanban_orchestrator_mode() -> bool:
 # would silently skip the run-ownership CAS in kanban_db. Non-lifecycle tools
 # (heartbeat / attach / attach_url) do not terminate a run and are not gated.
 _RUN_LIFECYCLE_TOOLS = frozenset({
-    "kanban_complete", "kanban_block",
+    "kanban_complete", "kanban_block", "kanban_amend",
     "kanban_request_review", "kanban_request_changes",
 })
 
@@ -487,16 +486,6 @@ def _goal_gate(tool_name: str, task, tid: str, evidence: str, *, kb=None, conn=N
         return
     if verdict == "done":
         return
-    if verdict == "blocked" and kb is not None:
-        # LOCAL-PATCH kanban-judge-transient: a provider failure is not an unachievable goal. Park the
-        # card on a timer here — kanban_block refuses transient on goal_mode, so the worker cannot.
-        transient = provider_failure_reason(reason, evidence)
-        if transient is not None and block_provider_failure(kb, conn, tid, transient,
-                                                            expected_run_id=_worker_run_id(tid)):
-            raise _Reject(
-                f"{tool_name} rejected: the judge saw a provider failure, not a finished goal — {reason}. "
-                f"The card is parked as a transient block and the dispatcher retries it in "
-                f"{PROVIDER_FAILURE_RESUME_SECONDS // 60} minutes. Stop work on this task now.")
     if kb is not None and conn is not None:
         record_goal_rejection(kb, conn, tid, reason, evidence)  # LOCAL-PATCH kanban-judge-memory
     key = "blocked" if verdict == "blocked" else "continue"
@@ -906,10 +895,11 @@ def _handle_amend(args: dict, **kw) -> str:
     tid = _worker_guard("kanban_amend", args)
     body = _redact(_require_text(args, "body", "body is required — pass the full replacement brief"))
     reason = _redact(_require_text(args, "reason", "reason is required — one line on why the brief changed"))
-    author = os.environ.get("HERMES_PROFILE") or "worker"
+    author = _persisted_identity()
     with _board(args.get("board")) as (kb, conn):
         try:
-            ok = kb.amend_task_body(conn, tid, body=str(body), author=author, reason=str(reason))
+            ok = kb.amend_task_body(conn, tid, body=str(body), author=author, reason=str(reason),
+                                    expected_run_id=_worker_run_id(tid))
         except ValueError as exc:
             raise _Reject(str(exc))
         _check(ok, f"could not amend {tid} (unknown id, or the task is done/archived)")

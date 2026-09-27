@@ -50,3 +50,9 @@ def test_other_wake_kinds_are_unchanged():
     assert notifier._wakes_origin(SimpleNamespace(kind="completed", payload={})) is True
     assert notifier._wakes_origin(SimpleNamespace(kind="auto_resumed", payload={})) is False
     assert notifier._wakes_origin(SimpleNamespace(kind="unblocked", payload={})) is False
+
+
+def test_non_retrying_quota_block_is_visible():
+    event = SimpleNamespace(kind="blocked", payload={"kind": "transient", "reason": "rate limit reached (429)"})
+    assert notifier._fmt_blocked(event, _head())[0]
+    assert notifier._wakes_origin(event)

@@ -2917,9 +2917,8 @@ def _resolve_hermes_bin() -> Optional[list[str]]:
     try:
         import importlib.util
         if importlib.util.find_spec("hermes_cli") is not None:
-            # LOCAL-PATCH gateway-venv-python: the launcher interpreter cannot import hermes_cli.
-            from hermes_cli.hermes_interpreter import hermes_python
-            return [hermes_python(), "-m", "hermes_cli.main"]
+            from hermes_cli._launchers import installation_command
+            return installation_command(Path(__file__).resolve().parents[1])
     except Exception:
         pass
     import shutil

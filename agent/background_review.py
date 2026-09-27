@@ -1310,6 +1310,15 @@ def spawn_background_review_thread(
     # Per-agent overrides (agent._MEMORY_REVIEW_PROMPT etc.) keep working.
     name = _PROMPT_NAME_BY_SCOPE[(review_memory, review_skills)]
     prompt = getattr(agent, name, globals()[name])
+    # A source-owning extension may supply a review prompt without changing cached session prefixes.
+    from hermes_cli.lifecycle import invoke_hook
+    for result in invoke_hook(
+        "background_review_prompt", prompt=prompt, review_memory=review_memory,
+        review_skills=review_skills, explicit=explicit,
+        session_id=getattr(agent, "session_id", ""),
+    ):
+        if isinstance(result, dict) and isinstance(result.get("prompt"), str) and result["prompt"].strip():
+            prompt = result["prompt"]
     if focus := (focus or "").strip():
         prompt = (
             f"{prompt}\n\nThe user explicitly requested this review with the following "

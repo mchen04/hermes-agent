@@ -461,8 +461,6 @@ def _fmt_timed_out(ev, n) -> tuple:
 # it posts nothing and wakes nobody. `needs_input` is a question for a person: it posts and
 # wakes. `capability` is a wall for the operator profile to fix: it posts, but does not wake
 # the origin to compose an environment question the user cannot answer.
-_QUIET_BLOCK_KINDS = frozenset({"transient"})
-_NO_WAKE_BLOCK_KINDS = frozenset({"transient", "capability"})
 
 
 def _block_kind(ev: Any) -> Optional[str]:
@@ -471,7 +469,7 @@ def _block_kind(ev: Any) -> Optional[str]:
 
 
 def _fmt_blocked(ev, n) -> tuple:
-    if _block_kind(ev) in _QUIET_BLOCK_KINDS:
+    if _has_timer_retry(ev):
         return None, None, None
     return f"⏸ {n.head} blocked{_clip(ev, 'reason', ': {}', 160)}", None, None
 
@@ -479,7 +477,12 @@ def _fmt_blocked(ev, n) -> tuple:
 def _wakes_origin(ev: Any) -> bool:
     if ev.kind not in _WAKE_KINDS:
         return False
-    return not (ev.kind == "blocked" and _block_kind(ev) in _NO_WAKE_BLOCK_KINDS)
+    return not (ev.kind == "blocked" and (_block_kind(ev) == "capability" or _has_timer_retry(ev)))
+
+
+def _has_timer_retry(ev: Any) -> bool:
+    from hermes_cli.kanban_recovery import requires_capacity_or_manual_recovery
+    return _block_kind(ev) == "transient" and not requires_capacity_or_manual_recovery(ev.payload or {})
 
 
 _EVENT_FORMATTERS: dict[str, Callable[[Any, "_KanbanNotification"], tuple]] = {

@@ -11,7 +11,8 @@ import re
 import subprocess
 from urllib.parse import quote
 
-import yaml
+from ruamel.yaml import YAML
+from ruamel.yaml.error import YAMLError
 
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _PR = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)")
@@ -37,26 +38,6 @@ def _api(endpoint: str, *, query: str | None = None, paginate: bool = False):
     if isinstance(value, dict) and value.get("errors"):
         raise ValueError("GitHub returned incomplete GraphQL evidence")
     return value
-
-
-def supersede_check(contract: str | None, published_pr: str | None) -> tuple[bool, str | None]:
-    """LOCAL-PATCH kanban-pr-supersede (2026-09-23): may ``published_pr`` replace the PR bound in ``contract``?
-
-    ``(False, None)``: not a candidate (no bound PR, other repo, same or older number). ``(True, None)``: a newer
-    PR in the same repository and the bound PR is merged or closed; the caller rebinds and the newer PR's own
-    checks decide. ``(False, detail)``: a candidate that is refused, with the reason for the worker."""
-    bound = _PR.fullmatch(contract or "")
-    new = _PR.fullmatch(published_pr) if isinstance(published_pr, str) else None
-    if not bound or not new or new[1] != bound[1] or int(new[2]) <= int(bound[2]):
-        return False, None
-    try:
-        state = _api(f"repos/{bound[1]}/pulls/{int(bound[2])}").get("state")
-    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, AttributeError):
-        return False, "Could not read the bound PR's state from GitHub; retry completion."
-    if state != "closed":
-        return False, (f"The task is bound to {contract}, which is still open. Merge or close it before a newer PR "
-                       f"can replace it, or supply metadata.published_pr={contract}.")
-    return True, None
 
 
 def collect_acceptance(contract: str, published_pr: str | None) -> dict:
@@ -105,15 +86,8 @@ def collect_acceptance(contract: str, published_pr: str | None) -> dict:
             suites = [suite for page in suite_pages for suite in page["check_suites"]]
             if len({s["id"] for s in suites}) != suite_pages[0]["total_count"]:
                 raise ValueError("Incomplete check-suite pagination")
-            # GitHub auto-creates app suites on push even when an integration
-            # never accepts work. An untouched optional placeholder is not CI.
-            unreported = {s["id"] for s in suites if _unreported_app_suite(s)}
-            receipt["unreported_suites"] = [{"id": s["id"], "app": s["app"]["name"],
-                "head_sha": s["head_sha"], "status": s["status"]}
-                for s in suites if s["id"] in unreported]
             selected_checks = runs + list(latest_statuses.values()) + [
-                {**suite, "name": f"{suite['app']['name']} suite"}
-                for suite in suites if suite["id"] not in unreported]
+                {**suite, "name": f"{suite['app']['name']} suite"} for suite in suites]
             receipt["policy"] = "all-reported-checks"
             if not selected_checks:
                 workflows = _api(f"repos/{repo}/actions/workflows?per_page=100", paginate=True)
@@ -164,13 +138,6 @@ def collect_acceptance(contract: str, published_pr: str | None) -> dict:
         return receipt
 
 
-def _unreported_app_suite(suite: dict) -> bool:
-    return (suite.get("app", {}).get("slug") not in {None, "github-actions"}
-            and suite.get("status") == "queued" and suite.get("conclusion") is None
-            and suite.get("latest_check_runs_count") == 0
-            and bool(suite.get("created_at")) and suite.get("created_at") == suite.get("updated_at"))
-
-
 def _expects_head_checks(repo: str, sha: str, workflow: dict, pr: dict) -> bool:
     """Only branch push/PR triggers promise head CI; unrelated automation does not."""
     path = workflow["path"]
@@ -180,8 +147,8 @@ def _expects_head_checks(repo: str, sha: str, workflow: dict, pr: dict) -> bool:
     if content.get("encoding") != "base64":
         raise ValueError("Workflow definition is incomplete")
     try:
-        definition = yaml.load(base64.b64decode(''.join(content['content'].split()), validate=True), Loader=yaml.BaseLoader)
-    except (ValueError, yaml.YAMLError) as exc:
+        definition = YAML(typ="base").load(base64.b64decode(''.join(content['content'].split()), validate=True))
+    except (ValueError, YAMLError) as exc:
         raise ValueError("Workflow definition is invalid") from exc
     events = definition.get("on") if isinstance(definition, dict) else None
     if isinstance(events, str):

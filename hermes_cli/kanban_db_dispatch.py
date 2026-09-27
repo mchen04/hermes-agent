@@ -2459,9 +2459,9 @@ def _module_hermes_argv() -> list[str]:
     console-script target — there is no top-level ``hermes`` package).
     LOCAL-PATCH kanban-venv-python: the managed launcher interpreter cannot import
     ``hermes_cli``, so workers spawned with it crashed at once after 0.21.5."""
-    from hermes_cli.hermes_interpreter import hermes_python
+    from hermes_cli._launchers import installation_command
 
-    return [hermes_python(), "-m", "hermes_cli.main"]
+    return installation_command(Path(__file__).resolve().parents[1])
 
 
 def _absolute_hermes_path(path: str) -> str:

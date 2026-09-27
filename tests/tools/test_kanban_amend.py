@@ -171,3 +171,39 @@ def test_cli_edit_identical_body_is_a_clear_error(board, capsys):
     assert rc == 1 and "identical to the current brief" in capsys.readouterr().err
     with kbc.connect_closing() as conn:
         assert [e.kind for e in kb.list_events(conn, tid)][-1] != "edited"
+
+
+def test_stale_worker_cannot_amend_successor_run(board):
+    from tools.registry import registry
+    tid, old_run = board
+    with kbc.connect_closing() as conn:
+        assert kb.block_task(conn, tid, reason="approval", kind="needs_input", expected_run_id=old_run)
+        assert kb.unblock_task(conn, tid)
+        assert kb.claim_task(conn, tid, claimer="test-worker")
+        assert kb.get_task(conn, tid).current_run_id != old_run
+    result = json.loads(registry.dispatch("kanban_amend", {"body": "Drop all criteria", "reason": "stale"}))
+    assert "error" in result
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, tid).body == "Run all six experiments, then publish."
+
+
+def test_missing_run_identity_cannot_amend(board, monkeypatch):
+    from tools.registry import registry
+    monkeypatch.delenv("HERMES_KANBAN_RUN_ID")
+    result = json.loads(registry.dispatch("kanban_amend", {"body": "Drop all criteria", "reason": "unbound"}))
+    assert "error" in result
+
+
+def test_cli_title_change_survives_identical_body(board):
+    tid, _ = board
+    assert kanban_cli._cmd_edit(_edit_args(task_id=tid, body="Run all six experiments, then publish.", title="New title")) == 0
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, tid).title == "New title"
+        assert not kb.list_comments(conn, tid)
+
+
+def test_invalid_result_does_not_partially_commit_amendment(board):
+    tid, _ = board
+    assert kanban_cli._cmd_edit(_edit_args(task_id=tid, body="Incorrectly changed", result="premature")) == 1
+    with kbc.connect_closing() as conn:
+        assert kb.get_task(conn, tid).body == "Run all six experiments, then publish."

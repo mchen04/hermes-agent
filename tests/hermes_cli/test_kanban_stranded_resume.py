@@ -118,7 +118,7 @@ def test_owner_run_can_always_block_itself(kanban_home):
 # Answers resume; bookkeeping and HOLD do not
 # ---------------------------------------------------------------------------
 
-def test_needs_input_resumes_when_a_comment_answers(kanban_home):
+def test_needs_input_requires_explicit_unblock_after_answer(kanban_home):
     with kbc.connect_closing() as conn:
         tid = _running_task(conn)
         kb.add_comment(conn, tid, "worker", "BLOCKED: which colour?")  # CLI-style prefix comment before the block
@@ -126,10 +126,10 @@ def test_needs_input_resumes_when_a_comment_answers(kanban_home):
         assert kb.resume_stranded_blocks(conn) == [], "no answer yet"
         _backdate_all(conn, tid)
         kb.add_comment(conn, tid, "michael", "ANSWER: blue")
-        resumed = kb.resume_stranded_blocks(conn)
-        assert resumed and resumed[0]["trigger"] == "answered" and resumed[0]["author"] == "michael"
+        assert kb.resume_stranded_blocks(conn) == []
+        assert kb.unblock_task(conn, tid)
         assert _status(conn, tid) == "ready"
-        assert _events(conn, tid)[-2:] == ["unblocked", "auto_resumed"]
+        assert _events(conn, tid)[-1] == "unblocked"
 
 
 def _make_profile(home, name):
@@ -138,14 +138,15 @@ def _make_profile(home, name):
     (profile / "config.yaml").write_text("")
 
 
-def test_untyped_worker_block_resumes_on_answer_too(kanban_home):
+def test_untyped_worker_block_requires_explicit_unblock(kanban_home):
     _make_profile(kanban_home, "forge")  # a Hermes profile relays its operator's answer
     with kbc.connect_closing() as conn:
         tid = _running_task(conn)
         assert kb.block_task(conn, tid, reason="handoff pending", expected_run_id=1)
         _backdate_all(conn, tid)
         kb.add_comment(conn, tid, "forge", "owner checkpoint verified, continue")
-        assert kb.resume_stranded_blocks(conn)
+        assert kb.resume_stranded_blocks(conn) == []
+        assert kb.unblock_task(conn, tid)
         assert _status(conn, tid) == "ready"
 
 
@@ -173,9 +174,10 @@ def test_hold_and_bookkeeping_comments_keep_the_card_parked(kanban_home):
         kb.add_comment(conn, tid, "auto-decomposer", "split into children")
         assert kb.resume_stranded_blocks(conn) == []
         assert _status(conn, tid) == "blocked"
-        # a later plain comment lifts the hold
+        # A plain comment does not lift the hold. The authorized relay calls unblock.
         kb.add_comment(conn, tid, "michael", "continue")
-        assert kb.resume_stranded_blocks(conn)
+        assert kb.resume_stranded_blocks(conn) == []
+        assert kb.unblock_task(conn, tid)
         assert _status(conn, tid) == "ready"
 
 
@@ -193,19 +195,20 @@ def test_outside_agent_comment_does_not_resume_a_parked_card(kanban_home):
         assert kb.resume_stranded_blocks(conn) == []
         assert _status(conn, tid) == "blocked"
         kb.add_comment(conn, tid, "default", "Michael: resume it")
-        resumed = kb.resume_stranded_blocks(conn)
-        assert resumed and resumed[0]["author"] == "default"
+        assert kb.resume_stranded_blocks(conn) == []
+        assert kb.unblock_task(conn, tid)
         assert _status(conn, tid) == "ready"
 
 
 @pytest.mark.parametrize("author", ["michael", "operator", "user", "dashboard", "worker", "Default"])
-def test_human_relay_authors_resume(kanban_home, author):
+def test_comments_require_explicit_unblock(kanban_home, author):
     with kbc.connect_closing() as conn:
         tid = _running_task(conn)
         assert kb.block_task(conn, tid, reason="q", kind="needs_input", expected_run_id=1)
         _backdate_all(conn, tid)
         kb.add_comment(conn, tid, author, "go ahead")
-        assert kb.resume_stranded_blocks(conn)
+        assert kb.resume_stranded_blocks(conn) == []
+        assert kb.unblock_task(conn, tid)
 
 
 def test_outside_agent_comment_does_not_cut_a_transient_timer_short(kanban_home):
@@ -244,14 +247,14 @@ def test_transient_timer_is_floored_at_ten_minutes(kanban_home):
         assert _status(conn, tid) == "ready"
 
 
-def test_transient_block_resumes_sooner_on_a_comment(kanban_home):
+def test_transient_comment_does_not_shorten_timer(kanban_home):
     with kbc.connect_closing() as conn:
         tid = _running_task(conn)
         assert kb.block_task(conn, tid, reason="waiting on mbp-main", kind="transient", expected_run_id=1, resume_after=3600)
         _backdate_all(conn, tid)
         kb.add_comment(conn, tid, "michael", "the build is done, continue")
-        resumed = kb.resume_stranded_blocks(conn)
-        assert resumed and resumed[0]["trigger"] == "answered"
+        assert kb.resume_stranded_blocks(conn) == []
+        assert kb.unblock_task(conn, tid)
 
 
 def test_transient_hold_comment_pins_against_the_timer(kanban_home):
@@ -275,7 +278,32 @@ def test_quota_wording_never_resumes_on_the_timer(kanban_home):
         assert _status(conn, tid) == "blocked"
         _backdate_all(conn, tid)
         kb.add_comment(conn, tid, "michael", "quota is back, continue")
-        assert kb.resume_stranded_blocks(conn), "a person's word still resumes it"
+        assert kb.resume_stranded_blocks(conn) == []
+        assert kb.unblock_task(conn, tid), "the relay explicitly resumes authorized work"
+
+
+def test_hold_added_between_scan_and_transition_prevents_retry(kanban_home, monkeypatch):
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn)
+        assert kb.block_task(conn, tid, reason="temporary outage", kind="transient", expected_run_id=1)
+        _age_block(conn, tid, 5000)
+        original = kb.unblock_task
+        def hold_then_unblock(connection, task, **kwargs):
+            with kbc.connect_closing() as other:
+                kb.add_comment(other, task, "michael", "HOLD: do not resume")
+            return original(connection, task, **kwargs)
+        monkeypatch.setattr(kb, "unblock_task", hold_then_unblock)
+        assert kb.resume_stranded_blocks(conn) == []
+        assert _status(conn, tid) == "blocked"
+
+
+def test_recycled_pid_does_not_prevent_operator_recovery(kanban_home):
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn)
+        with kb.write_txn(conn):
+            conn.execute("UPDATE tasks SET worker_pid=?, worker_started_at=?, last_heartbeat_at=?, claim_lock=? WHERE id=?",
+                         (os.getpid(), "old-boot|invalid", int(time.time())-7200, f"{socket.gethostname()}:1", tid))
+        assert kb.block_task(conn, tid, kind="needs_input", reason="recover abandoned worker")
 
 
 def test_timer_budget_counts_only_timer_resumes_and_resets_on_an_answer(kanban_home):
@@ -295,11 +323,11 @@ def test_timer_budget_counts_only_timer_resumes_and_resets_on_an_answer(kanban_h
         assert _events(conn, tid).count("auto_resume_exhausted") == 1
         assert kb.resume_stranded_blocks(conn) == []
         assert _events(conn, tid).count("auto_resume_exhausted") == 1, "no duplicate alerts"
-        # a person's comment resumes it and resets the timer budget
+        # An explicit unblock resets the timer budget.
         _backdate_all(conn, tid)
         kb.add_comment(conn, tid, "michael", "keep going")
-        resumed = kb.resume_stranded_blocks(conn)
-        assert resumed and resumed[0]["trigger"] == "answered"
+        assert kb.resume_stranded_blocks(conn) == []
+        assert kb.unblock_task(conn, tid)
         _reclaim(conn, tid)
         run += 1
         assert kb.block_task(conn, tid, reason="w", kind="transient", expected_run_id=run)
