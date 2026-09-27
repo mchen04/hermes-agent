@@ -137,10 +137,10 @@ JUDGE_SYSTEM_PROMPT = (
     "401 belongs to the model provider the agent was calling, not to some "
     "other service's token.\n\n"
     # LOCAL-PATCH kanban-judge-transient: a provider outage is a retry, not a verdict on the goal.
-    "A provider or transport failure the agent hit (a timeout, HTTP 529 Overloaded, a "
-    "rate limit, 'API call failed after N attempts') never makes a goal unachievable. "
-    "Still return BLOCKED and quote that error verbatim; the supervisor retries it later "
-    "instead of giving up.\n\n"
+    "A provider or transport failure the agent hit (a timeout, HTTP 5xx or 529 Overloaded, "
+    "'API call failed after N attempts', a quota or rate limit) never makes a goal "
+    "unachievable. Still return BLOCKED and quote that error verbatim: the supervisor "
+    "retries an outage on a timer and asks a person only about quota.\n\n"
     "WAIT — the goal is NOT done, but the next step is to wait for async "
     "work to finish rather than act again. Choose this ONLY when the agent's "
     "progress is genuinely gated on something running on its own:\n"
@@ -1634,6 +1634,35 @@ def prior_rejection_criteria(conn, task_id: str) -> List[str]:
     ]
 
 
+# LOCAL-PATCH kanban-judge-transient (2026-09-21, narrowed 2026-09-26): goal cards t_2d71bdfb, t_051720cf and
+# t_04dc2922 were parked for a person because the coder's provider timed out ("Non-streaming API call timed out
+# after 1200s", "Request timed out"). An outage heals on its own: the loop parks the card as a timed transient
+# block instead. Only the judge's reason is matched (the judge quotes the error verbatim); quota, rate-limit and
+# STOP/HOLD wording still waits for a person.
+_PROVIDER_OUTAGE_RE = re.compile(
+    r"timed out after \d+\s*s|Request timed out|Non-streaming API call|API call failed after"
+    r"|failed on (?:all )?three attempts|\b529\b|\bOverloaded\b"
+    r"|\b(?:HTTP|status|error|code)\s*[:=]?\s*5\d\d\b"
+    r"|Internal Server Error|Bad Gateway|Service Unavailable|Gateway Time-?out"
+    r"|connection (?:reset|refused|error)|upstream connect error",
+    re.IGNORECASE,
+)
+PROVIDER_OUTAGE_RESUME_SECONDS = 600
+PROVIDER_OUTAGE_PREFIX = "Provider outage (timer retry): "
+
+
+def provider_outage_reason(reason: str) -> Optional[str]:
+    """The transient block reason for a judge BLOCKED verdict caused by a provider outage, else ``None``."""
+    from hermes_cli.kanban_recovery import requires_capacity_or_manual_recovery
+
+    text = (reason or "").strip()
+    if not text or not _PROVIDER_OUTAGE_RE.search(text):
+        return None
+    if requires_capacity_or_manual_recovery({"reason": text}):
+        return None  # a timer is not evidence that quota is back
+    return PROVIDER_OUTAGE_PREFIX + text
+
+
 _KANBAN_TERMINAL_STATUSES = {
     "done": ("completed_by_worker", "worker completed the task", "task {task_id} completed by worker after {turns} turn(s)"),
     "blocked": ("blocked_by_worker", "worker blocked the task", "task {task_id} blocked by worker after {turns} turn(s)"),
@@ -1654,10 +1683,14 @@ def run_kanban_goal_loop(
     first_response: str = "",
     log=None,
     goal_text_fn=None,
+    transient_block_fn=None,
 ) -> Dict[str, Any]:
     """Drive a kanban worker through a Ralph-style goal loop.
 
     ``goal_text_fn()`` re-reads an authorized amendment before each judge call.
+    ``transient_block_fn(reason, resume_after) -> bool`` parks the card on the dispatcher's transient
+    timer when a BLOCKED verdict is a provider outage (LOCAL-PATCH kanban-judge-transient); when it is
+    missing or fails, ``block_fn`` parks the card for a person as before.
 
     Each iteration: stop if the worker already terminated the task (``kanban_complete`` /
     ``kanban_block`` / review hand-off); otherwise judge the latest response against ``goal_text``
@@ -1726,6 +1759,16 @@ def run_kanban_goal_loop(
         _log(f"kanban goal loop: turn {turns_used}/{max_turns} verdict={verdict} reason={_truncate(reason, 120)}")
 
         if verdict == "blocked":
+            outage = provider_outage_reason(reason) if transient_block_fn is not None else None
+            if outage is not None:
+                try:
+                    parked = bool(transient_block_fn(outage, PROVIDER_OUTAGE_RESUME_SECONDS))
+                except Exception as exc:
+                    _log(f"kanban goal loop: transient block failed ({exc}); parking for a person")
+                    parked = False
+                if parked:
+                    _log(f"kanban goal loop: task {task_id} hit a provider outage; retrying on the timer")
+                    return _result("blocked_transient", f"provider outage: {reason}")
             # Unachievable is NOT done: block the card with the judge's reason now instead of
             # re-poking an impossible goal, and never let it land in done.
             # The judge ruled the goal cannot be satisfied at all — this is NOT done (#100954).
@@ -1772,6 +1815,6 @@ __all__ = [
     "JUDGE_USER_PROMPT_WITH_SUBGOALS_TEMPLATE", "JUDGE_USER_PROMPT_WITH_CONTRACT_TEMPLATE",
     "DRAFT_CONTRACT_SYSTEM_PROMPT", "KANBAN_GOAL_CONTINUATION_TEMPLATE", "KANBAN_GOAL_FINALIZE_TEMPLATE",
     "DEFAULT_MAX_TURNS", "load_goal", "save_goal", "clear_goal", "migrate_goal_to_session", "judge_goal",
-    "run_kanban_goal_loop",
+    "run_kanban_goal_loop", "provider_outage_reason", "PROVIDER_OUTAGE_RESUME_SECONDS",
     "record_goal_rejection", "prior_rejection_criteria", "GOAL_REJECTION_EVENT",
 ]

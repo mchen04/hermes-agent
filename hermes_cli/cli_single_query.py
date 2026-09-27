@@ -103,10 +103,17 @@ def _run_kanban_goal_loop_q(cli: "HermesCLI", first_response: str, run_turn=None
         with _kbc.connect_closing() as c:
             _kb.block_task(c, task_id, reason=reason, expected_run_id=worker_run_id)
 
+    def _block_transient(reason: str, resume_after: int) -> bool:
+        # LOCAL-PATCH kanban-judge-transient: this supervisor is ending on purpose, so ``force`` passes the
+        # goal-mode transient guard; the dispatcher's timer brings the card back.
+        with _kbc.connect_closing() as c:
+            return _kb.block_task(c, task_id, reason=reason, kind="transient", resume_after=resume_after,
+                                  expected_run_id=worker_run_id, force=True)
+
     _run_loop(
         task_id=task_id, goal_text=goal_text, run_turn=run_turn or _quiet_turn,
         task_status_fn=_task_status, block_fn=_block,
-        goal_text_fn=_goal_text,
+        goal_text_fn=_goal_text, transient_block_fn=_block_transient,
         max_turns=task.goal_max_turns or _DEF_TURNS, first_response=first_response or "",
         log=log or (lambda m: logger.info("%s", m)),
     )
