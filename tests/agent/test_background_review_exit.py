@@ -10,6 +10,7 @@ from __future__ import annotations
 import threading
 import time
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -148,7 +149,23 @@ def test_spawn_records_the_review_thread_for_joiners(monkeypatch):
     assert ran.is_set()
 
 
+def test_failed_cron_review_needs_model_output(monkeypatch):
+    agent = _ReviewingAgent([{"role": "user", "content": "run the job"}])
+    assert bre.start_failed_cron_review(agent, "job1") is None
+    assert agent.spawned == []
 
+
+def test_failed_cron_review_can_be_turned_off(monkeypatch):
+    monkeypatch.setattr(bre, "_section", lambda name: {"review_failed_runs": False} if name == "cron" else {})
+    agent = _ReviewingAgent(_session("terminal"))
+    assert bre.start_failed_cron_review(agent, "job1") is None
+    assert agent.spawned == []
+
+
+def test_failed_cron_review_never_raises():
+    agent = _ReviewingAgent(_session("terminal"))
+    agent._spawn_background_review = MagicMock(side_effect=RuntimeError("boom"))
+    assert bre.start_failed_cron_review(agent, "job1") is None
 
 
 def test_one_shot_parent_without_skill_manage_still_reviews_skills():

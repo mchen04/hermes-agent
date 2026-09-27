@@ -42,6 +42,7 @@ from hermes_cli.config import (
     load_config, load_config_readonly)
 from hermes_cli.fallback_config import get_fallback_chain, scoped_fallback_chain
 from hermes_time import now as _hermes_now, safe_strftime
+from agent.background_review_exit import start_failed_cron_review  # LOCAL-PATCH learn-failed-cron
 from agent.interrupt_compat import request_hard_interrupt
 from agent.delegation_context import (
     enter_non_dispatcher_owned_context, exit_non_dispatcher_owned_context)
@@ -2618,6 +2619,60 @@ def _teardown_cron_agent(
         timeout_seconds=timeout_seconds)
 
 
+def _hold_session_db_for_review(agent):
+    """LOCAL-PATCH learn-failed-cron: the run already released its state.db handle; the review books its
+    token usage on the run's session, so it takes its own registry reference for its lifetime."""
+    db_path = getattr(getattr(agent, "_session_db", None), "db_path", None)
+    if db_path is None:
+        return None
+    try:
+        from hermes_state_registry import acquire
+
+        agent._session_db = acquire(db_path)
+    except Exception:
+        logger.debug("failed-run review: state.db re-acquire failed", exc_info=True)
+        agent._session_db = None
+        return None
+    return agent._session_db
+
+
+def _release_review_session_db(db, job_id: str) -> None:
+    if db is None:
+        return
+    try:
+        from hermes_state_registry import release_or_close
+
+        release_or_close(db)
+    except Exception as e:
+        logger.debug("Job '%s': failed to release the review's state.db handle: %s", job_id, e)
+
+
+def _teardown_cron_agent_after_review(agent, job_id: str, review: threading.Thread, review_db=None) -> None:
+    """LOCAL-PATCH learn-failed-cron: tear a failed run's agent down once its review ends (bounded),
+    off the ticker thread so the review never delays other jobs."""
+    from agent.background_review_exit import FAILED_CRON_REVIEW_MAX_WAIT_SECONDS
+    from tools.thread_context import propagate_context_to_thread
+
+    def _wait_then_teardown() -> None:
+        review.join(FAILED_CRON_REVIEW_MAX_WAIT_SECONDS)
+        if review.is_alive():
+            logger.warning("Job '%s': failed-run review still running after %.0fs; tearing the agent down",
+                           job_id, FAILED_CRON_REVIEW_MAX_WAIT_SECONDS)
+        try:
+            _teardown_cron_agent(agent, job_id)
+        finally:
+            _release_review_session_db(review_db, job_id)
+
+    try:
+        threading.Thread(
+            target=propagate_context_to_thread(_wait_then_teardown), daemon=True,
+            name=f"cron-review-teardown-{job_id}").start()
+    except Exception:
+        logger.warning("Job '%s': could not defer teardown behind the review", job_id, exc_info=True)
+        _teardown_cron_agent(agent, job_id)
+        _release_review_session_db(review_db, job_id)
+
+
 def _run_with_fire_claim_heartbeat(job: dict, run) -> bool:
     """Run ``run`` while keeping this job's owned durable fire claim fresh."""
     claim = job.get("fire_claim")
@@ -3225,7 +3280,7 @@ def _run_one_job_body(
         # alongside the interpreter-shutdown guard in _deliver_result.
         _deferred_agents: list = []
 
-        def _teardown_deferred() -> None:
+        def _teardown_deferred(review_failed_run: bool = False) -> None:
             # run_job's finally still hands back the agent when it raises; tear it down here so a failed run
             # never leaks its async resources (#10200), then re-raise into the outer handler. BaseException
             # (not just Exception) so a KeyboardInterrupt/SystemExit mid-run still triggers teardown before
@@ -3233,7 +3288,14 @@ def _run_one_job_body(
             # Tear down the deferred agent(s) now that save + delivery have run (or raised). Must happen on
             # every path so cron agents never leak their subprocesses/clients (#10200).
             for _deferred_agent in _deferred_agents:
-                _teardown_cron_agent(_deferred_agent, job["id"])
+                # LOCAL-PATCH learn-failed-cron: a failed run is reviewed; teardown waits for the review.
+                _review_db = _hold_session_db_for_review(_deferred_agent) if review_failed_run else None
+                _review = start_failed_cron_review(_deferred_agent, job["id"]) if review_failed_run else None
+                if _review is None:
+                    _release_review_session_db(_review_db, job["id"])
+                    _teardown_cron_agent(_deferred_agent, job["id"])
+                else:
+                    _teardown_cron_agent_after_review(_deferred_agent, job["id"], _review, _review_db)
 
         _run_kwargs = {
             "defer_agent_teardown": _deferred_agents,
@@ -3275,7 +3337,12 @@ def _run_one_job_body(
         finally:
             delivery_attempted, delivery_error = d.delivery_attempted, d.delivery_error
             # Every path must tear down deferred agent(s) so they never leak subprocesses/clients.
-            _teardown_deferred()
+            # A failed run is the agent's own failure (not delivery's): error, [CRON_FAILURE], or the
+            # empty-reply soft failure below. A shutdown-interrupted or ownership-lost run is not.
+            _teardown_deferred(review_failed_run=(
+                (not d.success or not final_response.strip())
+                and not d.side_effect_ownership_lost
+                and not _is_interrupted(job["id"], execution_token)))
 
         if d.side_effect_ownership_lost:
             # The claim died inside a side-effect fence: the side effect did NOT complete.
