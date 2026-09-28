@@ -1,10 +1,7 @@
 """Exact, explicitly authorized capacity recovery; prose is never attribution."""
 import json
-import math
 import re
-import time
 
-IDENTITY = ('provider', 'account', 'resource')
 
 def authorized_pr_continuation(conn, task_id, comment_id, commented_at):
     """LOCAL-PATCH kanban-pr-continuation: a PR link cannot revoke an answered block."""
@@ -31,45 +28,6 @@ def authorized_pr_continuation(conn, task_id, comment_id, commented_at):
         ):
             legacy_authorized = True
     return legacy_authorized and not has_watermark
-
-
-def recovery_dependency(payload):
-    if not isinstance(payload, dict):
-        return None
-    reason = payload.get('reason') or payload.get('error') or ''
-    if isinstance(reason, str) and re.search(r'\b(?:STOP|HOLD)\b', reason, re.I):
-        return None
-    dependency = payload.get('recovery')
-    if dependency is None and isinstance(reason, str):
-        try:
-            dependency = json.loads(reason).get('recovery')
-        except (ValueError, AttributeError):
-            return None
-    if not isinstance(dependency, dict) or dependency.get('authorized') is not True:
-        return None
-    if any(not isinstance(dependency.get(k), str) or not dependency[k].strip()
-           for k in (*IDENTITY, 'owner')):
-        return None
-    deadline = dependency.get('retry_not_before')
-    if isinstance(deadline, bool) or not isinstance(deadline, (int, float)) or not math.isfinite(deadline):
-        return None
-    return dependency
-
-
-def capacity_allows(payload, capacity, *, owner, blocked_at, now=None):
-    now = time.time() if now is None else now
-    dep = recovery_dependency(payload)
-    if dep is None or dep['owner'] != owner or not isinstance(capacity, dict):
-        return False
-    if capacity.get('available') is not True or any(dep[k] != capacity.get(k) for k in IDENTITY):
-        return False
-    checked = capacity.get('checked_at')
-    if not isinstance(checked, (int, float)) or isinstance(checked, bool) or not 0 <= now - checked <= 60:
-        return False
-    delay = payload.get('resume_after', 3600)
-    if not isinstance(delay, (int, float)) or isinstance(delay, bool) or not math.isfinite(delay):
-        return False
-    return now >= max(dep['retry_not_before'], blocked_at + max(3600, delay))
 
 
 def requires_capacity_or_manual_recovery(payload):

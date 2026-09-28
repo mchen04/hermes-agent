@@ -119,7 +119,6 @@ DEFAULT_TRANSIENT_RESUME_SECONDS = 600
 # sign-in respawned 40 times (~31M context tokens) because the floor was 1 s and the cap never tripped.
 MIN_TRANSIENT_RESUME_SECONDS = 600
 MAX_TRANSIENT_RESUME_SECONDS = 6 * 3600
-TRANSIENT_TIMER_RESUMES = True
 AUTO_RESUME_LIMIT = 8
 LIVE_OWNER_GRACE_SECONDS = 180
 # Event kinds that mark real progress or a human decision; the timer budget counts only resumes after the newest one.
@@ -3417,7 +3416,7 @@ def block_task(
         if rekind_reason:
             payload["requested_kind"] = requested_kind
             payload["rekind_reason"] = rekind_reason
-        if kind == "transient" and TRANSIENT_TIMER_RESUMES:
+        if kind == "transient":
             # LOCAL-PATCH kanban-auto-loop: the worker's wish is recorded; the dispatcher floors it.
             payload["resume_after"] = max(1, int(resume_after or DEFAULT_TRANSIENT_RESUME_SECONDS))
         if expected_run_id is not None:
@@ -3963,7 +3962,7 @@ def resume_stranded_blocks(
             if unblock_task(conn, task_id, auto_resume=record):
                 resumed.append({"task_id": task_id, **record})
             continue
-        if kind != "transient" or not TRANSIENT_TIMER_RESUMES or not _timer_resume_allowed(conn, task_id, blocked_id):
+        if kind != "transient" or not _timer_resume_allowed(conn, task_id, blocked_id):
             continue
         reset_row = conn.execute(
             "SELECT MAX(id) FROM task_events WHERE task_id = ? AND ("
