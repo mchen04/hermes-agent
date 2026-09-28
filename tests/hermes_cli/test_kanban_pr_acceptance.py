@@ -1,5 +1,4 @@
 """Two lifecycle invariants, using real SQLite and a local GitHub HTTP contract."""
-import base64
 import json
 import os
 import sys
@@ -22,10 +21,9 @@ def github(tmp_path, monkeypatch):
             sha = state["head"]
             if self.path == "/graphql":
                 value = {"data": {"repository": {"pullRequest": {
-                    "headRefOid": sha, "headRefName": "feature/fix", "baseRefName": "main", "state": "OPEN",
+                    "headRefOid": sha, "baseRefName": "main", "state": "OPEN",
                     "baseRef": {"branchProtectionRule": {"requiredStatusChecks": [
-                        {"context": "required", "app": {"databaseId": 1}}]
-                        if state.get("required", True) else []}}}}}}
+                        {"context": "required", "app": {"databaseId": 1}}]}}}}}}
             elif "/rules/branches/" in self.path:
                 value = [[]]
             elif "/check-runs" in self.path:
@@ -38,30 +36,12 @@ def github(tmp_path, monkeypatch):
                 value = [{"total_count": 100 + len(runs), "check_runs": [
                     {**run, "id": 1000 + i, "name": "optional", "conclusion": "skipped"}
                     for i in range(100)]}, {"total_count": 100 + len(runs), "check_runs": runs}]
-                if state.get("empty"):
-                    value = [{"total_count": 0, "check_runs": []}]
                 if state.get("race"):
                     state["race"]()
                 if state.get("head_change"):
                     state["head"] = "b" * 40
             elif "/statuses" in self.path:
                 value = [[]]
-            elif "/check-suites" in self.path:
-                suites = [] if not state.get("suite") else [{"id": 9, "head_sha": sha,
-                    "app": {"id": 1, "name": "CI", "slug": "github-actions"},
-                    "status": "completed" if state["suite"] != "pending" else "queued",
-                    "conclusion": None if state["suite"] == "pending" else state["suite"]}]
-                if state.get("unreported_app"):
-                    suites.append({"id": 10, "head_sha": sha, "app": {"id": 2, "name": "Optional integration", "slug": "optional-integration"},
-                        "status": "queued", "conclusion": None, "latest_check_runs_count": 0,
-                        "created_at": "2026-09-21T19:26:40Z", "updated_at": "2026-09-21T19:26:40Z"})
-                value = [{"total_count": len(suites), "check_suites": suites}]
-            elif "/actions/workflows" in self.path:
-                workflows = [{"id": 1, "state": "active", "path": ".github/workflows/check.yml"}] if state.get("workflow") else []
-                value = [{"total_count": len(workflows), "workflows": workflows}]
-            elif "/contents/.github/workflows/" in self.path:
-                definition = state.get("workflow_definition", "on: [push, pull_request]\njobs: {}")
-                value = {"encoding": "base64", "content": base64.b64encode(definition.encode()).decode()}
             elif "/pulls/" in self.path:
                 value = {"head": {"sha": sha}, "base": {"ref": "main"}, "state": "open"}
             else:
@@ -149,64 +129,3 @@ def test_acceptance_receipts_and_terminal_write_share_run_ownership(github):
             assert kb.get_task(conn, tid).status != "done"
             assert conn.execute("SELECT count(*) FROM task_events WHERE task_id=? AND kind='pr_acceptance'", (tid,)).fetchone()[0] == 0
             github.pop("race")
-
-
-def test_unprotected_pr_uses_actual_ci_and_distinguishes_absent_from_pending(github):
-    github["required"] = False
-    with connect() as conn:
-        for conclusion in ("failure", "pending", "cancelled", "timed_out", "success"):
-            github.update(conclusion=conclusion, head="a" * 40)
-            tid = kb.create_task(conn, title="Publish reviewed changes", completion_contract="acme/repo")
-            ok = kb.complete_task(conn, tid, result="done", metadata={"published_pr": "https://github.com/acme/repo/pull/7"})
-            assert ok is (conclusion == "success")
-            receipt = json.loads(conn.execute(
-                "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance' ORDER BY id DESC", (tid,)
-            ).fetchone()[0])
-            assert receipt["checks"] and receipt["head_sha"] == "a" * 40
-        github.update(empty=True, workflow=True)
-        tid = kb.create_task(conn, title="CI has not started", completion_contract="acme/repo")
-        assert not kb.complete_task(conn, tid, result="done", metadata={"published_pr": "https://github.com/acme/repo/pull/7"})
-        github["workflow"] = False
-        assert kb.complete_task(conn, tid, result="done", metadata={"published_pr": "https://github.com/acme/repo/pull/7"})
-        github.update(workflow=True, workflow_definition='on:\n  schedule:\n    - cron: "0 0 * * *"\n  workflow_dispatch:\njobs: {}')
-        tid = kb.create_task(conn, title="Only scheduled/manual workflows", completion_contract="acme/repo")
-        assert kb.complete_task(conn, tid, result="done", metadata={"published_pr": "https://github.com/acme/repo/pull/7"})
-
-
-def test_unprotected_pr_cannot_hide_pending_or_failed_suites(github):
-    github["required"] = False
-    github["unreported_app"] = True
-    with connect() as conn:
-        for empty in (True, False):
-            for suite in ("pending", "startup_failure", "failure", "success"):
-                github.update(empty=empty, suite=suite)
-                tid = kb.create_task(conn, title="Wait for all CI", completion_contract="acme/repo")
-                assert not kb.complete_task(conn, tid, result="done", metadata={"published_pr": "https://github.com/acme/repo/pull/7"})
-                receipt = json.loads(conn.execute(
-                    "SELECT payload FROM task_events WHERE task_id=? AND kind='pr_acceptance' ORDER BY id DESC", (tid,)
-                ).fetchone()[0])
-                assert any(check["name"] == "Optional integration suite" and check["classification"] == "pending"
-                           for check in receipt["checks"])
-
-
-@pytest.mark.parametrize("definition,completes", [
-    ("on: release", True),
-    ("on: issues", True),
-    ("on: {push: {tags: ['v*']}}", True),
-    ("on: {push: {branches: [main]}}", True),
-    ("on: {push: {branches: ['feature/*']}}", False),
-    ("on: {pull_request: {branches: [develop]}}", True),
-    ("on: {pull_request: {branches: [main]}}", False),
-    ("on: {pull_request: {branches: ['**', '!main']}}", True),
-    ("on: {pull_request: {branches: ['**', '!main', main]}}", False),
-    ("on: {pull_request: {types: [labeled]}}", True),
-    ("on: {pull_request: {types: opened}}", False),
-    ("on: {pull_request: {types: synchronize}}", False),
-    ("on: {pull_request: {branches: develop}}", True),
-    ("on: {pull_request: {branches-ignore: main}}", True),
-])
-def test_unrelated_workflows_do_not_require_pr_checks(github, definition, completes):
-    github.update(required=False, empty=True, workflow=True, workflow_definition=definition+"\njobs: {}")
-    with connect() as conn:
-        tid = kb.create_task(conn, title="Publish without unrelated automation", completion_contract="acme/repo")
-        assert kb.complete_task(conn, tid, result="done", metadata={"published_pr": "https://github.com/acme/repo/pull/7"}) is completes

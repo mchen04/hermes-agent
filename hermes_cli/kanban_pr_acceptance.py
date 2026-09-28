@@ -5,14 +5,10 @@ receipts only after rechecking the captured run/status/contract under its lock.
 """
 from __future__ import annotations
 
-import base64
 import json
 import re
 import subprocess
 from urllib.parse import quote
-
-from ruamel.yaml import YAML
-from ruamel.yaml.error import YAMLError
 
 _REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 _PR = re.compile(r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/pull/([1-9][0-9]*)")
@@ -55,7 +51,7 @@ def collect_acceptance(contract: str, published_pr: str | None) -> dict:
         repo, number = match[1], int(match[2])
         receipt["pr_url"] = url
         owner, name = repo.split("/")
-        query = '''{repository(owner:%s,name:%s){pullRequest(number:%d){headRefOid headRefName baseRefName state
+        query = '''{repository(owner:%s,name:%s){pullRequest(number:%d){headRefOid baseRefName state
             baseRef{branchProtectionRule{requiredStatusChecks{context app{databaseId}}}}}}}''' % (
                 json.dumps(owner), json.dumps(name), number)
         pr = _api("graphql", query=query)["data"]["repository"]["pullRequest"]
@@ -72,32 +68,14 @@ def collect_acceptance(contract: str, published_pr: str | None) -> dict:
                     required.update((r["context"], r.get("integration_id"))
                                     for r in rule["parameters"]["required_status_checks"])
         receipt["required"] = [{"context": c, "app_id": a} for c, a in sorted(required, key=str)]
+        if not required:
+            receipt["detail"] = "No repository-required checks are configured; explicitly use a local-only contract for non-CI tasks."
+            return receipt
         pages = _api(f"repos/{repo}/commits/{sha}/check-runs?per_page=100&filter=latest", paginate=True)
         runs = [run for page in pages for run in page["check_runs"]]
         if len({r["id"] for r in runs}) != pages[0]["total_count"]:
             raise ValueError("Incomplete check-run pagination")
         statuses = [{**s, "sha": sha} for page in _api(f"repos/{repo}/commits/{sha}/statuses?per_page=100", paginate=True) for s in page]
-        # LOCAL-PATCH kanban-unprotected-ci: absence of branch protection does
-        # not erase actual CI evidence or turn a published task into local-only.
-        selected_checks = []
-        if not required:
-            latest_statuses = {s["context"]: s for s in sorted(statuses, key=lambda s: s["id"])}
-            suite_pages = _api(f"repos/{repo}/commits/{sha}/check-suites?per_page=100", paginate=True)
-            suites = [suite for page in suite_pages for suite in page["check_suites"]]
-            if len({s["id"] for s in suites}) != suite_pages[0]["total_count"]:
-                raise ValueError("Incomplete check-suite pagination")
-            selected_checks = runs + list(latest_statuses.values()) + [
-                {**suite, "name": f"{suite['app']['name']} suite"} for suite in suites]
-            receipt["policy"] = "all-reported-checks"
-            if not selected_checks:
-                workflows = _api(f"repos/{repo}/actions/workflows?per_page=100", paginate=True)
-                entries = [w for page in workflows for w in page["workflows"]]
-                if len({w["id"] for w in entries}) != workflows[0]["total_count"]:
-                    raise ValueError("Incomplete workflow pagination")
-                if any(_expects_head_checks(repo, sha, w, pr) for w in entries if w["state"] == "active"):
-                    receipt.update(classification="pending", detail="CI workflows exist but this head has no check results yet.")
-                    return receipt
-                receipt.update(policy="no-checks-configured", detail="No required or reported checks; no active workflow expects checks for this head.")
         outcomes = []
         for context, app_id in sorted(required, key=str):
             matching = [r for r in runs if r["name"] == context and
@@ -108,107 +86,27 @@ def collect_acceptance(contract: str, published_pr: str | None) -> dict:
             if not selected:
                 outcomes.append("missing")
                 receipt["checks"].append({"name": context, "classification": "missing", "head_sha": sha})
-            selected_checks.extend(selected)
-        for check in selected_checks:
-            is_run = "conclusion" in check
-            outcome = check.get("conclusion") if is_run else check["state"]
-            classification = _classify(check, sha, outcome, is_run)
-            # Without required contexts every reported check counts, so a check
-            # that deliberately did not run is not evidence of failure.
-            if (not required and check.get("status") == "completed"
-                    and outcome in {"neutral", "skipped"} and check.get("head_sha") == sha):
-                classification = "success"
-            outcomes.append(classification)
-            receipt["checks"].append({"name": check.get("name", check.get("context")), "id": check["id"],
-                "url": check.get("html_url") or check.get("target_url"),
-                "head_sha": check.get("head_sha", check.get("sha")),
-                "classification": classification, "conclusion": outcome})
+            for check in selected:
+                is_run = "conclusion" in check
+                outcome = check.get("conclusion") if is_run else check["state"]
+                classification = _classify(check, sha, outcome, is_run)
+                outcomes.append(classification)
+                receipt["checks"].append({"name": context, "id": check["id"],
+                    "url": check.get("html_url") or check.get("target_url"),
+                    "head_sha": check.get("head_sha", check.get("sha")),
+                    "classification": classification, "conclusion": outcome})
         # Re-read after all pages: old-head successes are never transferable.
         current = _api(f"repos/{repo}/pulls/{number}")
         if current["head"]["sha"] != sha or current["base"]["ref"] != branch or (current["state"] == "closed" and not current.get("merged")):
             receipt.update(classification="stale", detail="PR head/base changed while collecting evidence; retry.")
             return receipt
-        receipt["classification"] = next((x for x in outcomes if x != "success"),
-            "success" if outcomes or receipt.get("policy") == "no-checks-configured" else "missing")
+        receipt["classification"] = next((x for x in outcomes if x != "success"), "missing" if not outcomes else "success")
         receipt["ok"] = receipt["classification"] == "success"
         return receipt
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, IndexError):
         # Never persist gh stderr (credentials/host details); the failed phase is actionable.
         receipt.update(classification="infra", detail="GitHub acceptance evidence unavailable or incomplete; check gh authentication/API access and retry.")
         return receipt
-
-
-def _expects_head_checks(repo: str, sha: str, workflow: dict, pr: dict) -> bool:
-    """Only branch push/PR triggers promise head CI; unrelated automation does not."""
-    path = workflow["path"]
-    if not path.startswith(".github/workflows/") or ".." in path.split("/"):
-        raise ValueError("Workflow definition is unavailable")
-    content = _api(f"repos/{repo}/contents/{quote(path, safe='/')}?ref={sha}")
-    if content.get("encoding") != "base64":
-        raise ValueError("Workflow definition is incomplete")
-    try:
-        definition = YAML(typ="base").load(base64.b64decode(''.join(content['content'].split()), validate=True))
-    except (ValueError, YAMLError) as exc:
-        raise ValueError("Workflow definition is invalid") from exc
-    events = definition.get("on") if isinstance(definition, dict) else None
-    if isinstance(events, str):
-        events = [events]
-    if not isinstance(events, (list, dict)) or not events or any(not isinstance(e, str) for e in events):
-        raise ValueError("Workflow triggers are unavailable")
-    if isinstance(events, list):
-        events = dict.fromkeys(events)
-    for event, branch in (("pull_request", pr["baseRefName"]), ("push", pr["headRefName"])):
-        if event not in events:
-            continue
-        filters = events[event] or {}
-        if not isinstance(filters, dict):
-            raise ValueError("Workflow event filters are unavailable")
-        if event == "push" and set(filters).intersection({"tags", "tags-ignore"}) and not set(filters).intersection({"branches", "branches-ignore"}):
-            continue
-        if event == "pull_request" and "types" in filters:
-            activities = filters["types"]
-            if isinstance(activities, str):
-                activities = [activities]
-            if not set(activities).intersection({"opened", "reopened", "synchronize", "ready_for_review"}):
-                continue
-        if "branches" in filters and not _matches_ref(branch, filters["branches"]):
-            continue
-        if "branches-ignore" in filters and _matches_ref(branch, filters["branches-ignore"]):
-            continue
-        # Path/job expressions can still suppress a run. In the absence of
-        # reported evidence, do not invent success for an applicable trigger.
-        return True
-    return False
-
-
-def _matches_ref(branch: str, patterns: str | list) -> bool:
-    """GitHub branch-filter globs, including ordered exclusion/re-inclusion."""
-    if isinstance(patterns, str):
-        patterns = [patterns]
-    if not isinstance(patterns, list) or not patterns or any(not isinstance(p, str) or not p for p in patterns):
-        raise ValueError("Workflow branch filters are unavailable")
-    matched = False
-    for pattern in patterns:
-        negative = pattern.startswith("!")
-        pattern = pattern[1:] if negative else pattern
-        parts = []
-        for token in re.findall(r"\\.|\*\*/|\*\*|\*|\[[A-Za-z0-9-]+\]|.", pattern):
-            if token.startswith("\\"):
-                parts.append(re.escape(token[1:]))
-            elif token in {"*", "**", "**/"}:
-                parts.append({"*": "[^/]*", "**": ".*", "**/": "(?:.*/)?"}[token])
-            elif token in {"?", "+"} or (token.startswith("[") and token.endswith("]")):
-                parts.append(token)
-            elif token in {"[", "]"}:
-                raise ValueError("Invalid workflow branch pattern")
-            else:
-                parts.append(re.escape(token))
-        try:
-            if re.fullmatch(''.join(parts), branch):
-                matched = not negative
-        except re.error as exc:
-            raise ValueError("Invalid workflow branch pattern") from exc
-    return matched
 
 
 def _classify(check: dict, sha: str, outcome: str | None, is_run: bool) -> str:
