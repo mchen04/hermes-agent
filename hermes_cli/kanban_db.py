@@ -3368,15 +3368,13 @@ def block_task(
             )
     with write_txn(conn):
         cur_row = conn.execute(
-            "SELECT status, block_kind, block_recurrences, goal_mode, worker_pid, worker_started_at, last_heartbeat_at, claim_lock, current_run_id FROM tasks WHERE id = ?", (task_id,),
+            "SELECT status, block_kind, block_recurrences, worker_pid, worker_started_at, last_heartbeat_at, claim_lock, current_run_id FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if cur_row is None:
             return False
         if (expected_run_id is None and not force and cur_row["status"] == "running"
                 and cur_row["current_run_id"] is not None and _live_worker_description(cur_row, now)):
             raise BlockRejected(f"{task_id} acquired a live worker; reclaim it before blocking.")
-        from hermes_cli.kanban_recovery import guard_goal_transient_block
-        guard_goal_transient_block(cur_row, kind=kind, force=force)
         # The breaker (``_record_task_failure``) parks cards ``blocked`` with no
         # ``block_kind`` and no ``blocked`` event -- the policy is the
         # supervisor's, not the kernel's -- but the transition guard below only

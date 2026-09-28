@@ -35,12 +35,8 @@ def test_normal_goal_wait_cannot_end_owner_or_create_another_run(board):
     result = json.loads(registry.dispatch("kanban_block", {
         "kind": "transient", "reason": "The coding worker is still running.", "resume_after": 600,
     }))
-    assert "error" in result
-    assert "same session" in result["error"]
+    assert "goal_mode tasks can only block" in result["error"]
     with kbc.connect_closing() as conn:
-        with pytest.raises(kb.BlockRejected, match="same session"):
-            kb.block_task(conn, tid, kind="transient", reason="Worker running",
-                          expected_run_id=original.current_run_id)
         assert kb.resume_stranded_blocks(conn, now=2_000_000_000) == []
         current = kb.get_task(conn, tid)
         assert current.status == "running"

@@ -778,9 +778,6 @@ def _handle_block(args: dict, **kw) -> str:
         # Any blocked status ends the goal loop. Keep ordinary waits in the same
         # supervisor, and require the completion judge for other exits.
         task = kb.get_task(conn, tid)
-        if task and task.goal_mode and kind == "transient":
-            from hermes_cli.kanban_recovery import GOAL_WAIT_MESSAGE
-            raise _Reject(GOAL_WAIT_MESSAGE)
         _check(not (task and task.goal_mode and kind not in _GOAL_MODE_BLOCK_ALLOWED_KINDS),
                f"goal_mode tasks can only block with kind in "
                f"{sorted(_GOAL_MODE_BLOCK_ALLOWED_KINDS)} (got {kind!r}). If the task is actually "
