@@ -3,7 +3,8 @@
 2026-09-22 22:14:11 the judge rejected Kestrel card t_04dc2922's completion (missing latency, optimization and
 interruption evidence); 34 s later a reworded summary with no new evidence was accepted, because each gate call
 judged the summary alone. The gate now records each rejection and hands the latest one (reason and the rejected
-summary) to the next judge call as a criterion that only new evidence can satisfy. An amended brief clears it."""
+summary) to the next judge call. LOCAL-PATCH kanban-judge-fair: that earlier evidence still counts, and a retry only
+has to close the named gap. An amended brief clears it."""
 
 from __future__ import annotations
 
@@ -73,7 +74,7 @@ def test_tool_gate_shows_the_previous_rejection_to_the_next_judge(monkeypatch, g
     json.loads(kt._handle_complete({"summary": REWORDED}))
     shown = _criteria(judge.calls[1])
     assert REJECTION in shown and FIRST in shown
-    assert "reworded" in shown and "new" in shown.lower()
+    assert "still counts" in shown and "name that item" in shown
 
 
 def test_amended_brief_clears_the_previous_rejection(monkeypatch, goal_task):

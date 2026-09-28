@@ -17,7 +17,7 @@ from typing import Any, Callable, Optional
 
 from agent.redact import redact_sensitive_text
 from hermes_cli.goals import (
-    judge_goal, prior_rejection_criteria, record_goal_rejection,
+    handoff_evidence, handoff_passes_without_judge, judge_goal, prior_rejection_criteria, record_goal_rejection,
 )
 from tools.registry import no_cache_check_fn, registry, tool_error
 from hermes_cli.config import cfg_get, load_config
@@ -459,9 +459,14 @@ def _goal_gate(tool_name: str, task, tid: str, evidence: str, *, kb=None, conn=N
     review before acceptance criteria are met. ``blocked`` gets its own
     guidance; any other non-``done`` verdict gets the ``continue`` guidance.
     A broken judge fails open (logged) so it cannot permanently wedge work."""
-    if not task or not task.goal_mode or not _goal_judge_available():
+    if not task or not task.goal_mode:
         return
-    # LOCAL-PATCH kanban-judge-memory: the judge sees the latest rejection of this card, if any.
+    # LOCAL-PATCH kanban-judge-fair: a "Review: none" brief or a card at the rejection limit passes unjudged.
+    if kb is not None and conn is not None and handoff_passes_without_judge(kb, conn, task):
+        return
+    if not _goal_judge_available():
+        return
+    # LOCAL-PATCH kanban-judge-memory: the judge sees this card's earlier rejections, if any.
     prior = prior_rejection_criteria(conn, tid) if conn is not None else []
     try:
         # Headless gate runs outside any agent turn: bind the per-task relay-affinity scope
@@ -470,8 +475,9 @@ def _goal_gate(tool_name: str, task, tid: str, evidence: str, *, kb=None, conn=N
         affinity_token = None if get_affinity_scope() else set_affinity_scope(f"kanban:{tid}")
         try:
             verdict, reason, _, _, transport_failed = judge_goal(
-                goal=f"{task.title}\n\n{task.body or ''}".strip(), last_response=evidence.strip(),
-                **({"subgoals": prior} if prior else {}))
+                goal=f"{task.title}\n\n{task.body or ''}".strip(),
+                last_response=handoff_evidence(conn, tid, evidence.strip()) if conn is not None else evidence.strip(),
+                handoff=True, **({"subgoals": prior} if prior else {}))
         finally:
             if affinity_token is not None:
                 reset_affinity_scope(affinity_token)

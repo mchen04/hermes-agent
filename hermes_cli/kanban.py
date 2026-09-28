@@ -858,7 +858,7 @@ def _goal_mode_handoff_rejection(task: Optional[kb.Task], evidence: str, prior: 
         try:
             verdict, reason, _, _, transport_failed = judge_goal(
                 goal=f"{task.title}\n\n{task.body or ''}".strip(),
-                last_response=evidence.strip(), **({"subgoals": prior} if prior else {}))
+                last_response=evidence.strip(), handoff=True, **({"subgoals": prior} if prior else {}))
         finally:
             if affinity_token is not None:
                 reset_affinity_scope(affinity_token)
@@ -882,10 +882,16 @@ def _goal_gate_error(conn, tid: str, evidence: str, handoff: str, blocked_hint: 
     """Goal-mode judge gate shared by ``complete`` / ``request-review`` (mirrors tools/kanban_tools.py);
     applied to every terminal handoff so request-review can't bypass it. Returns the error line, or
     None to allow."""
-    # LOCAL-PATCH kanban-judge-memory: the judge sees the latest rejection of this card, and each rejection is kept.
-    from hermes_cli.goals import prior_rejection_criteria, record_goal_rejection
+    # LOCAL-PATCH kanban-judge-memory: the judge sees this card's earlier rejections, and each rejection is kept.
+    from hermes_cli.goals import (
+        handoff_evidence, handoff_passes_without_judge, prior_rejection_criteria, record_goal_rejection,
+    )
 
-    verdict, rejection = _goal_mode_handoff_rejection(kb.get_task(conn, tid), evidence,
+    task = kb.get_task(conn, tid)
+    # LOCAL-PATCH kanban-judge-fair: a "Review: none" brief or a card at the rejection limit passes unjudged.
+    if task is not None and task.goal_mode and handoff_passes_without_judge(kb, conn, task):
+        return None
+    verdict, rejection = _goal_mode_handoff_rejection(task, handoff_evidence(conn, tid, evidence),
                                                       prior_rejection_criteria(conn, tid))
     if verdict == "blocked":
         record_goal_rejection(kb, conn, tid, rejection or "", evidence)

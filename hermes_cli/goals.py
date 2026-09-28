@@ -240,6 +240,27 @@ JUDGE_USER_PROMPT_WITH_CONTRACT_TEMPLATE = (
     "Is the goal satisfied per its completion contract — done, blocked, continue, or wait?"
 )
 
+# LOCAL-PATCH kanban-judge-fair: a worker's completion or review handoff of a kanban card.
+JUDGE_USER_PROMPT_KANBAN_HANDOFF_TEMPLATE = (
+    "Card brief:\n{goal}\n\n"
+    "{history_block}"
+    "The worker's handoff, then the card's recent comments:\n{response}\n\n"
+    "{background_block}"
+    "Current time: {current_time}\n\n"
+    "The worker is completing this card or handing it to review. Decision rules:\n"
+    "- The acceptance criteria are the brief's \"Done means\" items; if it has none, its stated objective.\n"
+    "- DONE when the handoff, the card comments or an earlier handoff give evidence for each item: a named "
+    "artifact, comment, command result, readback or measurement. You cannot run commands; a specific, "
+    "checkable statement is evidence.\n"
+    "- This handoff itself completes the card and returns its result through the card. \"The card is "
+    "complete\" and a return routed through the card handoff are met by it; never ask for proof of either.\n"
+    "- CONTINUE only when a Done-means item has no evidence. The reason must quote that item and say what is "
+    "missing. \"No new evidence\", a wording or format preference, or wanting more than the item asks for is "
+    "not a reason to reject.\n"
+    "- BLOCKED only when the handoff shows the goal cannot be met or needs a person's decision.\n\n"
+    "Is the card done — done, blocked, continue, or wait?"
+)
+
 # /goal draft: turn a plain objective into a reviewable contract (after Codex's "draft the goal").
 DRAFT_CONTRACT_SYSTEM_PROMPT = (
     "You turn a user's plain-language objective into a structured completion "
@@ -882,8 +903,12 @@ def judge_goal(
     background_processes: Optional[List[Dict[str, Any]]] = None,
     contract: Optional[GoalContract] = None,
     active_delegations: int = 0,
+    handoff: bool = False,
 ) -> Tuple[str, str, bool, Optional[Dict[str, Any]], bool]:
     """Ask the auxiliary model whether the goal is satisfied.
+
+    ``handoff=True`` judges a kanban card's completion or review handoff (LOCAL-PATCH kanban-judge-fair):
+    ``subgoals`` then carry the card's earlier rejections, not extra criteria.
 
     Returns ``(verdict, reason, parse_failed, wait_directive, transport_failed)``; verdict is done /
     blocked / continue / wait / skipped. ``parse_failed`` means unusable output; transport errors
@@ -913,7 +938,12 @@ def judge_goal(
         + (JUDGE_DELEGATIONS_BLOCK_TEMPLATE.format(count=active_delegations) if active_delegations > 0 else ""),
         current_time=safe_strftime(datetime.now(tz=timezone.utc).astimezone(), "%Y-%m-%d %H:%M:%S %Z"),
     )
-    if contract is not None and not contract.is_empty():
+    if handoff:
+        history = "\n\n".join(clean_subgoals)
+        prompt = JUDGE_USER_PROMPT_KANBAN_HANDOFF_TEMPLATE.format(
+            history_block=f"{_truncate(history, 3000)}\n\n" if history else "",
+            **{**common, "goal": _truncate(goal, 4000), "response": _truncate(last_response, 9000)})
+    elif contract is not None and not contract.is_empty():
         contract_block = contract.render_block()
         if clean_subgoals:
             contract_block = f"{contract_block}\n{_render_extra_criteria(clean_subgoals)}"
@@ -1608,30 +1638,103 @@ def record_goal_rejection(kb, conn, task_id: str, reason: str, evidence: str) ->
         logger.warning("goal judge: could not record rejection for %s: %s", task_id, exc)
 
 
-def prior_rejection_criteria(conn, task_id: str) -> List[str]:
-    """The latest still-applicable rejection as one judge criterion, or ``[]``."""
+def _rejections_since_reset(conn, task_id: str) -> List[Dict[str, Any]]:
+    """Still-applicable ``goal_rejected`` payloads of the card, oldest first (with ``created_at``)."""
     try:
         marks = ", ".join("?" for _ in _GOAL_REJECTION_RESET_KINDS)
-        row = conn.execute(
-            f"SELECT payload FROM task_events WHERE task_id = ? AND kind = ? AND id > COALESCE("
-            f"(SELECT MAX(id) FROM task_events WHERE task_id = ? AND kind IN ({marks})), 0) "
-            "ORDER BY id DESC LIMIT 1",
+        rows = conn.execute(
+            f"SELECT payload, created_at FROM task_events WHERE task_id = ? AND kind = ? AND id > COALESCE("
+            f"(SELECT MAX(id) FROM task_events WHERE task_id = ? AND kind IN ({marks})), 0) ORDER BY id",
             (task_id, GOAL_REJECTION_EVENT, task_id, *_GOAL_REJECTION_RESET_KINDS),
-        ).fetchone()
-        payload = json.loads(row[0]) if row and row[0] else None
+        ).fetchall()
     except Exception as exc:
-        logger.warning("goal judge: could not read prior rejection for %s: %s", task_id, exc)
+        logger.warning("goal judge: could not read prior rejections for %s: %s", task_id, exc)
         return []
-    if not isinstance(payload, dict) or not payload.get("reason"):
+    out = []
+    for payload, created_at in rows:
+        try:
+            data = json.loads(payload) if payload else None
+        except ValueError:
+            continue
+        if isinstance(data, dict) and data.get("reason"):
+            out.append({**data, "created_at": created_at})
+    return out
+
+
+def prior_rejection_criteria(conn, task_id: str) -> List[str]:
+    """The card's still-applicable rejections as one judge criterion, or ``[]``.
+
+    LOCAL-PATCH kanban-judge-fair: earlier evidence still counts; a retry only has to close the named gap."""
+    rejections = _rejections_since_reset(conn, task_id)[-GOAL_REJECTION_LIMIT:]
+    if not rejections:
         return []
+    history = "\n".join(
+        f"Rejection {i}: {str(r['reason']).strip()}\nThat handoff said: {str(r.get('evidence') or '').strip()}"
+        for i, r in enumerate(rejections, start=1))
     return [
-        "An earlier handoff of this card was REJECTED for: " + str(payload["reason"]).strip()
-        + "\nThe rejected handoff said: " + str(payload.get("evidence") or "").strip()
-        + "\nMark DONE only if the current response adds NEW concrete evidence (a new artifact, measurement, "
-        "command output or file excerpt) that resolves every point of that rejection; name that evidence per "
-        "point in your reason. A reworded or reorganised restatement of the rejected handoff is not new "
-        "evidence: return CONTINUE and list the points still unresolved."
+        "Earlier handoffs of this card were rejected:\n" + history
+        + "\nEvidence in those handoffs and in the card comments still counts; the worker does not have to "
+        "produce it again. Mark DONE when the current handoff closes the gap each rejection named and every "
+        "Done-means item has evidence somewhere above. Return CONTINUE only if a Done-means item still has "
+        "no evidence, and name that item."
     ]
+
+
+# LOCAL-PATCH kanban-judge-fair (2026-09-27): the handoff judge rejected 26 times across 9 cards in a week, most
+# for "no new concrete evidence"; t_51171702 got 8 rejections in 11 minutes, and experiment cards whose
+# deliverable is a comment were rejected because the judge never saw comments and wanted proof the card was
+# complete. The judge now sees the card's comments, rejects only by naming an unmet Done-means item, and a card
+# briefed "Review: none" completes on its stated evidence. After GOAL_REJECTION_LIMIT rejections the next
+# handoff passes and the last objection is posted on the card as a "Disputed:" comment for Michael.
+GOAL_REJECTION_LIMIT = 2
+DISPUTED_PREFIX = "Disputed:"
+GOAL_JUDGE_AUTHOR = "goal-judge"
+_REVIEW_NONE_RE = re.compile(r"^[\s>*_#-]*Review\s*[:*_]*\s*none\b", re.IGNORECASE | re.MULTILINE)
+_HANDOFF_COMMENTS_CHARS = 5000
+
+
+def handoff_evidence(conn, task_id: str, evidence: str) -> str:
+    """The handoff text followed by the card's newest comments (oldest first), within a size budget."""
+    try:
+        rows = conn.execute(
+            "SELECT id, author, body FROM task_comments WHERE task_id = ? ORDER BY id DESC LIMIT 20",
+            (task_id,)).fetchall()
+    except Exception as exc:
+        logger.warning("goal judge: could not read comments for %s: %s", task_id, exc)
+        return evidence
+    lines, used = [], 0
+    for cid, author, body in rows:
+        line = f"[comment {cid} by {author}] {_truncate(str(body or '').strip(), 800)}"
+        if used + len(line) > _HANDOFF_COMMENTS_CHARS:
+            break
+        lines.append(line)
+        used += len(line)
+    if not lines:
+        return evidence
+    return f"{evidence}\n\nCard comments (oldest first):\n" + "\n".join(reversed(lines))
+
+
+def handoff_passes_without_judge(kb, conn, task) -> bool:
+    """True when a goal handoff passes with no judge call: a ``Review: none`` brief, or the rejection limit.
+
+    At the limit the latest objection is posted once as a ``Disputed:`` comment. Best effort."""
+    if _REVIEW_NONE_RE.search(task.body or ""):
+        return True
+    rejections = _rejections_since_reset(conn, task.id)
+    if len(rejections) < GOAL_REJECTION_LIMIT:
+        return False
+    last = rejections[-1]
+    try:
+        posted = conn.execute(
+            "SELECT 1 FROM task_comments WHERE task_id = ? AND author = ? AND body LIKE ? AND created_at >= ?",
+            (task.id, GOAL_JUDGE_AUTHOR, DISPUTED_PREFIX + "%", last["created_at"])).fetchone()
+        if not posted:
+            kb.add_comment(conn, task.id, GOAL_JUDGE_AUTHOR, (
+                f"{DISPUTED_PREFIX} the completion judge rejected this card {len(rejections)} times, so the "
+                f"next handoff was accepted without it. Its unresolved objection: {str(last['reason']).strip()}"))
+    except Exception as exc:
+        logger.warning("goal judge: could not post the disputed objection for %s: %s", task.id, exc)
+    return True
 
 
 # LOCAL-PATCH kanban-judge-transient (2026-09-21, narrowed 2026-09-26): goal cards t_2d71bdfb, t_051720cf and
@@ -1817,4 +1920,5 @@ __all__ = [
     "DEFAULT_MAX_TURNS", "load_goal", "save_goal", "clear_goal", "migrate_goal_to_session", "judge_goal",
     "run_kanban_goal_loop", "provider_outage_reason", "PROVIDER_OUTAGE_RESUME_SECONDS",
     "record_goal_rejection", "prior_rejection_criteria", "GOAL_REJECTION_EVENT",
+    "handoff_evidence", "handoff_passes_without_judge", "GOAL_REJECTION_LIMIT", "DISPUTED_PREFIX",
 ]
