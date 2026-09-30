@@ -1153,6 +1153,9 @@ def _run_review_fork(
     st.review_agent, _rt, _routed = build_cache_parity_fork(
         agent, task_cfg, max_iterations=_REVIEW_MAX_ITERATIONS)
     st.review_agent._review_attended = explicit
+    from agent.background_review_exit import offer_skill_manage  # LOCAL-PATCH learn-workers
+
+    offer_skill_manage(st.review_agent)
     _track_review_fork(agent, st.review_agent, register=True)
     from hermes_cli.plugins import set_thread_tool_whitelist, clear_thread_tool_whitelist
     review_whitelist, configured_extra_tools = _review_tool_whitelist(st.review_agent, task_cfg, review_memory)

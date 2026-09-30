@@ -301,6 +301,29 @@ def _wait_for_oneshot_background_completions(cli) -> None:
         )
 
 
+def _run_kanban_worker_exit_review(cli) -> None:
+    """LOCAL-PATCH learn-workers: review the finished Kanban worker session and wait for it.
+
+    Runs only when the worker deferred its reviews to exit, and not after an interrupt: a
+    SIGTERM/SIGINT worker hard-exits in its signal handler and never reaches this step.
+    """
+    from agent.background_review_exit import (
+        reviews_deferred_to_exit, run_worker_exit_review, worker_review_min_tool_calls,
+        worker_review_wait_seconds,
+    )
+
+    agent = getattr(cli, "agent", None)
+    if agent is None or not reviews_deferred_to_exit(agent):
+        return
+    exc = sys.exc_info()[1]
+    if isinstance(exc, KeyboardInterrupt) or (isinstance(exc, SystemExit) and exc.code == 130):
+        return
+    if getattr(agent, "_interrupt_requested", False):
+        return
+    run_worker_exit_review(
+        agent, wait_seconds=worker_review_wait_seconds(), min_tool_calls=worker_review_min_tool_calls())
+
+
 def _finalize_single_query(cli) -> None:
     """Close one-shot CLI resources before releasing the active session lease."""
     from cli import _flush_one_shot_session_store, _notify_single_query_session_finalize, _run_cleanup, _wait_for_oneshot_background_completions
@@ -311,6 +334,7 @@ def _finalize_single_query(cli) -> None:
         # nothing after it may fail in a way that loses the turn.
         for step, what in (
             (_wait_for_oneshot_background_completions, "background completion wait"),
+            (_run_kanban_worker_exit_review, "kanban worker exit review"),
             (_flush_one_shot_session_store, "session store flush"),
         ):
             try:

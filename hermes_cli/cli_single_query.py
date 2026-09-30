@@ -470,6 +470,10 @@ def _run_single_query_mode(cli, query, image, quiet, oneshot, stream_json: bool 
             # No exit trailer: the task log now belongs to the run that replaced this one.
             print(t("cli.single_query.kanban_run_reclaimed"), file=sys.stderr)
             sys.exit(0)
+        # LOCAL-PATCH learn-workers: review once at exit (see _run_kanban_worker_exit_review).
+        from agent.background_review_exit import defer_reviews_to_exit, worker_review_wait_seconds
+        if worker_review_wait_seconds() > 0:
+            defer_reviews_to_exit()
     if not cli._claim_active_session("cli", stderr=bool(quiet)):
         exit_single_query(1)
     try:

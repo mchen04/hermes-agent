@@ -501,6 +501,17 @@ def _terminate_reclaimed_worker(
     return info
 
 
+def _terminal_worker_reap_grace_seconds() -> int:
+    """LOCAL-PATCH learn-workers: a finished worker may wait ``kanban.worker_review_wait_seconds``
+    for its exit review; the reaper leaves it that long plus a minute for its last turn."""
+    try:
+        from agent.background_review_exit import worker_review_wait_seconds
+
+        return max(TERMINAL_WORKER_REAP_GRACE_SECONDS, int(worker_review_wait_seconds()) + 60)
+    except Exception:
+        return TERMINAL_WORKER_REAP_GRACE_SECONDS
+
+
 def reap_terminal_workers(conn: sqlite3.Connection, *, signal_fn=None) -> list[str]:
     """End host-local workers that outlived their run (issue #111791) — a worker
     that called ``kanban_complete`` and then hung keeps its ``state.db`` sidecar
@@ -516,7 +527,7 @@ def reap_terminal_workers(conn: sqlite3.Connection, *, signal_fn=None) -> list[s
         "SELECT id, task_id, worker_pid, worker_started_at, claim_lock FROM task_runs "
         "WHERE ended_at IS NOT NULL AND ended_at <= ? "
         "AND worker_pid IS NOT NULL AND worker_started_at IS NOT NULL",
-        (int(time.time()) - TERMINAL_WORKER_REAP_GRACE_SECONDS,),
+        (int(time.time()) - _terminal_worker_reap_grace_seconds(),),
     ).fetchall()
     host_prefix = _kb._host_prefix()
     reaped: list[str] = []

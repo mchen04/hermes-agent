@@ -759,11 +759,18 @@ def finalize_turn(
         and not getattr(agent, "skip_background_review", False)
         and (_should_review_memory or _should_review_skills)
     ):
-        with suppress(Exception):
-            agent._spawn_background_review(
-                messages_snapshot=list(messages), review_memory=_should_review_memory,
-                review_skills=_should_review_skills,
-            )
+        from agent.background_review_exit import reviews_deferred_to_exit
+
+        if reviews_deferred_to_exit(agent):
+            # LOCAL-PATCH learn-workers: a Kanban worker exits right after its last turn, and its next
+            # goal-loop turn cancels a running review. It reviews the whole session once, at exit.
+            agent._exit_review_due = True
+        else:
+            with suppress(Exception):
+                agent._spawn_background_review(
+                    messages_snapshot=list(messages), review_memory=_should_review_memory,
+                    review_skills=_should_review_skills,
+                )
 
     # Memory provider on_session_end()/shutdown_all() are NOT called here:
     # run_conversation() runs once per message; CLI/gateway own session-end cleanup.
