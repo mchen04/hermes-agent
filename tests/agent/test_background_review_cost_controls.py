@@ -11,6 +11,8 @@ Pure-function / config-driven; no live model calls.
 from typing import Any
 from unittest.mock import patch
 
+import pytest
+
 from agent import background_review as br
 
 
@@ -98,7 +100,7 @@ def test_routing_same_model_as_parent_is_not_routed():
     assert rt["routed"] is False  # same model/provider → keep full-replay path
 
 
-def test_routing_resolution_failure_falls_back_to_parent():
+def test_explicit_routing_failure_does_not_fall_back_to_parent():
     agent = _FakeAgent()
     cfg = {"auxiliary": {"background_review": {
         "provider": "openrouter", "model": "google/gemini-3-flash-preview",
@@ -106,9 +108,8 @@ def test_routing_resolution_failure_falls_back_to_parent():
     with patch("hermes_cli.config.load_config", return_value=cfg), patch("hermes_cli.config.load_config_readonly", return_value=cfg), \
          patch("hermes_cli.runtime_provider.resolve_runtime_provider",
                side_effect=RuntimeError("boom")):
-        rt = br._resolve_review_runtime(agent)
-    assert rt["routed"] is False
-    assert rt["provider"] == "openai-codex"
+        with pytest.raises(RuntimeError, match="boom"):
+            br._resolve_review_runtime(agent)
 
 
 # ---------------------------------------------------------------------------
@@ -159,21 +160,3 @@ def test_enabled_false_disables_automatic_review():
         assert br.load_background_review_settings()[0] is False
 
 
-def test_unresolvable_review_provider_falls_back_with_visible_warning(caplog):
-    """The fork silently ran on the main model with only a debug line (#116055): the fallback must
-    name the configured provider and reason at WARNING and reach the agent's user-visible warning rail."""
-    import logging
-
-    agent = _FakeAgent()
-    emitted = []
-    agent._emit_warning = emitted.append
-    cfg = {"auxiliary": {"background_review": {"provider": "no-such-provider", "model": "review-model"}}}
-    with patch("hermes_cli.config.load_config", return_value=cfg), patch("hermes_cli.config.load_config_readonly", return_value=cfg):
-        with caplog.at_level(logging.WARNING, logger="agent.background_review"):
-            rt = br._resolve_review_runtime(agent)
-            br._resolve_review_runtime(agent)
-
-    assert rt["routed"] is False and rt["model"] == "gpt-5.5"
-    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
-    assert warnings and all("no-such-provider" in w and "review-model" in w for w in warnings)
-    assert len(emitted) == 1 and "no-such-provider" in emitted[0]  # once per agent on the user rail
