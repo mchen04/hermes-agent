@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
-"""Read Reddit without a browser: listings, search, threads with comments, user pages.
+"""Read Reddit through public feeds or app-only OAuth.
 
 Two backends, chosen automatically:
 
 * **OAuth API** (preferred when ``REDDIT_CLIENT_ID`` + ``REDDIT_CLIENT_SECRET`` are set):
   app-only ``client_credentials`` grant for a free "script" app registered at
   https://www.reddit.com/prefs/apps. No username, password or cookie is ever used and
-  the script never acts as a user. ~100 requests/minute, full JSON including scores
-  and nested comments.
-* **Anonymous Atom feeds** (``.rss`` endpoints): the only unauthenticated path Reddit
-  still serves to server IPs (``.json`` and old.reddit return 403 / an empty shell).
+  the script never acts as a user. It returns scores and some nested comments.
+* **Anonymous Atom feeds** (``.rss`` endpoints): a public path that works without
+  a browser or account in some environments. Feeds may include replies but do not
+  expose parent relationships or complete coverage.
   Roughly ONE request per minute per IP; the script sleeps until the window resets
   when it hits a 429 and retries once.
 
     python3 reddit.py sub LocalLLaMA [--sort hot|new|top] [--limit N]
-    python3 reddit.py search "hermes agent" [--sub LocalLLaMA] [--sort new] [--limit N]
+    python3 reddit.py search "hermes agent" [--sub LocalLLaMA] [--after DATE] [--before DATE]
     python3 reddit.py thread https://www.reddit.com/r/x/comments/abc123/... [--limit N]
     python3 reddit.py user spez [--limit N]
     python3 reddit.py doctor            # which backend is active, and why
@@ -26,7 +26,8 @@ from __future__ import annotations
 
 import argparse
 import base64
-import html
+from datetime import date, datetime, timezone
+from html.parser import HTMLParser
 import json
 import os
 import re
@@ -42,18 +43,35 @@ TIMEOUT = 25
 ATOM = {"a": "http://www.w3.org/2005/Atom"}
 WWW = "https://www.reddit.com"
 OAUTH = "https://oauth.reddit.com"
-_TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
 _THREAD_RE = re.compile(r"reddit\.com/r/([^/]+)/comments/([a-z0-9]+)", re.I)
+
+
+class _TextExtractor(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+
+    def handle_starttag(self, tag, attrs):
+        self.parts.append(" ")
+
+    def handle_endtag(self, tag):
+        self.parts.append(" ")
+
+    def handle_data(self, data):
+        self.parts.append(data)
 
 
 def strip_html(text: str | None) -> str:
     if not text:
         return ""
     # Reddit wraps entry bodies in a <table> with a "submitted by /u/x [link] [comments]" footer.
-    text = _TAG_RE.sub(" ", html.unescape(text))
+    parser = _TextExtractor()
+    parser.feed(text)
+    parser.close()
+    text = "".join(parser.parts)
     text = re.sub(r"submitted by\s+/u/\S+|\[link\]|\[comments\]", " ", text)
-    return _WS_RE.sub(" ", html.unescape(text)).strip()
+    return _WS_RE.sub(" ", text).strip()
 
 
 # ── HTTP ─────────────────────────────────────────────────────────────────────
@@ -121,24 +139,39 @@ def _post_from_api(child: dict) -> dict:
         "created_utc": d.get("created_utc"),
         "url": f"{WWW}{d['permalink']}" if d.get("permalink") else d.get("url"),
         "external_url": None if d.get("is_self") else d.get("url"),
-        "body": (d.get("selftext") or "")[:4000],
+        "body": d.get("selftext") or "",
     }
 
 
-def _flatten_comments(children: list, depth: int = 0, out: list | None = None) -> list:
+def _flatten_comments(children: list, depth: int = 0, out: list | None = None,
+                      coverage: dict | None = None) -> list:
     out = out if out is not None else []
     for c in children:
+        if c.get("kind") == "more":
+            if coverage is not None:
+                coverage["unresolved_branches"] += 1
+                coverage["unresolved_comment_count"] += c.get("data", {}).get("count", 0)
+            continue
         if c.get("kind") != "t1":
             continue
         d = c["data"]
+        comment_id = d.get("id")
+        if coverage is not None and comment_id:
+            if comment_id in coverage["seen_ids"]:
+                replies = d.get("replies")
+                if isinstance(replies, dict):
+                    _flatten_comments(replies["data"]["children"], depth + 1, out, coverage)
+                continue
+            coverage["seen_ids"].add(comment_id)
         out.append({
+            "id": comment_id, "parent_id": d.get("parent_id"),
             "author": d.get("author"), "score": d.get("score"), "depth": depth,
-            "created_utc": d.get("created_utc"), "body": (d.get("body") or "")[:4000],
+            "created_utc": d.get("created_utc"), "body": d.get("body") or "",
             "url": f"{WWW}{d['permalink']}" if d.get("permalink") else None,
         })
         replies = d.get("replies")
         if isinstance(replies, dict):
-            _flatten_comments(replies["data"]["children"], depth + 1, out)
+            _flatten_comments(replies["data"]["children"], depth + 1, out, coverage)
     return out
 
 
@@ -150,7 +183,19 @@ def api_listing(token: str, path: str, limit: int, **params) -> list[dict]:
 def api_thread(token: str, sub: str, post_id: str, limit: int) -> dict:
     data = _api(f"/r/{sub}/comments/{post_id}", token, limit=limit, depth=10, sort="top")
     post = _post_from_api(data[0]["data"]["children"][0])
-    post["comments"] = _flatten_comments(data[1]["data"]["children"])[:limit]
+    coverage = {"seen_ids": set(), "unresolved_branches": 0, "unresolved_comment_count": 0}
+    available = _flatten_comments(data[1]["data"]["children"], coverage=coverage)
+    post["comments"] = available[:limit]
+    post["comment_coverage"] = {
+        "reported_comments": post.get("num_comments"),
+        "retrieved_unique": len(post["comments"]),
+        "available_unique": len(available),
+        "unresolved_branches": coverage["unresolved_branches"],
+        "unresolved_comment_count": coverage["unresolved_comment_count"],
+        "truncated_by_limit": len(available) > limit,
+        "requested_limit": limit,
+        "requested_reply_depth": 10,
+    }
     return post
 
 
@@ -162,12 +207,16 @@ def _entries(url: str) -> list[dict]:
     out = []
     for e in root.findall("a:entry", ATOM):
         link = e.find("a:link", ATOM)
+        published = e.findtext("a:published", default="", namespaces=ATOM) or None
+        updated = e.findtext("a:updated", default="", namespaces=ATOM) or None
         out.append({
             "title": strip_html(e.findtext("a:title", default="", namespaces=ATOM)),
             "author": (e.findtext("a:author/a:name", default="", namespaces=ATOM) or "").replace("/u/", "") or None,
-            "created": e.findtext("a:updated", default="", namespaces=ATOM) or None,
+            "published": published,
+            "updated": updated,
+            "created": published,
             "url": link.get("href") if link is not None else None,
-            "body": strip_html(e.findtext("a:content", default="", namespaces=ATOM))[:4000],
+            "body": strip_html(e.findtext("a:content", default="", namespaces=ATOM)),
         })
     return out
 
@@ -182,9 +231,20 @@ def atom_thread(sub: str, post_id: str, limit: int) -> dict:
     if not entries:
         raise SystemExit("thread feed returned no entries")
     post, comments = entries[0], entries[1:]
-    post["comments"] = [{"author": c["author"], "created": c["created"], "body": c["body"], "url": c["url"]} for c in comments]
-    post["note"] = ("anonymous feed: scores and nesting unavailable; register a free Reddit script app and set "
-                    "REDDIT_CLIENT_ID/REDDIT_CLIENT_SECRET (no user login) for full data")
+    unique = {c["url"]: c for c in comments if c["url"]}
+    post["comments"] = [{"author": c["author"], "published": c["published"], "updated": c["updated"],
+                         "created": c["created"], "body": c["body"], "url": c["url"]}
+                        for c in unique.values()]
+    post["comment_coverage"] = {
+        "reported_comments": None,
+        "retrieved_unique": len(post["comments"]),
+        "unresolved_branches": None,
+        "truncated_by_limit": None,
+        "requested_limit": limit,
+        "reply_nesting_available": False,
+    }
+    post["note"] = ("anonymous feed: scores and nesting unavailable; a Reddit script app with "
+                    "REDDIT_CLIENT_ID/REDDIT_CLIENT_SECRET can return scores and nested comments")
     return post
 
 
@@ -207,7 +267,41 @@ def cmd_sub(a, token):
 def cmd_search(a, token):
     path = f"/r/{a.sub}/search" if a.sub else "/search"
     params = {"q": a.query, "sort": a.sort, "restrict_sr": 1 if a.sub else None, "t": a.time}
-    return api_listing(token, path, a.limit, **params) if token else atom_listing(path, a.limit, **params)
+    posts = api_listing(token, path, a.limit, **params) if token else atom_listing(path, a.limit, **params)
+    if a.after or a.before:
+        print("reddit: date filter applies only to returned search results; this is not an exhaustive search",
+              file=sys.stderr)
+        posts = [p for p in posts if _in_date_window(p, a.after, a.before)]
+    unique = {}
+    for post in posts:
+        if post.get("url"):
+            unique.setdefault(_post_key(post["url"]), post)
+    return list(unique.values())
+
+
+def _post_key(url: str) -> str:
+    match = _THREAD_RE.search(url)
+    return match.group(2).lower() if match else url.split("?", 1)[0].rstrip("/")
+
+
+def _in_date_window(post: dict, after: date | None, before: date | None) -> bool:
+    if post.get("created_utc") is not None:
+        try:
+            day = datetime.fromtimestamp(float(post["created_utc"]), timezone.utc).date()
+        except (TypeError, ValueError, OverflowError):
+            return False
+    else:
+        published = post.get("published")
+        if not published:
+            return False
+        try:
+            timestamp = datetime.fromisoformat(published.replace("Z", "+00:00"))
+        except ValueError:
+            return False
+        if timestamp.tzinfo is None:
+            return False
+        day = timestamp.astimezone(timezone.utc).date()
+    return (after is None or day >= after) and (before is None or day < before)
 
 
 def cmd_thread(a, token):
@@ -266,6 +360,8 @@ def render(cmd: str, result) -> str:
             lines.append(f"{indent}- u/{c.get('author')} (score {c.get('score', '?')}): {c.get('body', '')[:600]}")
         if p.get("note"):
             lines.append(f"\n[{p['note']}]")
+        lines.append(f"[comment coverage: {p['comment_coverage']}]")
+        lines.append("[display shortens bodies; use --json for complete returned text]")
         return "\n".join(lines)
     lines = []
     for p in result:
@@ -282,7 +378,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true")
     sub = ap.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("sub"); s.add_argument("name"); s.add_argument("--sort", default="hot", choices=["hot", "new", "top", "rising"]); s.add_argument("--time", default="week", choices=["hour", "day", "week", "month", "year", "all"]); s.add_argument("--limit", type=int, default=15)
-    q = sub.add_parser("search"); q.add_argument("query"); q.add_argument("--sub"); q.add_argument("--sort", default="relevance", choices=["relevance", "new", "top", "comments"]); q.add_argument("--time", default="all", choices=["hour", "day", "week", "month", "year", "all"]); q.add_argument("--limit", type=int, default=15)
+    q = sub.add_parser("search")
+    q.add_argument("query")
+    q.add_argument("--sub")
+    q.add_argument("--sort", default="relevance", choices=["relevance", "new", "top", "comments"])
+    q.add_argument("--time", default="all", choices=["hour", "day", "week", "month", "year", "all"])
+    q.add_argument("--limit", type=int, default=15)
+    q.add_argument("--after", type=date.fromisoformat, metavar="YYYY-MM-DD")
+    q.add_argument("--before", type=date.fromisoformat, metavar="YYYY-MM-DD")
     t = sub.add_parser("thread"); t.add_argument("url"); t.add_argument("--limit", type=int, default=40)
     u = sub.add_parser("user"); u.add_argument("name"); u.add_argument("--limit", type=int, default=15)
     sub.add_parser("doctor")
