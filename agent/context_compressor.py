@@ -4099,13 +4099,16 @@ Write only the summary body. Do not include any preamble or prefix."""
             )
         # A distinct summary model gets ONE main-model retry: a specific reason for known transient classes,
         # else a best-effort "failed" retry — losing N turns is worse than one extra summary attempt.
+        # LOCAL-PATCH auxiliary-compression-summary-policy: a failed helper must not escalate to the main model.
+        from agent.auxiliary_fallback_policy import task_fallback_policy
         # ``provider: auto`` resolves a model per call WITHOUT setting ``summary_model``; use the model the
         # aux lane actually resolved so an auto route that keeps returning empty content (a proxy channel
         # answering 200 with no body) is abandoned for the main model instead of retried forever (#116472).
         _route_model = str(
             self.summary_model or getattr(self, "_last_aux_resolved_model", "") or ""
         ).strip()
-        if _route_model and _route_model != self.model and not getattr(self, "_summary_model_fallen_back", False):
+        if (task_fallback_policy("compression") is None and _route_model and _route_model != self.model
+                and not getattr(self, "_summary_model_fallen_back", False)):
             self._fallback_to_main_for_compression(e, kind.fallback_reason(), failed_model=_route_model)
             # Retry immediately on the main model.
             return self._generate_summary(turns_to_summarize, focus_topic=focus_topic, memory_context=memory_context)
