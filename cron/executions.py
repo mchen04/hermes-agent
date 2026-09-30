@@ -14,7 +14,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
@@ -27,8 +27,7 @@ from hermes_cli.observability.shared_metrics_gateway import record_cron_finish
 # that temporarily enter another profile cannot leak that profile's records into the import-time
 # home.
 EXECUTIONS_FILE: Optional[Path] = None
-# LOCAL-PATCH cron-execution-retention: a busy polling job must not erase yesterday's receipts.
-TERMINAL_EXECUTION_RETENTION_DAYS = 30
+MAX_TERMINAL_EXECUTIONS = 1000
 HANDOFF_ADOPTION_GRACE_SECONDS = 30.0
 # Floor for the live-owner stale-claim bound (#115692); see _live_owner_stale_after_seconds.
 LIVE_OWNER_STALE_CLAIM_FLOOR_SECONDS = 7200.0
@@ -86,11 +85,6 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_executions_status_claimed "
         "ON executions(status, claimed_at DESC, id DESC)"
-    )
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_executions_terminal_finished "
-        "ON executions(julianday(finished_at)) "
-        "WHERE status IN ('completed','failed','unknown') AND handoff_pending=0"
     )
     add_column_if_missing(conn, "executions", "delivery_outcome", "delivery_outcome TEXT")
     add_column_if_missing(conn, "executions", "scheduled_instant", "scheduled_instant TEXT")
@@ -178,12 +172,14 @@ def _claim_age_seconds(claimed_at: str) -> float:
 
 
 def _prune_unlocked(conn: sqlite3.Connection) -> None:
-    cutoff = (_hermes_now() - timedelta(days=TERMINAL_EXECUTION_RETENTION_DAYS)).isoformat()
     conn.execute(
-        """DELETE FROM executions
-           WHERE status IN ('completed','failed','unknown') AND handoff_pending=0
-             AND julianday(finished_at) < julianday(?)""",
-        (cutoff,),
+        """DELETE FROM executions WHERE id IN (
+             SELECT id FROM executions
+             WHERE status IN ('completed','failed','unknown')
+             ORDER BY julianday(finished_at) DESC, finished_at DESC,
+                      julianday(claimed_at) DESC, claimed_at DESC, id DESC LIMIT -1 OFFSET ?
+           )""",
+        (max(0, int(MAX_TERMINAL_EXECUTIONS)),),
     )
 
 
