@@ -333,6 +333,16 @@ def _register_terminal_process() -> None:
         print(f"Warning: {warning}", file=sys.stderr)
 
 
+def _stdin_prompt_failed(args, failure, failed) -> int:
+    """LOCAL-PATCH oneshot-stdin: an unreadable or empty stdin prompt fails before any turn, with a
+    failure receipt in ``--usage-file`` so a pipeline can still account for the run."""
+    from hermes_cli.oneshot import _write_usage_file
+    _write_usage_file(getattr(args, "usage_file", None), {
+        "completed": False, "api_calls": 0, "total_tokens": 0,
+        "model": getattr(args, "model", None), "provider": getattr(args, "provider", None)}, failure=failure)
+    return failed(failure, 2)
+
+
 def launch_from_args(args) -> int:
     from websockets.exceptions import WebSocketException
     emitter = None
@@ -383,6 +393,15 @@ def launch_from_args(args) -> int:
                 return failed(f"cannot read --query-file {query_file}: {exc}", 2)
             if not args.query.strip():
                 return failed(f"--query-file {query_file} is empty", 2)
+        if getattr(args, "oneshot", None) == "-":
+            # LOCAL-PATCH oneshot-stdin: `hermes -z -` reads the prompt from stdin, so a large
+            # pipeline prompt never becomes a literal dash.
+            try:
+                args.oneshot = sys.stdin.read()
+            except OSError as exc:
+                return _stdin_prompt_failed(args, f"cannot read stdin prompt: {exc}", failed)
+            if not args.oneshot.strip():
+                return _stdin_prompt_failed(args, "cannot read stdin prompt: stdin prompt is empty", failed)
         if not (getattr(args, "query", None) or getattr(args, "q", None) or getattr(args, "oneshot", None) or sys.stdin.isatty()):
             raise GatewayClientError("Noninteractive chat requires --query or --oneshot")
         return asyncio.run(run_gateway_chat(args, emitter=emitter))
