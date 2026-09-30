@@ -1,9 +1,13 @@
-"""LOCAL-PATCH learn-workers: background review for short-lived runs.
+"""LOCAL-PATCH learn-workers + learn-failed-cron: background review for short-lived runs.
 
 The post-turn review runs in a daemon thread, so a process that exits right after its last
-turn kills it. A Kanban worker defers its reviews to exit. At a normal exit it runs one review
-over the whole session when the session did real work, and waits for it (bounded). A signal
-exit (SIGTERM from the dispatcher, Ctrl-C) skips the wait.
+turn kills it. Two such runs get a review that can finish:
+
+* A Kanban worker defers its reviews to exit. At a normal exit it runs one review over the
+  whole session when the session did real work, and waits for it (bounded). A signal exit
+  (SIGTERM from the dispatcher, Ctrl-C) skips the wait.
+* A failed cron agent run starts a review after delivery; the scheduler tears the agent down
+  only when that review ends. Successful cron runs keep skipping review.
 """
 
 from __future__ import annotations
@@ -17,6 +21,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_WORKER_REVIEW_WAIT_SECONDS = 180.0
 DEFAULT_WORKER_REVIEW_MIN_TOOL_CALLS = 3
+# Hard bound on how long a failed cron run's agent stays alive for its review.
+FAILED_CRON_REVIEW_MAX_WAIT_SECONDS = 600.0
 
 # The Kanban task whose worker process promised to run its review at exit ("" = none).
 _exit_review_task = ""
@@ -67,6 +73,13 @@ def worker_review_min_tool_calls() -> int:
     """``kanban.worker_review_min_tool_calls``: work tool calls that make a session worth a review."""
     return max(0, int(_number(
         _section("kanban").get("worker_review_min_tool_calls"), DEFAULT_WORKER_REVIEW_MIN_TOOL_CALLS)))
+
+
+def failed_cron_review_enabled() -> bool:
+    """``cron.review_failed_runs`` (default on)."""
+    from utils import is_truthy_value
+
+    return is_truthy_value(_section("cron").get("review_failed_runs"), default=True)
 
 
 def _live_review_thread(agent: Any) -> Optional[threading.Thread]:
@@ -176,3 +189,17 @@ def run_worker_exit_review(agent: Any, *, wait_seconds: float, min_tool_calls: i
         return "timed_out"
     return "complete"
 
+
+def start_failed_cron_review(agent: Any, job_id: str) -> Optional[threading.Thread]:
+    """LOCAL-PATCH learn-failed-cron: start a review of a failed cron agent run. Never raises."""
+    try:
+        if agent is None or not failed_cron_review_enabled():
+            return None
+        messages = list(getattr(agent, "_session_messages", None) or [])
+        if not any(isinstance(m, dict) and m.get("role") == "assistant" for m in messages):
+            logger.info("Job '%s': failed run has no model output to review", job_id)
+            return None
+        return start_review(agent, messages, f"Job '{job_id}' failed run")
+    except Exception:
+        logger.warning("Job '%s': failed-run review could not start", job_id, exc_info=True)
+        return None
