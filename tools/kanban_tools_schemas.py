@@ -47,11 +47,26 @@ KANBAN_SHOW_SCHEMA = _schema(
         "handoffs, your prior attempts on this task if any, comments, "
         "and recent events. Use this to (re)orient yourself before "
         "starting work, especially on retries. The response includes a "
-        "pre-formatted ``worker_context`` string suitable for inclusion "
-        "verbatim in your reasoning."
+        "pre-formatted ``worker_context`` and a cursor. Within the same session, "
+        "pass that cursor to read only new comments/events and current status. "
+        "Reuse each returned cursor until truncated flags are false. Omit it "
+        "on a new session to recover the complete brief and prior decisions."
     ),
     {
         "task_id": _prop("string", _DESC_TASK_ID_DEFAULT),
+        # LOCAL-PATCH kanban-incremental-read
+        "cursor": {
+            "type": "object",
+            "description": "The cursor returned by the previous read of this task in this session.",
+            "properties": {
+                "task_id": {"type": "string"},
+                "database": {"type": "string"},
+                "event_id": {"type": "integer", "minimum": 0},
+                "comment_id": {"type": "integer", "minimum": 0},
+            },
+            "required": ["task_id", "database", "event_id", "comment_id"],
+            "additionalProperties": False,
+        },
     },
     [],
 )

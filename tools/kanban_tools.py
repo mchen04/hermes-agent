@@ -393,16 +393,9 @@ def _opt_int(value: Any, default: Optional[int] = None) -> Optional[int]:
     return int(value) if value is not None else default
 
 
-_TASK_FIELDS = tuple(
-    "id title body assignee status tenant priority workspace_kind workspace_path created_by "
-    "created_at started_at completed_at result current_run_id model_override "
-    "provider_override completion_contract last_failure_error".split())
 _TASK_SUMMARY_FIELDS = tuple(
     "id title assignee status priority tenant workspace_kind workspace_path project_id created_by "
     "created_at started_at completed_at current_run_id model_override provider_override".split())
-_RUN_FIELDS = tuple("id profile status outcome summary error metadata started_at ended_at".split())
-_COMMENT_FIELDS = ("author", "body", "created_at")
-_EVENT_FIELDS = ("kind", "payload", "created_at", "run_id")
 _ATTACHMENT_FIELDS = tuple(
     "id filename content_type size uploaded_by stored_path created_at".split())
 _CREATED_FIELDS = ("status", "workspace_kind", "workspace_path", "project_id")
@@ -636,24 +629,15 @@ def inject_new_comments_from_env(agent: Any) -> bool:
 
 @_kanban_handler("kanban_show")
 def _handle_show(args: dict, **kw) -> str:
-    """Full task state: row, parents, children, comments, runs, last 50 events."""
+    """Full initial orientation, then bounded updates using the returned cursor."""
+    from tools.kanban_task_updates import build_task_read  # LOCAL-PATCH kanban-incremental-read
+
     tid = _require_task_id(args)
     with _board(args.get("board")) as (kb, conn):
+        # One read snapshot: a comment arriving mid-read belongs to the next cursor.
+        conn.execute("BEGIN")
         task = _existing_task(kb, conn, tid)
-        return json.dumps({
-            "task": _fields(task, _TASK_FIELDS),
-            "parents": kb.parent_ids(conn, tid),
-            # Non-terminal parents; on a running card this means the dependency
-            # gate is not holding it and kanban_complete will refuse.
-            "unsatisfied_parents": [
-                {"id": pid, "status": status} for pid, status in kb.unsatisfied_parents(conn, tid)],
-            "children": kb.child_ids(conn, tid),
-            "comments": [_fields(c, _COMMENT_FIELDS) for c in kb.list_comments(conn, tid)],
-            # Capped; full log via CLI.
-            "events": [_fields(e, _EVENT_FIELDS) for e in kb.list_events(conn, tid)[-50:]],
-            "runs": [_fields(r, _RUN_FIELDS) for r in kb.list_runs(conn, tid)],
-            # Same string build_worker_context hands the dispatcher at spawn time.
-            "worker_context": kb.build_worker_context(conn, tid)})
+        return json.dumps(build_task_read(kb, conn, task, cursor=args.get("cursor")))
 
 
 @_kanban_handler("kanban_list")
