@@ -144,7 +144,14 @@ def collect_acceptance(contract: str, published_pr: str | None,
                                     for r in rule["parameters"]["required_status_checks"])
         receipt["required"] = [{"context": c, "app_id": a} for c, a in sorted(required, key=str)]
         if not required:
-            receipt["detail"] = "No repository-required checks are configured; explicitly use a local-only contract for non-CI tasks."
+            # LOCAL-PATCH kanban-merged-no-required-checks: a merge needs the operator's
+            # authorization, so a merged PR is the acceptance when the repository
+            # requires no checks. An open PR still has no evidence to accept.
+            if pr["state"] == "MERGED":
+                receipt.update(ok=True, classification="success",
+                               detail="PR merged; the repository requires no checks.")
+                return receipt
+            receipt["detail"] = "No repository-required checks are configured; merge the PR or explicitly use a local-only contract for non-CI tasks."
             return receipt
         pages = _api(f"repos/{repo}/commits/{sha}/check-runs?per_page=100&filter=latest",
                      paginate=True, profile_home=profile_home)
