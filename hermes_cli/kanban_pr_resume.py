@@ -19,7 +19,7 @@ AUTHORIZED_PR_RESUME_EVENT = "authorized_pr_resume"
 # CLI falls back to user, dashboard to dashboard; default is the operator profile.
 # Worker tools persist their profile name and cannot supply an author override.
 _OPERATOR_AUTHORS = frozenset({"user", "dashboard", "default"})
-_OWNER_FIELDS = ("claim_lock", "claim_expires", "current_run_id", "worker_pid", "worker_started_at")
+_OWNER_FIELDS = ("claim_lock", "claim_expires", "current_run_id", "worker_pid")
 
 
 @dataclass
@@ -52,10 +52,20 @@ def _scope(conn, task_id: str) -> dict | None:
     scope = dict(row)
     scope["body_sha256"] = _sha(scope.pop("body"))
     runs = conn.execute(
-        "SELECT MAX(id), COUNT(CASE WHEN ended_at IS NULL OR status='running' THEN 1 END) "
-        "FROM task_runs WHERE task_id=?", (task_id,),
+        "SELECT MAX(id), COUNT(CASE WHEN ended_at IS NULL OR status='running' THEN 1 END), "
+        "COUNT(worker_pid) FROM task_runs WHERE task_id=?", (task_id,),
     ).fetchone()
-    scope.update(last_run_id=runs[0], active_runs=runs[1], ownership_event_id=None)
+    scope.update(last_run_id=runs[0], active_runs=runs[1], retained_worker_runs=runs[2],
+                 fingerprint_run_id=None, ownership_event_id=None)
+    if scope["worker_started_at"] is not None:
+        # Block, review, schedule, and completion clear worker_pid but keep the task row's
+        # fingerprint. Name the run whose spawn recorded it; anything else stays unexplained.
+        spawn = conn.execute(
+            "SELECT run_id, payload FROM task_events WHERE task_id=? "
+            "AND kind IN ('spawned', 'worker_registered') ORDER BY id DESC LIMIT 1", (task_id,),
+        ).fetchone()
+        if spawn is not None and kb._json_dict(spawn["payload"]).get("started_at") == scope["worker_started_at"]:
+            scope["fingerprint_run_id"] = spawn["run_id"]
     for event in conn.execute(
         "SELECT id, kind, payload FROM task_events WHERE task_id=? "
         "AND kind IN ('assigned', 'claimed', 'status') ORDER BY id DESC", (task_id,),
@@ -70,8 +80,14 @@ def _scope(conn, task_id: str) -> dict | None:
 
 
 def _ready(scope: dict | None) -> bool:
-    return bool(scope and scope["status"] == "ready" and scope["assignee"]
-                and not scope["active_runs"] and all(scope[key] is None for key in _OWNER_FIELDS))
+    if not (scope and scope["status"] == "ready" and scope["assignee"]
+            and not scope["active_runs"] and all(scope[key] is None for key in _OWNER_FIELDS)):
+        return False
+    # A leftover fingerprint is history only when it belongs to the latest run, that run has
+    # ended, and no run still retains a worker PID for the terminal-worker reaper.
+    return scope["worker_started_at"] is None or bool(
+        scope["fingerprint_run_id"] is not None and scope["fingerprint_run_id"] == scope["last_run_id"]
+        and not scope["retained_worker_runs"])
 
 
 def _authorization(conn, task_id: str, comment_id: int) -> dict | None:
