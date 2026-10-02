@@ -23,8 +23,8 @@ from tools.kanban_tools_schemas import (
     KANBAN_ATTACH_SCHEMA,
     KANBAN_ATTACH_URL_SCHEMA, KANBAN_ATTACHMENTS_SCHEMA, KANBAN_BLOCK_SCHEMA, KANBAN_COMMENT_SCHEMA,
     KANBAN_COMPLETE_SCHEMA, KANBAN_CREATE_SCHEMA, KANBAN_HEARTBEAT_SCHEMA, KANBAN_LINK_SCHEMA,
-    KANBAN_LIST_SCHEMA, KANBAN_REQUEST_CHANGES_SCHEMA, KANBAN_REQUEST_REVIEW_SCHEMA,
-    KANBAN_SHOW_SCHEMA, KANBAN_UNBLOCK_SCHEMA)
+    KANBAN_LIST_SCHEMA, KANBAN_RECOVER_STALE_PR_SCHEMA, KANBAN_REQUEST_CHANGES_SCHEMA,
+    KANBAN_REQUEST_REVIEW_SCHEMA, KANBAN_SHOW_SCHEMA, KANBAN_UNBLOCK_SCHEMA)
 
 logger = logging.getLogger(__name__)
 
@@ -1180,6 +1180,60 @@ def _handle_link(args: dict, **kw) -> str:
                    **({"gated_by": parent_id} if gated else {}))
 
 
+def _failure_limit() -> int:
+    """``kanban.failure_limit`` exactly as the gateway dispatcher reads it."""
+    from hermes_cli import kanban_db as kb
+    try:
+        return int(cfg_get(load_config(), "kanban", "failure_limit", default=kb.DEFAULT_FAILURE_LIMIT))
+    except (TypeError, ValueError):
+        return kb.DEFAULT_FAILURE_LIMIT
+
+
+@_kanban_handler("kanban_recover_stale_pr")
+def _handle_recover_stale_pr(args: dict, **kw) -> str:
+    """Explicit stale-``active_pr`` recovery (``recover_stale_pr_guard``) plus an
+    optional single-card spawn (``dispatch_task``). A worker may target only a
+    different card on its own pinned board; the API itself refuses any card with
+    a claim, run or worker."""
+    from types import SimpleNamespace
+
+    from hermes_cli import kanban_db_dispatch as kbd
+    from hermes_cli import kanban_ops
+
+    _reject_delegated_child_mutation("kanban_recover_stale_pr")
+    tid = args.get("task_id")
+    _check(tid, "task_id is required: name the guarded card explicitly")
+    tid = str(tid)
+    env_tid = os.environ.get("HERMES_KANBAN_TASK")
+    _check(not (env_tid and tid == env_tid),
+           f"kanban_recover_stale_pr refused: {tid} is your own live card")
+    board = args.get("board")
+    env_board = os.environ.get("HERMES_KANBAN_BOARD")
+    _check(not (env_tid and board and env_board and str(board) != env_board),
+           f"kanban_recover_stale_pr refused: this worker is pinned to board {env_board!r}")
+    dry_run = _parse_bool_arg(args, "dry_run")
+    spawn = _parse_bool_arg(args, "spawn") and not dry_run
+    reason = args.get("reason")
+    with _board(board) as (kb, conn):
+        rec = kbd.recover_stale_pr_guard(conn, tid, actor=_persisted_identity(),
+                                         note=_redact_opt(reason), record=not dry_run)
+        evidence = {"task_id": tid, "status": rec.status, "detail": rec.detail,
+                    "comments": rec.comments, "prs": rec.prs}
+        if not rec.ok and rec.status != "verified":
+            return tool_error(f"kanban_recover_stale_pr refused ({rec.status}): {rec.detail}", **evidence)
+        if not spawn:
+            return _ok(**evidence)
+        _, per_profile, max_in_progress, max_spawn = kanban_ops._dispatch_settings(SimpleNamespace(max=None))
+        res = kbd.dispatch_task(conn, tid, max_spawn=max_spawn, max_in_progress=max_in_progress,
+                                max_in_progress_per_profile=per_profile, failure_limit=_failure_limit(),
+                                board=board)
+        return _ok(**evidence, spawned=[t for (t, _w, _ws) in res.spawned],
+                   respawn_guarded=[r for (_t, r) in res.respawn_guarded],
+                   skipped_locked=res.skipped_locked,
+                   skipped_per_profile_capped=bool(res.skipped_per_profile_capped),
+                   memory_pressure=res.memory_pressure)
+
+
 # --- Registration (order preserved: it is the order tools appear in the schema) ---
 
 # kanban_list / kanban_unblock route the board and are hidden from task workers.
@@ -1198,7 +1252,8 @@ _TOOLS = (
     ("kanban_attachments", KANBAN_ATTACHMENTS_SCHEMA, _handle_attachments, "📎"),
     ("kanban_create", KANBAN_CREATE_SCHEMA, _handle_create, "➕"),
     ("kanban_unblock", KANBAN_UNBLOCK_SCHEMA, _handle_unblock, "▶"),
-    ("kanban_link", KANBAN_LINK_SCHEMA, _handle_link, "🔗"))
+    ("kanban_link", KANBAN_LINK_SCHEMA, _handle_link, "🔗"),
+    ("kanban_recover_stale_pr", KANBAN_RECOVER_STALE_PR_SCHEMA, _handle_recover_stale_pr, "🩹"))
 
 for _name, _sch, _handler, _emoji in _TOOLS:
     _gate = _check_kanban_orchestrator_mode if _name in _ORCHESTRATOR_TOOLS else _check_kanban_mode

@@ -317,3 +317,20 @@ def test_cli_refusal_exits_nonzero(kanban_home, monkeypatch, capsys):
     assert kanban_ops._cmd_recover_stale_pr(_cli_args(tid, spawn=True)) == 1
     out = json.loads(capsys.readouterr().out)
     assert out["status"] == "pr_not_closed" and out["dispatch"] is None
+
+
+@pytest.mark.parametrize("payload", [
+    "not json", "[1, 2]", '"text"', "null", '{"comments": "x"}', '{"comments": [1, "x", null]}',
+    '{"comments": [{"id": [1], "sha256": "x"}]}', '{"comments": [{"id": {"a": 1}, "sha256": ["x"]}]}',
+    '{"comments": [{"id": true, "sha256": "x"}]}', '{"comments": [{"id": "1"}]}',
+])
+def test_malformed_recovery_payload_never_crashes_or_lifts_guard(kanban_home, payload):
+    with kbc.connect() as conn:
+        tid, cid = _guarded_card(conn)
+        sha = kbd._guarded_pr_comments(conn, tid, int(time.time()))[0]["sha256"]
+        with kb.write_txn(conn):
+            conn.execute("INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, ?)",
+                         (tid, "stale_pr_recovered", payload.replace('"x"', json.dumps(sha)), int(time.time())))
+        assert kbd.check_respawn_guard(conn, tid) == "active_pr"
+        res = kbd.dispatch_once(conn, dry_run=True)
+        assert dict(res.respawn_guarded).get(tid) == "active_pr"

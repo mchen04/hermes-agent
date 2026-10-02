@@ -1679,7 +1679,8 @@ def _guarded_pr_comments(conn: sqlite3.Connection, task_id: str, now: int) -> li
 
 def _stale_pr_recovery_covers(conn: sqlite3.Connection, task_id: str, pr_comments: list[dict]) -> bool:
     """True when one ``stale_pr_recovered`` event lists every comment in
-    ``pr_comments`` with the same body hash. Malformed payloads cover nothing."""
+    ``pr_comments`` with the same body hash. Malformed payloads or entries
+    cover nothing (and never raise: this runs inside every dispatch tick)."""
     needed = {(c["id"], c["sha256"]) for c in pr_comments}
     for e in conn.execute(
         "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
@@ -1689,7 +1690,8 @@ def _stale_pr_recovery_covers(conn: sqlite3.Connection, task_id: str, pr_comment
         recorded = data.get("comments") if isinstance(data, dict) else None
         if not isinstance(recorded, list):
             continue
-        have = {(r.get("id"), r.get("sha256")) for r in recorded if isinstance(r, dict)}
+        have = {(r["id"], r["sha256"]) for r in recorded
+                if isinstance(r, dict) and type(r.get("id")) is int and isinstance(r.get("sha256"), str)}
         if needed <= have:
             return True
     return False
@@ -3045,6 +3047,14 @@ def _restart_safe_worker_argv(task: Task, command: list[str]) -> list[str]:
     ).argv
 
 
+# Per-task identity a worker carries; never inherited by a worker it spawns.
+_WORKER_SCOPED_ENV = (
+    "HERMES_KANBAN_TASK", "HERMES_KANBAN_WORKSPACE", "HERMES_KANBAN_BRANCH", "HERMES_KANBAN_RUN_ID",
+    "HERMES_KANBAN_CLAIM_LOCK", "HERMES_KANBAN_GOAL_MODE", "HERMES_KANBAN_GOAL_MAX_TURNS",
+    "HERMES_TENANT", "HERMES_SESSION_ID",
+)
+
+
 def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -> Optional[int]:
     """Fire-and-forget ``hermes -p <profile> chat -q ...`` subprocess.
 
@@ -3100,6 +3110,10 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
         # A multiplexer dispatching for another profile must not hand it the launch
         # profile's .env settings / TERMINAL_* policy — a standalone dispatcher never would.
         strip_launch_profile_env(env, profile_home)
+    # A spawn from inside another worker (``kanban_recover_stale_pr`` with
+    # ``spawn``) would otherwise hand that worker's task identity to this one.
+    for key in _WORKER_SCOPED_ENV:
+        env.pop(key, None)
     if task.tenant:
         env["HERMES_TENANT"] = task.tenant
     env["HERMES_KANBAN_TASK"] = task.id

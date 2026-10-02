@@ -4270,6 +4270,7 @@
                 "kanban_heartbeat",
                 "kanban_link",
                 "kanban_list",
+                "kanban_recover_stale_pr",
                 "kanban_request_changes",
                 "kanban_request_review",
                 "kanban_show",

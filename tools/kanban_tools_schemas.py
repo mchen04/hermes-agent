@@ -549,3 +549,24 @@ KANBAN_LINK_SCHEMA = _schema(
     },
     ["parent_id", "child_id"],
 )
+
+KANBAN_RECOVER_STALE_PR_SCHEMA = _schema(
+    "kanban_recover_stale_pr",
+    (
+        "Lift a stale active_pr respawn hold on a DIFFERENT, unowned ready card "
+        "whose linked GitHub PRs are all merged or closed. Checks every guarding "
+        "PR on GitHub (read-only) and refuses on an open PR, an unknown state or "
+        "a failed lookup; refuses a running/claimed card and your own card. On "
+        "success records auditable evidence bound to the exact PR comments — a "
+        "newer PR comment re-arms the hold. Every other guard, cap and the claim "
+        "lock still apply. Use only when your brief explicitly asks for it."
+    ),
+    {
+        "task_id": _prop("string", "The guarded ready card to recover (required; never your own card)."),
+        "reason": _prop("string", "Why the hold is stale and who authorized resuming; stored on the event."),
+        "dry_run": _prop("boolean", "Check GitHub and report the evidence without recording anything."),
+        "spawn": _prop("boolean", "After recording, start that one card through the normal claim/spawn "
+                                  "path (same board lock, caps and guards as the dispatcher)."),
+    },
+    ["task_id"],
+)
