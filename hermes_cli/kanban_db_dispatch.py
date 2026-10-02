@@ -1572,7 +1572,9 @@ def check_respawn_guard(
     a re-queue event arrived after it — a deliberate re-run) and ``"active_pr"``
     (PR URL in a recent comment; re-spawning risks a duplicate PR — unless a
     handoff event followed the comment: the named profile must work on that
-    PR). The review lane skips the last two:
+    PR — or a separately recorded explicit
+    ``authorized_pr_resume`` receipt binds an operator authorization to the
+    current owner, contract, and PR comments). The review lane skips the last two:
     they are the *inputs* to a review handoff. Stale / dead claim locks are NOT a guard reason — the reclaim
     passes own those.
     """
@@ -1651,6 +1653,11 @@ def check_respawn_guard(
         if any(_is_handoff_event(e["kind"], e["payload"]) for _, e in _rows_since(
                 conn, "task_events", task_id, pr_comments[0]["created_at"],
                 "AND kind IN ('assigned', 'changes_requested', 'review_reopened')", cols=", kind, payload", strict=True)):
+            return None
+        # LOCAL-PATCH kanban-authorized-pr-resume: an explicit operator receipt,
+        # never permission inferred from ordinary progress prose.
+        from hermes_cli.kanban_pr_resume import authorized_pr_resume_covers
+        if authorized_pr_resume_covers(conn, task_id, pr_comments):
             return None
         return "active_pr"
 
