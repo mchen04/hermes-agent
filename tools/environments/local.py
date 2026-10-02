@@ -848,8 +848,10 @@ def _kill_process_group_posix(proc) -> None:
     try:
         pgid = os.getpgid(proc.pid)
     except ProcessLookupError:
+        # LOCAL-PATCH search-rg-pgid: macOS answers getpgid() on an exited, unreaped child with
+        # ESRCH. Without a pgid recorded at spawn there is no group to signal; the caller reaps.
         if (pgid := getattr(proc, "_hermes_pgid", None)) is None:
-            raise
+            return
     try:  # psutil children snapshot; empty on any failure (must never break the kill)
         import psutil
         descendants = psutil.Process(proc.pid).children(recursive=True)
