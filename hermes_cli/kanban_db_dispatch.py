@@ -8,6 +8,7 @@ late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import re
 import signal
@@ -1550,8 +1551,9 @@ def check_respawn_guard(
     a re-queue event arrived after it — a deliberate re-run) and ``"active_pr"``
     (PR URL in a recent comment; re-spawning risks a duplicate PR — unless a
     handoff event followed the comment: the named profile must work on that
-    PR). The review lane skips the last two: they are the *inputs* to a review
-    handoff. Stale / dead claim locks are NOT a guard reason — the reclaim
+    PR — or a ``stale_pr_recovered`` event covers every in-window PR comment,
+    see :func:`recover_stale_pr_guard`). The review lane skips the last two:
+    they are the *inputs* to a review handoff. Stale / dead claim locks are NOT a guard reason — the reclaim
     passes own those.
     """
     row = conn.execute(
@@ -1636,27 +1638,231 @@ def check_respawn_guard(
     #    now work on THAT PR — a closer or the implementer finishing it, not a
     #    duplicate implementation (#111910). A crash/reclaim is not a handoff,
     #    so the worker that opened the PR is still not re-spawned against it.
-    pr_cutoff = now - _RESPAWN_GUARD_PR_WINDOW
-    for c in conn.execute(
-        "SELECT body, created_at FROM task_comments "
-        "WHERE task_id = ? AND created_at >= ? ORDER BY created_at DESC",
-        (task_id, pr_cutoff),
-    ).fetchall():
-        body = _kb._lossy_text(c["body"])
-        if not (body and _RESPAWN_GUARD_PR_URL_RE.search(body)):
-            continue
+    #    Second exception: an operator-recorded ``stale_pr_recovered`` event
+    #    whose GitHub evidence covers EVERY in-window PR comment (exact id and
+    #    body hash) — a newer PR comment is not covered, so it guards again.
+    pr_comments = _guarded_pr_comments(conn, task_id, now)
+    if pr_comments:
         events = conn.execute(
             # Strictly after: a same-second tie stays guarded (fail closed).
             "SELECT kind, payload FROM task_events "
             "WHERE task_id = ? AND created_at > ? "
             "AND kind IN ('assigned', 'changes_requested', 'review_reopened')",
-            (task_id, int(c["created_at"] or 0)),
+            (task_id, pr_comments[0]["created_at"]),
         ).fetchall()
         if any(_is_handoff_event(e["kind"], e["payload"]) for e in events):
+            return None
+        if _stale_pr_recovery_covers(conn, task_id, pr_comments):
             return None
         return "active_pr"
 
     return None
+
+
+def _guarded_pr_comments(conn: sqlite3.Connection, task_id: str, now: int) -> list[dict]:
+    """Comments inside the ``active_pr`` window that carry a GitHub PR URL,
+    newest first: ``{id, created_at, sha256, urls}``. The body hash binds a
+    stale-PR recovery to the exact text it was verified against."""
+    out = []
+    for c in conn.execute(
+        "SELECT id, body, created_at FROM task_comments "
+        "WHERE task_id = ? AND created_at >= ? ORDER BY created_at DESC, id DESC",
+        (task_id, now - _RESPAWN_GUARD_PR_WINDOW),
+    ).fetchall():
+        body = _kb._lossy_text(c["body"])
+        urls = sorted({m.group(0) for m in _RESPAWN_GUARD_PR_URL_RE.finditer(body or "")})
+        if urls:
+            out.append({"id": int(c["id"]), "created_at": int(c["created_at"] or 0),
+                        "sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(), "urls": urls})
+    return out
+
+
+def _stale_pr_recovery_covers(conn: sqlite3.Connection, task_id: str, pr_comments: list[dict]) -> bool:
+    """True when one ``stale_pr_recovered`` event lists every comment in
+    ``pr_comments`` with the same body hash. Malformed payloads cover nothing."""
+    needed = {(c["id"], c["sha256"]) for c in pr_comments}
+    for e in conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = ?",
+        (task_id, STALE_PR_RECOVERED_EVENT),
+    ).fetchall():
+        data = _kb._json_or(e["payload"], {})
+        recorded = data.get("comments") if isinstance(data, dict) else None
+        if not isinstance(recorded, list):
+            continue
+        have = {(r.get("id"), r.get("sha256")) for r in recorded if isinstance(r, dict)}
+        if needed <= have:
+            return True
+    return False
+
+
+STALE_PR_RECOVERED_EVENT = "stale_pr_recovered"
+
+
+@dataclass
+class StalePrRecovery:
+    """Outcome of :func:`recover_stale_pr_guard`. ``status`` is ``"recorded"``,
+    ``"already_recorded"`` (idempotent repeat, nothing written) or a refusal:
+    ``"unknown_task"``, ``"not_ready"`` (status/claim/run/pid show an owner),
+    ``"no_pr_guard"``, ``"pr_not_closed"`` (open or unrecognised state),
+    ``"pr_lookup_failed"`` or ``"comments_changed"`` (the PR comment set moved
+    between the GitHub check and the write)."""
+    status: str
+    task_id: str
+    detail: str = ""
+    comments: list = field(default_factory=list)
+    prs: list = field(default_factory=list)
+
+    @property
+    def ok(self) -> bool:
+        return self.status in ("recorded", "already_recorded")
+
+
+def github_pr_state(url: str) -> dict:
+    """Read-only GitHub lookup of one PR with the operator's own ``gh`` login
+    (recovery is an operator verb; a login that cannot see the repo errors,
+    which refuses): ``{url, state, merged_at, closed_at}`` with ``state`` in
+    ``merged``/``closed``/``open``/``unknown``. Raises on any lookup failure —
+    callers fail closed."""
+    from hermes_cli import kanban_pr_acceptance as acc
+
+    match = acc._PR.fullmatch(url)
+    if not match:
+        return {"url": url, "state": "unknown", "merged_at": None, "closed_at": None}
+    owner, name = match[1].split("/")
+    data = acc._api(f"repos/{owner}/{name}/pulls/{int(match[2])}")
+    raw = data.get("state") if isinstance(data, dict) else None
+    if raw == "closed":
+        state = "merged" if data.get("merged_at") else "closed"
+    elif raw == "open":
+        state = "open"
+    else:
+        state = "unknown"
+    return {"url": url, "state": state,
+            "merged_at": data.get("merged_at") if isinstance(data, dict) else None,
+            "closed_at": data.get("closed_at") if isinstance(data, dict) else None}
+
+
+def _task_owner_free(row: Optional[sqlite3.Row]) -> bool:
+    return (row is not None and row["status"] == "ready" and row["claim_lock"] is None
+            and row["current_run_id"] is None and row["worker_pid"] is None)
+
+
+def recover_stale_pr_guard(
+    conn: sqlite3.Connection, task_id: str, *, actor: str, note: Optional[str] = None,
+    pr_state_fn: Optional[Callable[[str], dict]] = None, record: bool = True,
+) -> StalePrRecovery:
+    """Lift ``active_pr`` on an unowned ready card whose guarded PRs are all closed or merged.
+
+    Every PR URL in the in-window comments is looked up on GitHub (read-only,
+    outside any transaction); one open, unrecognised or failed lookup refuses.
+    The write transaction then rechecks that the card is still ``ready`` with no
+    claim, run or worker and that the PR comment set is unchanged before
+    appending one ``stale_pr_recovered`` event bound to those comment ids and
+    body hashes. The event lifts only ``active_pr`` — every other guard, the
+    claim CAS, dependencies and caps still apply — and a newer PR comment
+    re-arms it. ``record=False`` gathers the same evidence without writing.
+    """
+    lookup = pr_state_fn or github_pr_state
+    pre = conn.execute(
+        "SELECT status, assignee, claim_lock, current_run_id, worker_pid FROM tasks WHERE id = ?",
+        (task_id,),
+    ).fetchone()
+    if pre is None:
+        return StalePrRecovery("unknown_task", task_id, f"no such task: {task_id}")
+    if not _task_owner_free(pre):
+        return StalePrRecovery("not_ready", task_id,
+                               f"status={pre['status']} claim_lock={pre['claim_lock']!r} "
+                               f"current_run_id={pre['current_run_id']} worker_pid={pre['worker_pid']}")
+    snapshot = _guarded_pr_comments(conn, task_id, int(time.time()))
+    comments = [{"id": c["id"], "sha256": c["sha256"], "urls": c["urls"]} for c in snapshot]
+    if not snapshot:
+        return StalePrRecovery("no_pr_guard", task_id, "no PR comment inside the active_pr window")
+    prs = []
+    for url in sorted({u for c in snapshot for u in c["urls"]}):
+        try:
+            evidence = lookup(url)
+        except Exception as exc:
+            return StalePrRecovery("pr_lookup_failed", task_id, f"{url}: {type(exc).__name__}: {exc}",
+                                   comments, prs)
+        state = evidence.get("state") if isinstance(evidence, dict) else None
+        prs.append({"url": url, "state": state,
+                    "merged_at": evidence.get("merged_at") if isinstance(evidence, dict) else None,
+                    "closed_at": evidence.get("closed_at") if isinstance(evidence, dict) else None})
+        if state not in ("merged", "closed"):
+            return StalePrRecovery("pr_not_closed", task_id, f"{url}: state={state!r}", comments, prs)
+    if not record:
+        return StalePrRecovery("verified", task_id, "dry run: nothing recorded", comments, prs)
+    with _kb.write_txn(conn):
+        row = conn.execute(
+            "SELECT status, assignee, claim_lock, current_run_id, worker_pid FROM tasks WHERE id = ?",
+            (task_id,),
+        ).fetchone()
+        if not _task_owner_free(row) or row["assignee"] != pre["assignee"]:
+            return StalePrRecovery("not_ready", task_id, "card changed owner/state during the GitHub check",
+                                   comments, prs)
+        current = _guarded_pr_comments(conn, task_id, int(time.time()))
+        if [(c["id"], c["sha256"]) for c in current] != [(c["id"], c["sha256"]) for c in snapshot]:
+            return StalePrRecovery("comments_changed", task_id,
+                                   "PR comments changed during the GitHub check; rerun", comments, prs)
+        if _stale_pr_recovery_covers(conn, task_id, current):
+            return StalePrRecovery("already_recorded", task_id, "", comments, prs)
+        _kb._append_event(conn, task_id, STALE_PR_RECOVERED_EVENT, {
+            "actor": actor, "note": note, "assignee": row["assignee"],
+            "verified_at": int(time.time()), "comments": comments, "prs": prs,
+        })
+    return StalePrRecovery("recorded", task_id, "", comments, prs)
+
+
+def dispatch_task(
+    conn: sqlite3.Connection, task_id: str, *, spawn_fn=None, ttl_seconds: Optional[int] = None,
+    max_spawn: Optional[int] = None, max_in_progress: Optional[int] = None,
+    max_in_progress_per_profile: Optional[int] = None,
+    failure_limit: int = DEFAULT_FAILURE_LIMIT, board: Optional[str] = None,
+) -> DispatchResult:
+    """Spawn exactly one named ready card through the normal dispatch path.
+
+    Same board lock, global/host/memory caps, review-lane reservation,
+    per-profile cap, profile gate, respawn guards and claim CAS as
+    :func:`dispatch_once`, but touches no other card: no reclaim, promotion or
+    default-assignee pass. An unassigned, claimed or non-ready card spawns
+    nothing. Lets a fresh process start a card the long-lived gateway
+    dispatcher (older code) still holds back."""
+    def _tick() -> DispatchResult:
+        result = DispatchResult()
+        may_spawn, budget = _tick_spawn_budget(
+            conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress, board=board,
+        )
+        row = next((r for r in _lane_rows(conn, "ready") if r["id"] == task_id), None)
+        if not may_spawn or row is None:
+            return result
+        if not row["assignee"]:
+            result.skipped_unassigned.append(task_id)
+            return result
+        per_profile_cap = max_in_progress_per_profile if (
+            isinstance(max_in_progress_per_profile, int) and max_in_progress_per_profile > 0) else None
+        running: dict[str, int] = {}
+        if per_profile_cap is not None:
+            for prow in conn.execute(
+                "SELECT assignee, COUNT(*) AS n FROM tasks "
+                "WHERE status = 'running' AND assignee IS NOT NULL GROUP BY assignee"
+            ):
+                running[prow["assignee"]] = int(prow["n"])
+        review_rows = _lane_rows(conn, "review") if review_dispatch_enabled() else []
+        if budget is not None and budget > 0 and _any_spawnable_review(
+            conn, review_rows, per_profile_cap=per_profile_cap, per_profile_running=running,
+        ):
+            budget -= 1
+        if budget is not None and budget <= 0:
+            return result
+        _dispatch_lane_task(
+            conn, row, row["assignee"], result, lane="ready", dry_run=False,
+            ttl_seconds=ttl_seconds, board=board, failure_limit=failure_limit, spawn_fn=spawn_fn,
+            per_profile_cap=per_profile_cap, per_profile_running=running,
+        )
+        return result
+
+    with _kbc._dispatch_tick_lock(_kb.kanban_db_path(board=board)) as held:
+        return _tick() if held else DispatchResult(skipped_locked=True)
 
 
 def _is_handoff_event(kind: str, payload: Optional[str]) -> bool:
