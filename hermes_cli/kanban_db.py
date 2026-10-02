@@ -1780,8 +1780,15 @@ def add_comment(conn: sqlite3.Connection, task_id: str, author: str, body: str) 
             "INSERT INTO task_comments (task_id, author, body, created_at) "
             "VALUES (?, ?, ?, ?)", (task_id, author.strip(), body.strip(), now),
         )
-        _append_event(conn, task_id, "commented", {"author": author, "len": len(body)})
-        return int(cur.lastrowid or 0)
+        comment_id = int(cur.lastrowid or 0)
+        # LOCAL-PATCH kanban-authorized-pr-resume: a worker's profile label
+        # cannot attest user permission, including when the profile is default.
+        worker_task_id = os.environ.get("HERMES_KANBAN_TASK")
+        _append_event(conn, task_id, "commented", {
+            "author": author, "len": len(body), "comment_id": comment_id,
+            "origin": "worker" if worker_task_id else "operator", "worker_task_id": worker_task_id,
+        })
+        return comment_id
 
 
 def _require_task(conn: sqlite3.Connection, task_id: str) -> None:

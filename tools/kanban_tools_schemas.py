@@ -570,3 +570,29 @@ KANBAN_RECOVER_STALE_PR_SCHEMA = _schema(
     },
     ["task_id"],
 )
+
+KANBAN_RESUME_AUTHORIZED_PR_SCHEMA = _schema(
+    "kanban_resume_authorized_pr",
+    (
+        "Record an explicit operator-authorized resume of one existing open GitHub PR "
+        "on a DIFFERENT, assigned, completely unowned ready card. Use only when your "
+        "brief explicitly requests recovery. Select the exact non-empty operator "
+        "authorization comment on that target (default, user, or dashboard author); "
+        "never use a worker's claim of user permission. The directive must follow "
+        "every guarding PR comment; same-second ties refuse. This operator action "
+        "does not infer permission from prose during dispatch. Checks every linked PR "
+        "read-only; one open PR must match the declared repository or exact PR contract. "
+        "Records hashes and assignee/contract evidence; changed authorization, ownership, "
+        "contract, or guarding comments re-arm the hold. Lifts ONLY active_pr. All other "
+        "guards, dependencies, caps, profile checks, and claim locks apply. Grants no "
+        "completion, CI, merge, or publication approval. Refuses your own card."
+    ),
+    {
+        "task_id": _prop("string", "Exact target ready card ID. Required; never defaults to your own card."),
+        "authorization_comment_id": _prop("integer", "Exact operator authorization comment ID on the target. Required."),
+        "reason": _prop("string", "Non-empty operator reason for this explicit resume. Stored in the audit event."),
+        "dry_run": _prop("boolean", "Verify all evidence without recording or spawning. Overrides spawn."),
+        "spawn": _prop("boolean", "After recording, dispatch ONLY that target through the existing board lock, guards, caps, and claim path."),
+    },
+    ["task_id", "authorization_comment_id", "reason"],
+)

@@ -23,7 +23,7 @@ from tools.kanban_tools_schemas import (
     KANBAN_ATTACH_SCHEMA,
     KANBAN_ATTACH_URL_SCHEMA, KANBAN_ATTACHMENTS_SCHEMA, KANBAN_BLOCK_SCHEMA, KANBAN_COMMENT_SCHEMA,
     KANBAN_COMPLETE_SCHEMA, KANBAN_CREATE_SCHEMA, KANBAN_HEARTBEAT_SCHEMA, KANBAN_LINK_SCHEMA,
-    KANBAN_LIST_SCHEMA, KANBAN_RECOVER_STALE_PR_SCHEMA, KANBAN_REQUEST_CHANGES_SCHEMA,
+    KANBAN_LIST_SCHEMA, KANBAN_RECOVER_STALE_PR_SCHEMA, KANBAN_RESUME_AUTHORIZED_PR_SCHEMA, KANBAN_REQUEST_CHANGES_SCHEMA,
     KANBAN_REQUEST_REVIEW_SCHEMA, KANBAN_SHOW_SCHEMA, KANBAN_UNBLOCK_SCHEMA)
 
 logger = logging.getLogger(__name__)
@@ -1236,6 +1236,45 @@ def _handle_recover_stale_pr(args: dict, **kw) -> str:
 
 # --- Registration (order preserved: it is the order tools appear in the schema) ---
 
+@_kanban_handler("kanban_resume_authorized_pr")
+def _handle_resume_authorized_pr(args: dict, **kw) -> str:
+    from dataclasses import asdict
+    from types import SimpleNamespace
+
+    from hermes_cli import kanban_db_dispatch as kbd, kanban_ops, kanban_pr_resume
+
+    _reject_delegated_child_mutation("kanban_resume_authorized_pr")
+    tid = args.get("task_id")
+    _check(isinstance(tid, str) and tid.strip(), "task_id is required: name the guarded card explicitly")
+    env_tid = os.environ.get("HERMES_KANBAN_TASK")
+    _check(tid != env_tid, "kanban_resume_authorized_pr refused: target is your own live card")
+    board = args.get("board")
+    env_board = os.environ.get("HERMES_KANBAN_BOARD")
+    _check(not (env_tid and board and env_board and board != env_board),
+           f"kanban_resume_authorized_pr refused: this worker is pinned to board {env_board!r}")
+    comment_id = args.get("authorization_comment_id")
+    _check(type(comment_id) is int and comment_id > 0, "authorization_comment_id must be a positive integer")
+    reason = args.get("reason")
+    _check(isinstance(reason, str) and reason.strip(), "reason must be non-empty")
+    dry_run = _parse_bool_arg(args, "dry_run")
+    spawn = _parse_bool_arg(args, "spawn") and not dry_run
+    with _board(board) as (kb, conn):
+        rec = kanban_pr_resume.recover_authorized_pr_resume(
+            conn, tid, comment_id, actor=_persisted_identity(), reason=_redact_opt(reason),
+            dry_run=dry_run, caller_task_id=env_tid)
+        evidence = asdict(rec)
+        if not rec.ok:
+            return tool_error(f"kanban_resume_authorized_pr refused ({rec.status}): {rec.detail}", **evidence)
+        if not spawn:
+            return _ok(**evidence)
+        _, per_profile, max_in_progress, max_spawn = kanban_ops._dispatch_settings(SimpleNamespace(max=None))
+        res = kbd.dispatch_task(conn, tid, max_spawn=max_spawn, max_in_progress=max_in_progress,
+                                max_in_progress_per_profile=per_profile, failure_limit=_failure_limit(), board=board)
+        return _ok(**evidence, spawned=[t for (t, _w, _ws) in res.spawned],
+                   respawn_guarded=[r for (_t, r) in res.respawn_guarded], skipped_locked=res.skipped_locked,
+                   skipped_nonspawnable=res.skipped_nonspawnable,
+                   skipped_per_profile_capped=bool(res.skipped_per_profile_capped), memory_pressure=res.memory_pressure)
+
 # kanban_list / kanban_unblock route the board and are hidden from task workers.
 _ORCHESTRATOR_TOOLS = frozenset({"kanban_list", "kanban_unblock"})
 _TOOLS = (
@@ -1253,7 +1292,8 @@ _TOOLS = (
     ("kanban_create", KANBAN_CREATE_SCHEMA, _handle_create, "➕"),
     ("kanban_unblock", KANBAN_UNBLOCK_SCHEMA, _handle_unblock, "▶"),
     ("kanban_link", KANBAN_LINK_SCHEMA, _handle_link, "🔗"),
-    ("kanban_recover_stale_pr", KANBAN_RECOVER_STALE_PR_SCHEMA, _handle_recover_stale_pr, "🩹"))
+    ("kanban_recover_stale_pr", KANBAN_RECOVER_STALE_PR_SCHEMA, _handle_recover_stale_pr, "🩹"),
+    ("kanban_resume_authorized_pr", KANBAN_RESUME_AUTHORIZED_PR_SCHEMA, _handle_resume_authorized_pr, "▶"))
 
 for _name, _sch, _handler, _emoji in _TOOLS:
     _gate = _check_kanban_orchestrator_mode if _name in _ORCHESTRATOR_TOOLS else _check_kanban_mode
