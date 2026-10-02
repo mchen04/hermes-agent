@@ -285,3 +285,107 @@ def test_unknown_comment_origin_fails_closed(board, origin):
                      (json.dumps(payload),))
         assert resume(conn, board).status == "invalid_authorization"
         assert events(conn, board) == [] and board["calls"] == []
+
+
+LEGACY_FINGERPRINT = "|179091939798"
+
+
+def leave_legacy_fingerprint(conn, board, monkeypatch):
+    """Real claim -> spawn -> block -> reap -> unblock: only the task row's fingerprint remains."""
+    monkeypatch.setattr(kbd, "_process_fingerprint", lambda pid: LEGACY_FINGERPRINT)
+    assert kb.claim_task(conn, board["task"]) is not None
+    kbd._set_worker_pid(conn, board["task"], 999_999)
+    assert kb.block_task(conn, board["task"], reason="Needs phone confirmation")
+    monkeypatch.setattr(kbd, "_terminal_worker_reap_grace_seconds", lambda: 0)
+    monkeypatch.setattr(kbd, "_worker_alive", lambda pid, started_at=None: False)
+    kbd.reap_terminal_workers(conn)
+    assert kb.unblock_task(conn, board["task"])
+    row = conn.execute("SELECT * FROM tasks WHERE id=?", (board["task"],)).fetchone()
+    assert (row["status"], row["worker_started_at"]) == ("ready", LEGACY_FINGERPRINT)
+    assert all(row[k] is None for k in ("claim_lock", "claim_expires", "current_run_id", "worker_pid"))
+    assert conn.execute("SELECT COUNT(*) FROM task_runs WHERE task_id=? AND (ended_at IS NULL OR worker_pid IS NOT NULL)",
+                        (board["task"],)).fetchone()[0] == 0
+
+
+def test_historical_fingerprint_alone_is_not_ownership(board, monkeypatch):
+    with kbc.connect() as conn:
+        leave_legacy_fingerprint(conn, board, monkeypatch)
+        assert kbd.check_respawn_guard(conn, board["task"]) == "active_pr"
+        assert resume(conn, board, dry_run=True).status == "verified"
+        assert resume(conn, board).status == "recorded"
+        assert kbd.check_respawn_guard(conn, board["task"]) is None
+        (event,) = events(conn, board)
+        # Preserved, never cleared: the receipt snapshots the residue and its spawning run.
+        assert event["scope"]["worker_started_at"] == LEGACY_FINGERPRINT
+        assert event["scope"]["fingerprint_run_id"] == event["scope"]["last_run_id"]
+        assert conn.execute("SELECT worker_started_at FROM tasks WHERE id=?",
+                            (board["task"],)).fetchone()[0] == LEGACY_FINGERPRINT
+
+
+@pytest.mark.parametrize("fault", ["claim_lock", "claim_expires", "current_run_id", "worker_pid", "running",
+    "blocked", "open_run", "unreaped_worker", "other_fingerprint", "unspawned_later_run", "malformed_spawn"])
+def test_historical_fingerprint_with_ownership_or_ambiguity_refuses(board, monkeypatch, fault):
+    with kbc.connect() as conn:
+        leave_legacy_fingerprint(conn, board, monkeypatch)
+        task, run = board["task"], "(SELECT MAX(id) FROM task_runs WHERE task_id=?)"
+        sql = {
+            "claim_lock": "UPDATE tasks SET claim_lock='host:1' WHERE id=?",
+            "claim_expires": "UPDATE tasks SET claim_expires=4102444800 WHERE id=?",
+            "current_run_id": f"UPDATE tasks SET current_run_id={run} WHERE id=?",
+            "worker_pid": "UPDATE tasks SET worker_pid=999999 WHERE id=?",
+            "running": "UPDATE tasks SET status='running' WHERE id=?",
+            "blocked": "UPDATE tasks SET status='blocked' WHERE id=?",
+            "open_run": f"UPDATE task_runs SET ended_at=NULL WHERE id={run}",
+            "unreaped_worker": f"UPDATE task_runs SET worker_pid=999999, worker_started_at='{LEGACY_FINGERPRINT}' WHERE id={run}",
+            "other_fingerprint": "UPDATE tasks SET worker_started_at='|1' WHERE id=?",
+            "unspawned_later_run": "INSERT INTO task_runs(task_id,profile,status,started_at,ended_at,outcome) VALUES (?,'forge','released',1,2,'released')",
+            "malformed_spawn": "UPDATE task_events SET payload='not json' WHERE task_id=? AND kind='spawned'",
+        }[fault]
+        conn.execute(sql, (task,) * sql.count("?"))
+        assert resume(conn, board, dry_run=True).status == "not_ready"
+        assert resume(conn, board).status == "not_ready"
+        assert events(conn, board) == [] and board["calls"] == []
+        assert kbd.check_respawn_guard(conn, task) == "active_pr"
+
+
+@pytest.mark.parametrize("fault", ["fingerprint", "cleared", "worker_pid", "claim", "run", "unreaped_worker", "spawn_event"])
+@pytest.mark.parametrize("dry_run", [False, True])
+def test_historical_fingerprint_network_race_refuses(board, monkeypatch, fault, dry_run):
+    api = acc._api
+
+    def racing(endpoint, **kwargs):
+        with kbc.connect() as other:
+            task = board["task"]
+            if fault == "fingerprint": other.execute("UPDATE tasks SET worker_started_at='|2' WHERE id=?", (task,))
+            if fault == "cleared": other.execute("UPDATE tasks SET worker_started_at=NULL WHERE id=?", (task,))
+            if fault == "worker_pid": other.execute("UPDATE tasks SET worker_pid=999999 WHERE id=?", (task,))
+            if fault == "claim": assert kb.claim_task(other, task) is not None
+            if fault == "run": other.execute("INSERT INTO task_runs(task_id,profile,status,started_at) VALUES (?,'forge','running',1)", (task,))
+            if fault == "unreaped_worker": other.execute("UPDATE task_runs SET worker_pid=999999 WHERE task_id=?", (task,))
+            if fault == "spawn_event":
+                with kb.write_txn(other):
+                    kb._append_event(other, task, "spawned", {"pid": 1, "started_at": "|3"})
+        return api(endpoint, **kwargs)
+
+    with kbc.connect() as conn:
+        leave_legacy_fingerprint(conn, board, monkeypatch)
+        monkeypatch.setattr(acc, "_api", racing)
+        assert resume(conn, board, dry_run=dry_run).status == "task_changed"
+        assert events(conn, board) == []
+        assert conn.execute("SELECT COUNT(*) FROM task_events WHERE task_id=? AND kind='authorized_pr_resume'",
+                            (board["task"],)).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("change", ["fingerprint", "cleared", "spawn_event", "unreaped_worker"])
+def test_historical_fingerprint_receipt_invalidates_on_change(board, monkeypatch, change):
+    with kbc.connect() as conn:
+        leave_legacy_fingerprint(conn, board, monkeypatch)
+        assert resume(conn, board).status == "recorded"
+        assert kbd.check_respawn_guard(conn, board["task"]) is None
+        if change == "fingerprint": conn.execute("UPDATE tasks SET worker_started_at='|2' WHERE id=?", (board["task"],))
+        if change == "cleared": conn.execute("UPDATE tasks SET worker_started_at=NULL WHERE id=?", (board["task"],))
+        if change == "unreaped_worker": conn.execute("UPDATE task_runs SET worker_pid=999999 WHERE task_id=?", (board["task"],))
+        if change == "spawn_event":
+            with kb.write_txn(conn):
+                kb._append_event(conn, board["task"], "spawned", {"pid": 1, "started_at": LEGACY_FINGERPRINT}, run_id=None)
+        assert kbd.check_respawn_guard(conn, board["task"]) == "active_pr"
