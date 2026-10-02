@@ -57,10 +57,12 @@ def _cmd_tail(args: argparse.Namespace) -> int:
     return _poll_loop(args.interval, tick)
 
 
-def _cmd_dispatch(args: argparse.Namespace) -> int:
-    # Honour kanban.default_assignee, kanban.max_in_progress,
-    # kanban.max_in_progress_per_profile and kanban.max_spawn with the same
-    # semantics as the gateway dispatch path.
+def _dispatch_settings(args: argparse.Namespace) -> tuple:
+    """``(default_assignee, max_in_progress_per_profile, max_in_progress, max_spawn)``.
+
+    Honour kanban.default_assignee, kanban.max_in_progress,
+    kanban.max_in_progress_per_profile and kanban.max_spawn with the same
+    semantics as the gateway dispatch path."""
     try:
         from hermes_cli.config import load_config
         _cfg = load_config()
@@ -81,6 +83,11 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
     except Exception:
         default_assignee = max_in_progress_per_profile = max_in_progress = None
         max_spawn = getattr(args, "max", None)
+    return default_assignee, max_in_progress_per_profile, max_in_progress, max_spawn
+
+
+def _cmd_dispatch(args: argparse.Namespace) -> int:
+    default_assignee, max_in_progress_per_profile, max_in_progress, max_spawn = _dispatch_settings(args)
     with kbc.connect_closing() as conn:
         res = kbd.dispatch_once(
             conn,
@@ -155,6 +162,61 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
     if res.memory_pressure:
         print(f"Memory pressure {res.memory_pressure}: new workers restricted this tick")
     return 0
+
+
+def _cmd_recover_stale_pr(args: argparse.Namespace) -> int:
+    """Record GitHub proof that every PR guarding a ready card is closed/merged
+    (lifting ``active_pr`` for exactly those comments), then optionally spawn
+    that one card through the normal claim/spawn path."""
+    from hermes_cli.kanban import _profile_author
+
+    _, per_profile, max_in_progress, max_spawn = _dispatch_settings(args)
+    spawn = getattr(args, "spawn", False) and not args.dry_run
+    with kbc.connect_closing() as conn:
+        rec = kbd.recover_stale_pr_guard(conn, args.task_id, actor=_profile_author(),
+                                         note=getattr(args, "reason", None), record=not args.dry_run)
+        res = None
+        if spawn and rec.ok:
+            res = kbd.dispatch_task(
+                conn, args.task_id, max_spawn=max_spawn, max_in_progress=max_in_progress,
+                max_in_progress_per_profile=per_profile,
+                failure_limit=getattr(args, "failure_limit", kbd.DEFAULT_FAILURE_LIMIT),
+            )
+    if getattr(args, "json", False):
+        _print_json({
+            "task_id": rec.task_id, "status": rec.status, "detail": rec.detail,
+            "comments": rec.comments, "prs": rec.prs,
+            "dispatch": None if res is None else {
+                "spawned": [{"task_id": t, "assignee": w, "workspace": ws} for (t, w, ws) in res.spawned],
+                "respawn_guarded": [{"task_id": t, "reason": r} for (t, r) in res.respawn_guarded],
+                "skipped_per_profile_capped": [t for (t, _w, _c) in res.skipped_per_profile_capped],
+                "skipped_nonspawnable": res.skipped_nonspawnable,
+                "skipped_unassigned": res.skipped_unassigned,
+                "skipped_locked": res.skipped_locked, "memory_pressure": res.memory_pressure,
+            },
+        }, ascii=True)
+    else:
+        print(f"{rec.task_id}: {rec.status}" + (f" — {rec.detail}" if rec.detail else ""))
+        for c in rec.comments:
+            print(f"  comment {c['id']} sha256={c['sha256'][:12]} {' '.join(c['urls'])}")
+        for pr in rec.prs:
+            print(f"  {pr['url']}: {pr['state']} merged_at={pr['merged_at']} closed_at={pr['closed_at']}")
+        if res is not None:
+            if res.spawned:
+                for tid, who, ws in res.spawned:
+                    print(f"Spawned: {tid}  ->  {who}  @ {ws or '-'}")
+            elif res.skipped_locked:
+                print("Not spawned: another dispatcher holds this board's lock; rerun")
+            else:
+                held = [f"{r}" for (_t, r) in res.respawn_guarded] + (
+                    ["per-profile cap"] if res.skipped_per_profile_capped else []) + (
+                    ["non-spawnable assignee"] if res.skipped_nonspawnable else []) + (
+                    ["unassigned"] if res.skipped_unassigned else []) + (
+                    [f"memory {res.memory_pressure}"] if res.memory_pressure else [])
+                print(f"Not spawned: {', '.join(held) or 'not an unclaimed ready card, or no capacity'}")
+    if not rec.ok and rec.status != "verified":
+        return 1
+    return 0 if res is None or res.spawned else 2
 
 
 _DAEMON_DEPRECATED = (

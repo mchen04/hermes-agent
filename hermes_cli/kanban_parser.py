@@ -368,6 +368,17 @@ _SPECS = [
                   f"(spawn_failed, timed_out, or crashed; default: {kbd.DEFAULT_FAILURE_LIMIT})"),
         _json_flag(),
     ], help="One dispatcher pass: reclaim stale, promote ready, spawn workers"),
+    _cmd("recover-stale-pr", [
+        _TASK_ID,
+        _arg("--dry-run", action="store_true",
+             help="Check GitHub and print the evidence; record nothing, spawn nothing"),
+        _reason("Optional note stored on the recovery event"),
+        _arg("--spawn", action="store_true",
+             help="After recording, spawn this one card through the normal claim/spawn path "
+                  "(same lock, caps and guards as dispatch; no other card is touched)"),
+        _arg("--failure-limit", type=int, default=kbd.DEFAULT_FAILURE_LIMIT),
+        _json_flag(),
+    ], help="Lift a stale active_pr hold: verify every guarding PR is closed/merged, record the proof"),
     _cmd("daemon", [
         _arg("--interval", type=float, default=60.0, help="Seconds between dispatch ticks (default: 60)"),
         _arg("--max", type=int, help="Cap number of spawns per tick"),
