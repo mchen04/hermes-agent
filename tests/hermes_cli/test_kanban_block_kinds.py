@@ -198,3 +198,33 @@ def test_dependency_block_with_open_parent_stays_parked_across_dispatch_tick(
 # ---------------------------------------------------------------------------
 
 
+
+
+# LOCAL-PATCH kanban-needs-input-no-loop
+def test_needs_input_waits_on_a_person_never_route_to_triage(kanban_home: Path) -> None:
+    """Asking the person again (a new approval per revision) is not a loop."""
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn)
+        for attempt in range(kb.BLOCK_RECURRENCE_LIMIT + 2):
+            assert kb.block_task(conn, tid, reason=f"approve revision {attempt}?", kind="needs_input")
+            task = kb.get_task(conn, tid)
+            assert (task.status, task.block_kind, task.block_recurrences) == ("blocked", "needs_input", 1)
+            assert kb.unblock_task(conn, tid)
+            _make_running_again(conn, tid)
+        assert not [e for e in kb.list_events(conn, tid) if e.kind == "block_loop_detected"]
+
+
+def test_needs_input_does_not_shield_a_capability_loop(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn)
+        kb.block_task(conn, tid, reason="no browser", kind="capability")
+        kb.unblock_task(conn, tid)
+        _make_running_again(conn, tid)
+        kb.block_task(conn, tid, reason="approve?", kind="needs_input")
+        kb.unblock_task(conn, tid)
+        _make_running_again(conn, tid)
+        kb.block_task(conn, tid, reason="no browser", kind="capability")
+        kb.unblock_task(conn, tid)
+        _make_running_again(conn, tid)
+        kb.block_task(conn, tid, reason="no browser", kind="capability")
+        assert kb.get_task(conn, tid).status == "triage"
