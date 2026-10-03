@@ -108,6 +108,40 @@ def _display_flag_enabled(agent, *, env_var: str, config_key: str, cache_attr: s
         return True
 
 
+def _write_content_sha(tool_name: str, args: Dict[str, Any]) -> Optional[str]:
+    """sha256 of a ``write_file`` call's full content, else None."""
+    content = args.get("content") if tool_name == "write_file" and isinstance(args, dict) else None
+    if not isinstance(content, str):
+        return None
+    import hashlib
+    return hashlib.sha256(content.encode("utf-8", "surrogatepass")).hexdigest()
+
+
+def _scratch_roots() -> list:
+    """Hermes cache dirs (this home, the root home, every profile) and the OS temp dirs."""
+    import tempfile
+    from pathlib import Path
+    roots = [tempfile.gettempdir(), "/tmp", "/private/tmp", "/var/folders", "/private/var/folders"]
+    with suppress(Exception):
+        from hermes_constants import get_default_hermes_root, get_hermes_home
+        home, root = get_hermes_home(), get_default_hermes_root()
+        roots += [home / "cache", root / "cache"]
+        roots += [p / "cache" for p in (root / "profiles").glob("*")]
+    out = []
+    for r in roots:
+        with suppress(Exception):
+            out.append(os.path.normcase(os.path.realpath(str(Path(r).expanduser()))))
+    return out
+
+
+def _is_scratch_target(identity: str) -> bool:
+    try:
+        target = os.path.normcase(os.path.realpath(os.path.expanduser(identity)))
+    except Exception:
+        return False
+    return any(target == r or target.startswith(r.rstrip(os.sep) + os.sep) for r in _scratch_roots())
+
+
 class TurnExplainersMixin:
     """File-mutation failure footer + turn-completion explainer (see module docstring)."""
 
@@ -145,15 +179,18 @@ class TurnExplainersMixin:
                     for _p in landed_paths:
                         with suppress(Exception):
                             mgr.record_agent_write(_p)
+        content_sha = _write_content_sha(tool_name, args)
         if is_error and not landed:
             # Keep the FIRST error per path unless a later success replaces it.
             preview = _extract_error_preview(result)
             for path in targets:
                 identity = _file_mutation_identity(path, task_id)
-                state.setdefault(path, {
+                entry = state.setdefault(path, {
                     "tool": tool_name, "error_preview": preview,
                     "identity": identity, "stat": _file_stat_signature(identity),
                 })
+                if content_sha and "content_sha" not in entry:
+                    entry["content_sha"] = content_sha
         else:
             cleared = {
                 _file_mutation_identity(p, task_id)
@@ -161,6 +198,11 @@ class TurnExplainersMixin:
             }
             for path, info in list(state.items()):
                 if info.get("identity", _file_mutation_identity(path, task_id)) in cleared:
+                    state.pop(path, None)
+                # LOCAL-PATCH file-mutation-footer-scratch: a refused write_file whose exact
+                # content then landed at another path (a retry under a new name) is no
+                # missing edit.
+                elif landed and content_sha and info.get("content_sha") == content_sha:
                     state.pop(path, None)
 
     @staticmethod
@@ -176,6 +218,14 @@ class TurnExplainersMixin:
             path: info for path, info in failed.items()
             if "stat" not in info or _file_stat_signature(info["identity"]) == info["stat"]
         }
+
+    @staticmethod
+    def _file_mutations_user_visible(failed: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+        """LOCAL-PATCH file-mutation-footer-scratch: drop failures on scratch targets (Hermes
+        cache dirs of any profile, the OS temp dir). Those are the agent's own working files,
+        not edits the user asked for, so a refused write there never reaches the user."""
+        return {path: info for path, info in failed.items()
+                if not _is_scratch_target(info.get("identity") or path)}
 
     def _file_mutation_verifier_enabled(self) -> bool:
         """``display.file_mutation_verifier`` / ``HERMES_FILE_MUTATION_VERIFIER`` (a patchable seam)."""

@@ -319,3 +319,63 @@ class TestVerifierEnabled:
 # ---------------------------------------------------------------------------
 # Module-level invariants
 # ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# LOCAL-PATCH file-mutation-footer-scratch
+# ---------------------------------------------------------------------------
+
+class TestScratchAndRetriedWrites:
+    REFUSED = json.dumps({"success": False, "error": "Refusing to overwrite an existing file not read this session"})
+
+    @pytest.fixture
+    def home(self, tmp_path, monkeypatch):
+        import tempfile
+        # tmp_path itself lives under the test temp dir; take that root out so only the
+        # Hermes cache counts as scratch here.
+        monkeypatch.setattr(tempfile, "gettempdir", lambda: "/nonexistent-tmp")
+        hermes_home = tmp_path / ".hermes"
+        (hermes_home / "cache" / "scratch").mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        return hermes_home
+
+    def _footer(self, agent):
+        import logging
+        from agent.turn_finalizer import _append_file_mutation_footer
+        agent._file_mutation_verifier_enabled_cache = True
+        return _append_file_mutation_footer(agent, "Done.", logging.getLogger("t"))
+
+    def test_refused_write_then_same_content_at_new_path_shows_no_footer(self, home, tmp_path):
+        agent = _bare_agent()
+        first, second = tmp_path / "work" / "board-update.txt", tmp_path / "work" / "board-update-2.txt"
+        agent._record_file_mutation_result(
+            "write_file", {"path": str(first), "content": "board text"}, self.REFUSED, is_error=True)
+        assert str(first) in agent._turn_failed_file_mutations
+        agent._record_file_mutation_result(
+            "write_file", {"path": str(second), "content": "board text"},
+            json.dumps({"bytes_written": 10, "files_modified": [str(second)]}), is_error=False)
+        assert agent._turn_failed_file_mutations == {}
+        assert self._footer(agent) == "Done."
+
+    def test_different_content_elsewhere_still_warns(self, home, tmp_path):
+        agent = _bare_agent()
+        first = tmp_path / "work" / "a.txt"
+        agent._record_file_mutation_result(
+            "write_file", {"path": str(first), "content": "one"}, self.REFUSED, is_error=True)
+        agent._record_file_mutation_result(
+            "write_file", {"path": str(tmp_path / "work" / "b.txt"), "content": "two"},
+            json.dumps({"bytes_written": 3}), is_error=False)
+        assert "File-mutation verifier" in self._footer(agent)
+
+    def test_failures_in_the_hermes_cache_never_reach_the_user(self, home, tmp_path):
+        agent = _bare_agent()
+        scratch = home / "cache" / "scratch" / "session-board-update.txt"
+        agent._record_file_mutation_result(
+            "write_file", {"path": str(scratch), "content": "x"}, self.REFUSED, is_error=True)
+        assert self._footer(agent) == "Done."
+        # A real target in the same turn is still reported, and only it.
+        agent._record_file_mutation_result(
+            "patch", {"mode": "replace", "path": "/repo/notes.md", "old_string": "x", "new_string": "y"},
+            json.dumps({"error": "Could not find old_string"}), is_error=True)
+        footer = self._footer(agent)
+        assert "/repo/notes.md" in footer and "session-board-update" not in footer
