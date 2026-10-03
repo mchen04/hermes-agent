@@ -257,6 +257,25 @@ def test_dispatch_task_keeps_guards_caps_and_board_lock(kanban_home):
         assert conn.execute("SELECT status FROM tasks WHERE id = ?", (tid,)).fetchone()[0] == "ready"
 
 
+def test_held_card_records_its_guard_once_per_hold_not_per_tick(kanban_home):
+    spawn = lambda task, workspace: None  # noqa: E731
+    with kbc.connect() as conn:
+        tid, _ = _guarded_card(conn)
+
+        def guard_events():
+            return conn.execute("SELECT COUNT(*) FROM task_events WHERE task_id = ? AND kind = 'respawn_guarded'",
+                                (tid,)).fetchone()[0]
+
+        for _ in range(3):
+            assert kbd.dispatch_task(conn, tid, spawn_fn=spawn).respawn_guarded == [(tid, "active_pr")]
+        assert guard_events() == 1
+        # Something else happened on the card, so the next held tick records the hold again.
+        kb.add_comment(conn, tid, author="michael", body="still waiting")
+        kbd.dispatch_task(conn, tid, spawn_fn=spawn)
+        kbd.dispatch_task(conn, tid, spawn_fn=spawn)
+        assert guard_events() == 2
+
+
 def test_dispatch_task_respects_dependencies(kanban_home):
     with kbc.connect() as conn:
         parent = kb.create_task(conn, title="parent", assignee="forge")

@@ -2248,6 +2248,17 @@ def _call_spawn_fn(spawn_fn, task: Task, workspace: str, board: Optional[str]) -
         return spawn_fn(task, workspace)
 
 
+def _append_event_unless_repeat(conn: sqlite3.Connection, task_id: str, kind: str, payload: dict) -> None:
+    """Append a per-tick diagnostic only when the card's latest event is not the same one: a repeat
+    is written again only after something else happened on the card (reassign, comment, spawn)."""
+    with _kb.write_txn(conn):
+        last = conn.execute(
+            "SELECT kind, payload FROM task_events WHERE task_id = ? "
+            "ORDER BY created_at DESC, id DESC LIMIT 1", (task_id,)).fetchone()
+        if last is None or last["kind"] != kind or last["payload"] != _kb._json_or_null(payload):
+            _kb._append_event(conn, task_id, kind, payload)
+
+
 def _dispatch_lane_task(
     conn: sqlite3.Connection,
     row: sqlite3.Row,
@@ -2281,13 +2292,7 @@ def _dispatch_lane_task(
         # else happened on the card since (reassign, comment) — not one row per tick forever,
         # and not one row per foreign home per tick on a shared board (#101015).
         if not dry_run:
-            with _kb.write_txn(conn):
-                last = conn.execute(
-                    "SELECT kind, payload FROM task_events WHERE task_id = ? "
-                    "ORDER BY created_at DESC, id DESC LIMIT 1", (task_id,)).fetchone()
-                if (last is None or last["kind"] != "skipped_nonspawnable"
-                        or last["payload"] != _kb._json_or_null({"assignee": assignee})):
-                    _kb._append_event(conn, task_id, "skipped_nonspawnable", {"assignee": assignee})
+            _append_event_unless_repeat(conn, task_id, "skipped_nonspawnable", {"assignee": assignee})
         return False
     # Per-profile cap: one profile's local model / API quota / browser pool
     # must not be overwhelmed by a fan-out even with global headroom.
@@ -2306,9 +2311,11 @@ def _dispatch_lane_task(
         # the operator's intent ("default") was perfectly clear (#27145). Mutating the row (not just the
         # in-memory view) keeps diagnostics and the board state consistent: the task is now legitimately
         # owned by ``kanban.default_assignee``, not "unassigned but secretly routed".
+        # LOCAL-PATCH kanban-guard-event-dedupe: once per hold, like skipped_nonspawnable above. A
+        # held card is re-checked every tick, and one row per tick (thousands a day) buried the card's
+        # history that ``kanban_show`` returns to agents.
         if not dry_run:
-            with _kb.write_txn(conn):
-                _kb._append_event(conn, task_id, "respawn_guarded", {"reason": guard_reason})
+            _append_event_unless_repeat(conn, task_id, "respawn_guarded", {"reason": guard_reason})
         return False
 
     def _count_spawn(name: str) -> None:
