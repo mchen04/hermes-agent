@@ -88,6 +88,14 @@ _RESPAWN_GUARD_PR_URL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# LOCAL-PATCH kanban-pr-state-guard: only an OPEN linked PR holds a ready card.
+# Each URL's state comes from ``gh`` with a short timeout and is cached per
+# process, so a held card re-checked every tick costs one lookup per TTL.
+_GUARD_PR_LOOKUP_TIMEOUT = 8  # seconds per ``gh api`` call
+_GUARD_PR_STATE_TTL = {"open": 120, "closed": 600, "merged": 86400, "unknown": 60}
+_guard_pr_state_cache: "dict[str, tuple[str, float]]" = {}
+_GUARD_PR_PARTS_RE = re.compile(r"https?://github\.com/([^/\s]+)/([^/\s]+)/pull/(\d+)", re.IGNORECASE)
+
 
 @dataclass
 class DispatchResult:
@@ -141,7 +149,8 @@ class DispatchResult:
     respawn_guarded: list[tuple[str, str]] = field(default_factory=list)
     """``(task_id, reason)`` skipped by the respawn guard: ``"blocker_auth"``
     (quota/auth error — also auto-blocked), ``"recent_success"`` (completed run
-    within guard window), ``"active_pr"`` (GitHub PR URL in a recent comment)."""
+    within guard window), ``"active_pr"`` (an open GitHub PR linked from a recent
+    comment), ``"pr_state_unknown"`` (a linked PR whose state GitHub did not return)."""
     rate_limited: list[str] = field(default_factory=list)
     """Task ids whose workers bailed on a provider rate-limit / quota wall
     (EX_TEMPFAIL sentinel exit) and were released to ``ready`` WITHOUT counting
@@ -1538,6 +1547,15 @@ def check_respawn_guard(
     conn: sqlite3.Connection, task_id: str, *, lane: str = "ready",
 ) -> Optional[str]:
     """Return a guard reason if ``task_id`` should NOT be re-spawned, else None.
+    See :func:`respawn_guard_verdict`, which also returns the hold's evidence."""
+    return respawn_guard_verdict(conn, task_id, lane=lane)[0]
+
+
+def respawn_guard_verdict(
+    conn: sqlite3.Connection, task_id: str, *, lane: str = "ready",
+) -> "tuple[Optional[str], dict]":
+    """``(reason, detail)``: the guard reason (or None) and, for the PR holds,
+    the URLs that hold (``open_prs`` / ``unknown_prs``).
 
     Called per ready/review row before any claim attempt. Priority order:
     ``"infrastructure_cooldown"`` (latest run is a ``spawn_failed`` the host
@@ -1549,7 +1567,8 @@ def check_respawn_guard(
     (quota/auth pattern; the breaker still trips eventually), then for the
     ready lane only ``"recent_success"`` (completed run within the window, unless
     a re-queue event arrived after it — a deliberate re-run) and ``"active_pr"``
-    (PR URL in a recent comment; re-spawning risks a duplicate PR — unless a
+    (an OPEN GitHub PR linked from a recent comment; re-spawning risks a
+    duplicate PR; ``"pr_state_unknown"`` when GitHub could not answer — unless a
     handoff event followed the comment: the named profile must work on that
     PR — or a ``stale_pr_recovered`` event covers every in-window PR comment,
     see :func:`recover_stale_pr_guard`, or a separately recorded explicit
@@ -1563,7 +1582,7 @@ def check_respawn_guard(
         (task_id,),
     ).fetchone()
     if row is None:
-        return None
+        return None, {}
 
     now = int(time.time())
 
@@ -1583,19 +1602,19 @@ def check_respawn_guard(
         if rl_cooldown > 0 and _kb._json_dict(latest_run["metadata"]).get("infrastructure"):
             ended_at = latest_run["ended_at"]
             if ended_at is not None and (now - int(ended_at)) < rl_cooldown:
-                return "infrastructure_cooldown"
+                return "infrastructure_cooldown", {}
     if latest_run is not None and latest_run["outcome"] == "rate_limited":
         if rl_cooldown <= 0:
             # Cooldown disabled — respawn immediately, skipping blocker_auth so
             # the stamped rate-limit text doesn't re-trap the task.
-            return None
+            return None, {}
         ended_at = latest_run["ended_at"]
         if ended_at is not None and (now - int(ended_at)) < rl_cooldown:
-            return "rate_limit_cooldown"
+            return "rate_limit_cooldown", {}
         # Cooldown elapsed — return early so blocker_auth doesn't catch the
         # stamped rate-limit text; this path intentionally retries forever
         # (spaced by the cooldown) until quota returns or a real run supersedes it.
-        return None
+        return None, {}
 
     # 2. Quota / auth blocker: retrying immediately will not help.  A plain
     # crash is different: its persisted error includes the worker's last
@@ -1604,12 +1623,12 @@ def check_respawn_guard(
     err = _kb._lossy_text(row["last_failure_error"])
     latest_outcome = latest_run["outcome"] if latest_run is not None else None
     if err and latest_outcome != "crashed" and _RESPAWN_BLOCKER_RE.search(err):
-        return "blocker_auth"
+        return "blocker_auth", {}
 
     # Review-lane spawns stop here: a recent completed run and a fresh PR URL
     # are the canonical *inputs* to a review handoff, not duplicate-work signals.
     if lane == "review":
-        return None
+        return None, {}
 
     # 3. Completed run within guard window. Exception: an explicit re-queue
     #    AFTER that success (done→ready drag, re-promotion, unblock, reclaim) is
@@ -1632,7 +1651,7 @@ def check_respawn_guard(
             (task_id, completed_at),
         ).fetchone()
         if not requeued_after:
-            return "recent_success"
+            return "recent_success", {}
 
     # 4. GitHub PR URL in a recent comment — prior worker already opened a PR.
     #    Exception: a handoff AFTER the newest PR comment (operator reassign,
@@ -1653,17 +1672,31 @@ def check_respawn_guard(
             (task_id, pr_comments[0]["created_at"]),
         ).fetchall()
         if any(_is_handoff_event(e["kind"], e["payload"]) for e in events):
-            return None
+            return None, {}
         if _stale_pr_recovery_covers(conn, task_id, pr_comments):
-            return None
+            return None, {}
         # LOCAL-PATCH kanban-authorized-pr-resume: an explicit operator receipt,
         # never permission inferred from ordinary progress prose.
         from hermes_cli.kanban_pr_resume import authorized_pr_resume_covers
         if authorized_pr_resume_covers(conn, task_id, pr_comments):
-            return None
-        return "active_pr"
+            return None, {}
+        # LOCAL-PATCH kanban-pr-state-guard: merged/closed PRs never hold. A
+        # failed lookup keeps the conservative hold under its own reason.
+        states = {url: _guard_pr_state(url) for c in pr_comments for url in c["urls"]}
+        holding = [c for c in pr_comments if any(states[u] in ("open", "unknown") for u in c["urls"])]
+        if not holding:
+            return None, {}
+        # An operator reclaim after the card's own worker linked its PR is a
+        # deliberate "restart this card": the fresh worker reads that PR on the
+        # card, so it is no duplicate risk. A crash reclaim is not manual.
+        if _manual_reclaim_after_own_pr(conn, task_id, holding):
+            return None, {}
+        open_prs = sorted(u for u, st in states.items() if st == "open")
+        if open_prs:
+            return "active_pr", {"open_prs": open_prs}
+        return "pr_state_unknown", {"unknown_prs": sorted(u for u, st in states.items() if st == "unknown")}
 
-    return None
+    return None, {}
 
 
 def _guarded_pr_comments(conn: sqlite3.Connection, task_id: str, now: int) -> list[dict]:
@@ -1682,6 +1715,67 @@ def _guarded_pr_comments(conn: sqlite3.Connection, task_id: str, now: int) -> li
             out.append({"id": int(c["id"]), "created_at": int(c["created_at"] or 0),
                         "sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(), "urls": urls})
     return out
+
+
+def _github_guard_pr_state(url: str) -> str:
+    """``open``/``merged``/``closed`` for one PR URL via the ambient ``gh`` login
+    (the operator's, as stale-PR recovery uses). Raises on any failure."""
+    from hermes_cli import kanban_pr_acceptance as acc
+
+    match = _GUARD_PR_PARTS_RE.fullmatch(url)
+    if not match:
+        raise ValueError("unrecognised PR URL")
+    owner, repo, number = match[1], match[2], int(match[3])
+    data = acc._api(f"repos/{owner}/{repo}/pulls/{number}", timeout=_GUARD_PR_LOOKUP_TIMEOUT)
+    raw = data.get("state") if isinstance(data, dict) else None
+    if raw == "open" and not data.get("merged_at"):
+        return "open"
+    if raw == "closed":
+        return "merged" if data.get("merged_at") else "closed"
+    raise ValueError(f"unexpected PR state {raw!r}")
+
+
+def _guard_pr_state(url: str) -> str:
+    """Cached :func:`_github_guard_pr_state`; ``unknown`` when the lookup fails."""
+    now = time.monotonic()
+    key = url.lower()
+    hit = _guard_pr_state_cache.get(key)
+    if hit is not None and now < hit[1]:
+        return hit[0]
+    try:
+        state = _github_guard_pr_state(url)
+    except Exception as exc:  # network, auth, timeout, malformed: never raise into a tick
+        import logging
+        logging.getLogger(__name__).info("kanban active_pr: PR state lookup failed for %s: %s",
+                                         url, type(exc).__name__)
+        state = "unknown"
+    if len(_guard_pr_state_cache) > 512:
+        _guard_pr_state_cache.clear()
+    _guard_pr_state_cache[key] = (state, now + _GUARD_PR_STATE_TTL.get(state, 60))
+    return state
+
+
+def _manual_reclaim_after_own_pr(conn: sqlite3.Connection, task_id: str, holding: list[dict]) -> bool:
+    """True when every holding comment was written by this card's own worker and a
+    manual (operator) reclaim came strictly after the newest of them."""
+    own: set[int] = set()
+    for e in conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'commented'", (task_id,),
+    ).fetchall():
+        data = _kb._json_dict(e["payload"])
+        if (data.get("origin") == "worker" and data.get("worker_task_id") == task_id
+                and type(data.get("comment_id")) is int):
+            own.add(data["comment_id"])
+    if not all(c["id"] in own for c in holding):
+        return False
+    newest = max(c["created_at"] for c in holding)
+    for e in conn.execute(
+        "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'reclaimed' AND created_at > ?",
+        (task_id, newest),
+    ).fetchall():
+        if _kb._json_dict(e["payload"]).get("manual") is True:
+            return True
+    return False
 
 
 def _stale_pr_recovery_covers(conn: sqlite3.Connection, task_id: str, pr_comments: list[dict]) -> bool:
@@ -2315,7 +2409,13 @@ def _dispatch_lane_task(
         # held card is re-checked every tick, and one row per tick (thousands a day) buried the card's
         # history that ``kanban_show`` returns to agents.
         if not dry_run:
-            _append_event_unless_repeat(conn, task_id, "respawn_guarded", {"reason": guard_reason})
+            # LOCAL-PATCH kanban-pr-state-guard: a PR hold names the URLs that hold
+            # (lookups are cached, so the second evaluation costs no GitHub call).
+            detail = {}
+            if guard_reason in ("active_pr", "pr_state_unknown"):
+                verdict = respawn_guard_verdict(conn, task_id, lane=lane)
+                detail = verdict[1] if verdict[0] == guard_reason else {}
+            _append_event_unless_repeat(conn, task_id, "respawn_guarded", {"reason": guard_reason, **detail})
         return False
 
     def _count_spawn(name: str) -> None:

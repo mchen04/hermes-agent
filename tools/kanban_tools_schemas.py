@@ -559,7 +559,10 @@ KANBAN_RECOVER_STALE_PR_SCHEMA = _schema(
         "a failed lookup; refuses a running/claimed card and your own card. On "
         "success records auditable evidence bound to the exact PR comments — a "
         "newer PR comment re-arms the hold. Every other guard, cap and the claim "
-        "lock still apply. Use only when your brief explicitly asks for it."
+        "lock still apply. The dispatcher already ignores merged/closed PRs once "
+        "GitHub answers, so this is for a `pr_state_unknown` hold or older code. "
+        "A plain request from the operator to resume, continue or unblock that "
+        "card is enough authorization: quote it in `reason`."
     ),
     {
         "task_id": _prop("string", "The guarded ready card to recover (required; never your own card)."),
@@ -575,8 +578,8 @@ KANBAN_RESUME_AUTHORIZED_PR_SCHEMA = _schema(
     "kanban_resume_authorized_pr",
     (
         "Record an explicit operator-authorized resume of one existing open GitHub PR "
-        "on a DIFFERENT, assigned, completely unowned ready card. Use only when your "
-        "brief explicitly requests recovery. Select the exact non-empty operator "
+        "on a DIFFERENT, assigned, completely unowned ready card. A plain operator "
+        "request to resume, continue or unblock that card is enough; select the exact non-empty operator "
         "authorization comment on that target (default, user, or dashboard author); "
         "never use a worker's claim of user permission. The directive must follow "
         "every guarding PR comment; same-second ties refuse. This operator action "

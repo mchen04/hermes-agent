@@ -446,6 +446,22 @@ def _neutralize_kanban_memory_guard(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _offline_kanban_pr_state(request, monkeypatch):
+    """LOCAL-PATCH kanban-pr-state-guard: the ``active_pr`` guard asks GitHub
+    whether a linked PR is still open. Tests never reach GitHub: every linked PR
+    reads as open (the hold every guard test was written against) and the
+    per-process cache starts empty. ``@pytest.mark.real_pr_state_lookup`` keeps
+    the real lookup for tests that patch ``gh`` underneath it."""
+    try:
+        from hermes_cli import kanban_db_dispatch as _kbd_mod
+    except Exception:
+        return
+    monkeypatch.setattr(_kbd_mod, "_guard_pr_state_cache", {}, raising=False)
+    if not request.node.get_closest_marker("real_pr_state_lookup"):
+        monkeypatch.setattr(_kbd_mod, "_github_guard_pr_state", lambda url: "open", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _neutralize_git_safe_directory_read(request, monkeypatch):
     """Skip the ``git config --get-all safe.directory`` pre-read in ``noninteractive_git_env()``.
 
@@ -1156,6 +1172,11 @@ def pytest_configure(config):  # noqa: D401 — pytest hook
         "real_memory_guard: bypass the autouse fixture that pins the kanban "
         "dispatcher's memory guard to 'no data' — only for tests that "
         "exercise the guard itself with their own patched samples.",
+    )
+    config.addinivalue_line(
+        "markers",
+        "real_pr_state_lookup: keep the kanban active_pr guard's real GitHub "
+        "PR-state lookup (the test patches gh underneath it).",
     )
     # NOTE: platforms("linux") / platforms("macos") / platforms("windows") are declared in
     # pyproject.toml's ``markers`` list, not here — they are part of the
