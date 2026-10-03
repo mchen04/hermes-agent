@@ -585,16 +585,33 @@ class GatewayAgentCacheMixin:
             _cache[session_key] = (cached[0], cached[1], _live) + (() if _snapshot_sid is None else (_snapshot_sid,))
 
     def _set_pending_turn_sidecar_notes(self, session_key: str, notes: List[str]) -> None:
-        """Stage per-turn must-deliver notes for the next agent run (one-shot)."""
+        """Stage per-turn must-deliver notes for the next agent run (one-shot). Notes a previous
+        turn left for this one (``_append_pending_turn_sidecar_note``) are kept ahead of them."""
         if not session_key or not notes:
             return
-        self._session_state(session_key).conversation.sidecar_notes = list(notes)
+        state = self._session_state(session_key).conversation
+        carried = [n for n in state.carried_sidecar_notes if n not in notes]
+        state.sidecar_notes = carried + list(notes)
+
+    def _append_pending_turn_sidecar_note(self, session_key: str, note: str) -> None:
+        """LOCAL-PATCH media-drop-notice: queue a note for this session's NEXT agent run, after
+        the current turn already ended (e.g. what its delivery dropped). Rides the next user
+        message like the other sidecar notes; ``/new`` clears it with the conversation state."""
+        if not session_key or not note:
+            return
+        state = self._session_state(session_key).conversation
+        staged = list(state.sidecar_notes or [])
+        if note not in staged:
+            staged.append(note)
+        state.sidecar_notes = staged
+        state.carried_sidecar_notes = list(staged)
 
     def _consume_pending_turn_sidecar_notes(self, session_key: str) -> List[str]:
         state = self._peek_session_state(session_key) if session_key else None
         if state is None:
             return []
         staged, state.conversation.sidecar_notes = state.conversation.sidecar_notes, []
+        state.conversation.carried_sidecar_notes = []
         return list(staged) if isinstance(staged, list) else []
 
     def _voice_channel_sidecar_note(self, event, source: SessionSource, session_key: str) -> Optional[str]:

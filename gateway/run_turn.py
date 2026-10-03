@@ -1926,6 +1926,12 @@ class GatewayTurnMixin:
             response = ""
 
         adapter = self._delivery_adapter_for(source)
+        # LOCAL-PATCH media-drop-notice: a MEDIA: attachment the delivery policy will drop is
+        # named to the user next to the reply and to the agent on its next turn, so neither
+        # side is left believing it was attached.
+        drop_notice = ""
+        if response and adapter is not None and not agent_result.get("failed"):
+            drop_notice = self._hmwa_media_drop_notice(response, source, session_key, adapter)
         # Auto voice reply (TTS audio before the text) unless streaming TTS already delivered audio.
         _streaming_tts_done = adapter is not None and bool(
             getattr(adapter, "_streaming_tts_turn_completed", lambda *_a, **_k: False)(session_key, run_generation)
@@ -1948,13 +1954,47 @@ class GatewayTurnMixin:
                     await adapter.send(source.chat_id, _footer_line, metadata=self._event_thread_metadata(event, source))
                 except Exception as _e:
                     logger.debug("trailing footer send failed: %s", _e)
+            if drop_notice:
+                try:
+                    await adapter.send(source.chat_id, drop_notice, metadata=self._event_thread_metadata(event, source))
+                except Exception as _e:
+                    logger.warning("media drop notice send failed: %s", _e)
             # Return None so the body isn't sent twice; stash the delivered text on the event for the
             # /loop and /goal hooks that read the return value.
             with suppress(Exception):
                 event._streamed_final_response = str(response or "")
             return None
 
+        if drop_notice:
+            response = f"{response}\n\n{drop_notice}"
         return response
+
+    def _hmwa_media_drop_notice(self, response: str, source, session_key: str, adapter) -> str:
+        """LOCAL-PATCH media-drop-notice: run this reply's ``MEDIA:`` paths through the same
+        delivery policy the adapter applies. For each path it will drop, stage a note for the
+        agent's next turn and return a one-line notice for the user ("" when nothing drops).
+        The policy itself is unchanged."""
+        dropped: List[dict] = []
+        try:
+            media_files, _ = adapter.extract_media(response)
+            if not media_files:
+                return ""
+            resolve = getattr(self, "_media_delivery_scope_for_source", None)
+            with (resolve(source) if callable(resolve) else nullcontext()):
+                BasePlatformAdapter.filter_media_delivery_paths(media_files, session_key=session_key, dropped=dropped)
+        except Exception:
+            logger.debug("media drop check failed", exc_info=True)
+            return ""
+        if not dropped:
+            return ""
+        from gateway.platforms.base import DOCUMENT_CACHE_DIR
+        self._append_pending_turn_sidecar_note(session_key, (
+            "[Gateway delivery note: your previous reply asked to attach file(s) that were NOT "
+            "delivered: " + "; ".join(f"{d['path']} ({d['reason']})" for d in dropped)
+            + ". The user was shown \"Not attached\" for them. Do not say they were attached or sent. "
+            f"To send one, copy it into {DOCUMENT_CACHE_DIR} and reply with MEDIA:<new path>.]"))
+        return "⚠️ Not attached: " + ", ".join(
+            f"`{Path(str(d['path'])).name}` ({d['reason']})" for d in dropped) + "."
 
     # Chat-side next steps keyed by HTTP status; Hermes commands only (/login is the gateway's own
     # sign-in, `{relogin}` the profile-aware host equivalent, filled from the turn's agent provider).
