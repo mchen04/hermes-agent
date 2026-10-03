@@ -122,3 +122,29 @@ def test_unanswered_question_is_labelled_and_answered_one_is_not(compressor, mon
 def test_summary_language_is_a_known_config_key():
     from hermes_cli.config import _validate_config_key
     assert _validate_config_key("compression.summary_language")[0]
+
+
+def test_a_pruned_tool_result_keeps_its_facts():
+    content = json.dumps({"output": "noise\n" * 50 + '{"state": "MERGED", "mergedAt": "2026-10-02T17:20:55Z"}',
+                          "exit_code": 0})
+    line = cc._summarize_tool_result("terminal", json.dumps({"command": "gh pr view 21"}), content)
+    assert line.startswith("[terminal] ran `gh pr view 21` -> exit 0")
+    assert '"state": "MERGED"' in line and "exit_code=0" not in line
+    # Nothing factual: the stub is unchanged.
+    plain = cc._summarize_tool_result("terminal", json.dumps({"command": "ls"}), json.dumps({"output": "a\nb", "exit_code": 0}))
+    assert plain == "[terminal] ran `ls` -> exit 0, 1 lines output"
+
+
+def test_facts_survive_the_pre_compression_prune():
+    """The prune pass replaces old tool bodies with one-line stubs before the summary is written;
+    the stub carries the facts and the facts section keeps the stub."""
+    content = json.dumps({"output": "noise\n" * 50 + '{"state": "MERGED"}', "exit_code": 0})
+    stub = cc._summarize_tool_result("terminal", json.dumps({"command": "gh pr view 21"}), content)
+    turns = [_call("c1"), {"role": "tool", "tool_call_id": "c1", "content": stub}]
+    (line,) = cc.latest_tool_facts(turns)
+    assert '"state": "MERGED"' in line and "-> exit 0" in line
+
+
+def test_clarify_answers_are_never_lifted_as_facts():
+    turns = [_call("c1", "clarify"), _tool("c1", {"responses": [{"question": "Q?", "status": "answered"}]})]
+    assert cc.latest_tool_facts(turns) == []

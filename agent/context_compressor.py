@@ -1653,7 +1653,12 @@ def _str_arg(args: dict, key: str, default: str = "") -> str:
 def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) -> str:
     """1-line summary of a tool call + result. Never raises: a malformed historical call must not crash-loop compression."""
     try:
-        return _summarize_tool_result_unguarded(tool_name, tool_args, tool_content)
+        line = _summarize_tool_result_unguarded(tool_name, tool_args, tool_content)
+        # LOCAL-PATCH compression-summary-facts: a pruned result keeps its key facts verbatim
+        # (PR state, test totals); the stub is all the summarizer will ever see of it.
+        facts = [f for f in _tool_result_facts(tool_content or "")
+                 if not f.startswith("exit_code=")] if tool_name in _TOOL_FACT_TOOLS else []
+        return f"{line} | facts: " + "; ".join(facts) if facts else line
     except Exception as exc:  # noqa: BLE001 — a summary must never crash compression
         logger.debug("Tool-result summary failed for %s: %s", tool_name, exc)
         _len = len(tool_content) if isinstance(tool_content, str) else 0
@@ -1912,6 +1917,9 @@ def _today_for_prompt() -> str:
 _TOOL_FACTS_HEADING = "## Latest Tool Facts (verbatim)"
 _TOOL_FACTS_MAX_RESULTS = 8
 _TOOL_FACTS_PER_RESULT = 6
+# Command runners only: their output is where PR state, exit codes and test totals live. Other
+# tools' JSON (clarify answers, skill lists) is not evidence of that kind and may be private.
+_TOOL_FACT_TOOLS = frozenset({"terminal", "execute_code", "process"})
 _TOOL_FACT_KEYS = frozenset({
     "state", "merged", "mergedat", "merged_at", "mergestatestatus", "conclusion", "status",
     "exit_code", "exitcode", "returncode", "exit_status", "success", "passed", "failed", "errors",
@@ -1988,9 +1996,16 @@ def latest_tool_facts(turns: List[Dict[str, Any]]) -> List[str]:
             break
         if not isinstance(msg, dict) or msg.get("role") != "tool":
             continue
-        facts = _tool_result_facts(_content_text_for_contains(msg.get("content")))
+        name = names.get(str(msg.get("tool_call_id") or ""), ("tool", ""))[0] or "tool"
+        if name not in _TOOL_FACT_TOOLS:
+            continue
+        text = _content_text_for_contains(msg.get("content"))
+        if text.startswith(f"[{name}]") and "\n" not in text.strip():
+            # Already pruned to a one-line stub (which carries its facts): keep it whole.
+            lines.append(_redact_compaction_text(f"- {text.strip()[:600]}"))
+            continue
+        facts = _tool_result_facts(text)
         if facts:
-            name = names.get(str(msg.get("tool_call_id") or ""), ("tool", ""))[0] or "tool"
             lines.append(_redact_compaction_text(f"- [{name}] " + "; ".join(facts)))
     return list(reversed(lines))
 
