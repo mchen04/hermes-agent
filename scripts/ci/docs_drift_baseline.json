@@ -21,6 +21,7 @@
   "browser.extension_control.developer_mode",
   "compression.abort_on_summary_failure",
   "compression.max_attempts",
+  "compression.summary_language",
   "computer_use.ax_max_elements",
   "computer_use.capture_after_mode",
   "computer_use.max_image_dimension",
