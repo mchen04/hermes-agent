@@ -382,6 +382,7 @@ def _append_file_mutation_footer(agent, final_response, logger):
         _failed = getattr(agent, "_turn_failed_file_mutations", None) or {}
         if _failed and agent._file_mutation_verifier_enabled():
             _failed = agent._file_mutations_still_failed(_failed)
+            _failed = agent._file_mutations_user_visible(_failed)
             footer = agent._format_file_mutation_failure_footer(_failed)
             if footer:
                 final_response = final_response.rstrip() + "\n\n" + footer
