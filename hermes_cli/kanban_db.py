@@ -3281,6 +3281,7 @@ def block_task(
         new_status, event_kind, set_sql, params, payload = _route_block(
             kind, reason, source_status, prev_kind=_row_get(cur_row, "block_kind"),
             prev_recurrences=int(_row_get(cur_row, "block_recurrences") or 0),
+            waits_on_person=requested_kind == "needs_input",
         )
         if rekind_reason:
             payload["requested_kind"] = requested_kind
@@ -3316,7 +3317,7 @@ def block_task(
 
 def _route_block(
     kind: Optional[str], reason: Optional[str], source_status: str, *,
-    prev_kind: Optional[str], prev_recurrences: int,
+    prev_kind: Optional[str], prev_recurrences: int, waits_on_person: bool = False,
 ) -> tuple[str, str, str, tuple, dict]:
     """``(new_status, event_kind, set_sql, params, payload)`` for :func:`block_task`.
 
@@ -3330,11 +3331,17 @@ def _route_block(
     incoming one means blocked -> unblocked -> re-block for the same cause
     (un-typed None compares equal to a prior un-typed block). At
     ``BLOCK_RECURRENCE_LIMIT`` the task routes to ``triage`` for a human.
+
+    LOCAL-PATCH kanban-needs-input-no-loop: a worker's own ``needs_input`` block
+    (``waits_on_person``) waits for a person's answer or approval. Each one is a
+    new question, not a failed retry, so it never counts toward the limit; the
+    card stays ``blocked`` where it reads as waiting on that person. A
+    ``dependency`` re-kinded to ``needs_input`` still counts: nobody can answer it.
     """
     payload = {"reason": reason, "kind": kind, "source_status": source_status}
     if kind == "dependency":
         return "todo", "dependency_wait", "block_kind    = ?", (kind,), payload
-    recurrences = prev_recurrences + 1 if prev_kind == kind else 1
+    recurrences = 1 if waits_on_person else prev_recurrences + 1 if prev_kind == kind else 1
     set_sql = "block_kind    = ?,\n                       block_recurrences = ?"
     payload = {"reason": reason, "kind": kind, "recurrences": recurrences, "source_status": source_status}
     if recurrences >= BLOCK_RECURRENCE_LIMIT:
