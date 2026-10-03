@@ -2018,10 +2018,13 @@ def with_tool_facts_section(summary: str, facts: List[str]) -> str:
     return f"{summary}\n\n{_TOOL_FACTS_HEADING}\n" + "\n".join(facts) + "\n"
 
 
-def unanswered_user_turn_ids(messages: List[Dict[str, Any]], is_synthetic) -> set:
-    """``id()`` of each real user turn that no later assistant text reply (a row without tool
-    calls) followed anywhere in ``messages`` — the question was still open when compacting."""
+def user_turn_reply_status(messages: List[Dict[str, Any]], window: List[Dict[str, Any]], is_synthetic) -> tuple:
+    """``(unanswered, answered_later)`` as sets of ``id()`` of real user turns in ``window``.
+    A turn is answered by the next assistant text reply (a row without tool calls) anywhere in
+    ``messages``; ``answered_later`` = that reply lies outside ``window`` (kept in the tail)."""
+    in_window = {id(m) for m in window}
     pending: list = []
+    answered_later: set = set()
     for msg in messages:
         if not isinstance(msg, dict):
             continue
@@ -2030,11 +2033,19 @@ def unanswered_user_turn_ids(messages: List[Dict[str, Any]], is_synthetic) -> se
             pending.append(id(msg))
         elif (role == "assistant" and pending and not msg.get("tool_calls")
               and _content_text_for_contains(msg.get("content")).strip()):
+            if id(msg) not in in_window:
+                answered_later.update(pending)
             pending = []
-    return set(pending)
+    return set(pending) & in_window, answered_later & in_window
+
+
+def unanswered_user_turn_ids(messages: List[Dict[str, Any]], is_synthetic) -> set:
+    """``id()`` of each real user turn no later assistant text reply followed in ``messages``."""
+    return user_turn_reply_status(messages, messages, is_synthetic)[0]
 
 
 _NO_REPLY_LABEL = "[USER — NO REPLY SENT YET]"
+_LATER_REPLY_LABEL = "[USER — ANSWERED IN THE RECENT MESSAGES KEPT AFTER THIS SUMMARY]"
 
 
 # Per-section summarizer instructions, keyed by "the transcript has a real user turn". Wording
@@ -3533,6 +3544,9 @@ class ContextCompressor(SummaryDispatchMixin, MicroCompactionMixin, ContextEngin
             if role == "user" and id(msg) in getattr(self, "_summary_unanswered_ids", ()):
                 parts.append(f"{_NO_REPLY_LABEL}: {content}")
                 continue
+            if role == "user" and id(msg) in getattr(self, "_summary_answered_later_ids", ()):
+                parts.append(f"{_LATER_REPLY_LABEL}: {content}")
+                continue
             parts.append(f"[{role.upper()}]: {content}")
         return parts
 
@@ -4136,6 +4150,10 @@ Use this exact structure:
                 f"\n\nTurns labelled {_NO_REPLY_LABEL} had no assistant reply anywhere in the conversation "
                 f"when this summary was made. Never list them under Resolved Questions; keep them in "
                 f"{HISTORICAL_TASK_HEADING}.")
+        if _LATER_REPLY_LABEL in content_to_summarize:
+            prompt += (
+                f"\n\nTurns labelled {_LATER_REPLY_LABEL} were answered in messages kept verbatim after "
+                "this summary. Never call them unanswered, open or pending.")
         # Focus guidance goes last so it takes precedence.
         if focus_topic:
             prompt += f"""

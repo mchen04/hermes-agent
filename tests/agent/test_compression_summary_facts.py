@@ -148,3 +148,17 @@ def test_facts_survive_the_pre_compression_prune():
 def test_clarify_answers_are_never_lifted_as_facts():
     turns = [_call("c1", "clarify"), _tool("c1", {"responses": [{"question": "Q?", "status": "answered"}]})]
     assert cc.latest_tool_facts(turns) == []
+
+
+def test_a_question_answered_in_the_kept_tail_is_labelled_answered(compressor, monkeypatch):
+    asked = {"role": "user", "content": "anything needed from me?"}
+    window = [asked, _call("c1"), _tool("c1", {"exit_code": 0})]
+    messages = window + [{"role": "assistant", "content": "No, nothing waits on you."}]
+    seen = {}
+    monkeypatch.setattr(compressor, "_call_summary_llm",
+                        lambda prompt, started: seen.setdefault("prompt", prompt) and "## Goal\nx\n")
+    scan = type("Scan", (), {"previous_summary_before": None, "has_user_turn_before": None})()
+    compressor._summarize_window(messages, window, scan, None, "", False)
+    assert f"{cc._LATER_REPLY_LABEL}: anything needed from me?" in seen["prompt"]
+    assert "Never call them unanswered" in seen["prompt"]
+    assert cc._NO_REPLY_LABEL not in seen["prompt"]

@@ -58,9 +58,9 @@ class SummaryDispatchMixin:
             summary_kwargs["bypass_cooldown"] = bypass_cooldown
         # LOCAL-PATCH compression-summary-facts: label user turns no reply followed (the reply may
         # sit in the protected tail, so scan the whole list) for the serializer.
-        from agent.context_compressor import unanswered_user_turn_ids
-        self._summary_unanswered_ids = unanswered_user_turn_ids(
-            messages, self._is_synthetic_compression_user_turn)
+        from agent.context_compressor import user_turn_reply_status
+        self._summary_unanswered_ids, self._summary_answered_later_ids = user_turn_reply_status(
+            messages, turns_to_summarize, self._is_synthetic_compression_user_turn)
         try:
             return self._generate_summary(turns_to_summarize, **summary_kwargs)
         except AuxiliaryExplicitCancellation:
@@ -77,4 +77,4 @@ class SummaryDispatchMixin:
                 self._summary_has_user_turn = scan.has_user_turn_before
             raise
         finally:
-            self._summary_unanswered_ids = set()
+            self._summary_unanswered_ids = self._summary_answered_later_ids = set()
