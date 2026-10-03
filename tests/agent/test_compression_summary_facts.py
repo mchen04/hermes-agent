@@ -117,3 +117,8 @@ def test_unanswered_question_is_labelled_and_answered_one_is_not(compressor, mon
     assert "[USER]: is PR 21 merged?" in seen["prompt"]
     assert "Never list them under Resolved Questions" in seen["prompt"]
     assert compressor._summary_unanswered_ids == set()  # per-call state does not leak
+
+
+def test_summary_language_is_a_known_config_key():
+    from hermes_cli.config import _validate_config_key
+    assert _validate_config_key("compression.summary_language")[0]
