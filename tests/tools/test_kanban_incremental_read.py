@@ -142,3 +142,23 @@ def test_orientation_read_without_overflow_has_no_note(board):
     assert len(first["comments"]) == 1
     assert first["truncated"] == {"events": False, "comments": False, "runs": False}
     assert "note" not in first
+
+
+def test_reader_that_is_not_the_task_worker_gets_fields_without_worker_context(monkeypatch, board):
+    """LOCAL-PATCH kanban-show-reader-context: the front door or a supervisor reading a card
+    gets every field (body, comments, events, runs, cursor) but not the worker brief that
+    repeats them; the task's own worker still gets it."""
+    from tools.registry import registry
+
+    kb, kbc, tid = board
+    with kbc.connect_closing() as conn:
+        kb.add_comment(conn, tid, "user", "keep this decision")
+    own = json.loads(registry.dispatch("kanban_show", {}))
+    assert own["worker_context"]
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    other = json.loads(registry.dispatch("kanban_show", {"task_id": tid}))
+    assert "worker_context" not in other
+    assert other["task"]["body"] == own["task"]["body"]
+    assert [c["body"] for c in other["comments"]] == ["keep this decision"]
+    assert other["events"] and other["runs"] and other["cursor"]["task_id"] == tid
+    assert len(json.dumps(other)) < len(json.dumps(own))
