@@ -673,7 +673,10 @@ def _handle_show(args: dict, **kw) -> str:
         # One read snapshot: a comment arriving mid-read belongs to the next cursor.
         conn.execute("BEGIN")
         task = _existing_task(kb, conn, tid)
-        return json.dumps(build_task_read(kb, conn, task, cursor=args.get("cursor")))
+        # LOCAL-PATCH kanban-show-reader-context: only the task's own worker gets worker_context.
+        own_worker = _is_dispatcher_owned_worker() and os.environ.get("HERMES_KANBAN_TASK", "").strip() == tid
+        return json.dumps(build_task_read(kb, conn, task, cursor=args.get("cursor"),
+                                          include_worker_context=own_worker))
 
 
 @_kanban_handler("kanban_list")
