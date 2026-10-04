@@ -49,8 +49,8 @@ KANBAN_SHOW_SCHEMA = _schema(
     (
         "Read a task's full state: body, assignee, parent handoffs, attempts, comments. "
         "It also carries the title and recent events. Use this to (re)orient yourself before "
-        "starting work, especially on retries. The response includes a "
-        "pre-formatted ``worker_context`` and a cursor. Within the same session, "
+        "starting work, especially on retries. The response includes a cursor, "
+        "and for the task's own worker a pre-formatted ``worker_context``. Within the same session, "
         "pass that cursor to read only new comments/events and current status. "
         "Reuse each returned cursor until truncated flags are false. Omit it "
         "on a new session to recover the complete brief and prior decisions. "
