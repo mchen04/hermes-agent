@@ -65,8 +65,11 @@ def _read_updates(kb, conn, task, cursor, current):
     return events, comments, runs, truncated
 
 
-def build_task_read(kb, conn, task, *, cursor=None):
-    """Caller holds a read transaction so rows and watermarks share one snapshot."""
+def build_task_read(kb, conn, task, *, cursor=None, include_worker_context=True):
+    """Caller holds a read transaction so rows and watermarks share one snapshot.
+    ``include_worker_context`` is False for readers that are not the task's own worker
+    (LOCAL-PATCH kanban-show-reader-context): the pre-formatted worker brief repeats the
+    body, comments, events and runs already returned, and only the worker needs it."""
     current = _cursor(conn, task.id)
     if cursor is None:
         events = kb.list_events(conn, task.id)
@@ -90,7 +93,7 @@ def build_task_read(kb, conn, task, *, cursor=None):
         "runs": [_fields(run, _RUN_FIELDS) for run in runs],
         "truncated": truncated,
     }
-    if cursor is None:
+    if cursor is None and include_worker_context:
         result["worker_context"] = kb.build_worker_context(conn, task.id)
         if truncated["comments"] or truncated["runs"]:
             result["note"] = _ORIENT_NOTE
