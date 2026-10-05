@@ -13,6 +13,7 @@ import asyncio
 import datetime as dt
 import hashlib
 import inspect
+import io
 import json
 import logging
 import math
@@ -3042,7 +3043,14 @@ class DiscordAdapter(DiscordMediaMixin, DiscordThreadTitlesMixin, BasePlatformAd
             logger.debug("Could not build reply-to reference: %s", e)
             return None
 
-    def _cap_split_chunks(self, chunks: List[str]) -> List[str]:
+    def _overflow_file_kwargs(self, content: str, split_count: int) -> Dict[str, Any]:
+        """LOCAL-PATCH discord-overflow-attachment: a reply over the split cap keeps the flood
+        guard but carries its full text as a Markdown file, so nothing is lost in the channel."""
+        if split_count <= self.MAX_SPLIT_MESSAGES or discord is None:
+            return {}
+        return {"file": discord.File(io.BytesIO(content.encode("utf-8")), filename="full-reply.md")}
+
+    def _cap_split_chunks(self, chunks: List[str], attached: bool = False) -> List[str]:
         """Cap chunks at ``MAX_SPLIT_MESSAGES``: keep the first N-1 and replace the rest with a
         notice so a degenerate turn can't flood the channel (full text stays in session history).
 
@@ -3056,7 +3064,8 @@ class DiscordAdapter(DiscordMediaMixin, DiscordThreadTitlesMixin, BasePlatformAd
         kept = chunks[: self.MAX_SPLIT_MESSAGES - 1]
         dropped_chars = sum(len(c) for c in chunks[self.MAX_SPLIT_MESSAGES - 1 :])
         notice = "\n\n" + t(
-            "platform.discord.limits.response_truncated",
+            "platform.discord.limits.response_attached" if attached and discord is not None
+            else "platform.discord.limits.response_truncated",
             max_messages=str(self.MAX_SPLIT_MESSAGES), dropped_chars=str(dropped_chars))
         if self.warning_text(notice):
             kept.append(notice)
@@ -3102,9 +3111,8 @@ class DiscordAdapter(DiscordMediaMixin, DiscordThreadTitlesMixin, BasePlatformAd
                 result = await self._send_to_forum(channel, content)
                 return await self._record_response_async(reply_to, result, content, final_delivery, metadata)
             formatted = self.format_message(content)
-            chunks = self._cap_split_chunks(
-                self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
-            )
+            split = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
+            chunks = self._cap_split_chunks(split, attached=True)
             message_ids = []
             reference = self._reply_reference_for_send(reply_to, channel)
             for i, chunk in enumerate(chunks):
@@ -3112,8 +3120,10 @@ class DiscordAdapter(DiscordMediaMixin, DiscordThreadTitlesMixin, BasePlatformAd
                     chunk_reference = reference
                 else:  # "first" (default) or "off"
                     chunk_reference = reference if i == 0 else None
+                last = i == len(chunks) - 1
                 try:
-                    msg = await channel.send(content=chunk, reference=chunk_reference)
+                    msg = await channel.send(content=chunk, reference=chunk_reference,
+                                             **(self._overflow_file_kwargs(content, len(split)) if last else {}))
                 except Exception as e:
                     if chunk_reference is not None and self._is_reply_reference_rejected(e):
                         logger.warning(
@@ -3121,7 +3131,8 @@ class DiscordAdapter(DiscordMediaMixin, DiscordThreadTitlesMixin, BasePlatformAd
                             self.name, reply_to,
                         )
                         reference = None
-                        msg = await channel.send(content=chunk, reference=None)
+                        msg = await channel.send(content=chunk, reference=None,
+                                                 **(self._overflow_file_kwargs(content, len(split)) if last else {}))
                     else:
                         raise
                 message_ids.append(str(msg.id))
@@ -3329,7 +3340,8 @@ class DiscordAdapter(DiscordMediaMixin, DiscordThreadTitlesMixin, BasePlatformAd
         A continuation failure still reports success plus ``partial_overflow`` so the consumer
         delivers the tail; only a first-chunk edit failure returns ``success=False``."""
         formatted = self.format_message(content)
-        chunks = self._cap_split_chunks(self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH))
+        split = self.truncate_message(formatted, self.MAX_MESSAGE_LENGTH)
+        chunks = self._cap_split_chunks(split, attached=True)
         if len(chunks) <= 1:
             # Defensive: pre-flight should guarantee >1 chunk; otherwise edit normally.
             await msg.edit(content=chunks[0] if chunks else formatted)
@@ -3344,7 +3356,8 @@ class DiscordAdapter(DiscordMediaMixin, DiscordThreadTitlesMixin, BasePlatformAd
         continuation_ids: list[str] = []
         delivered = 1
         prev_msg = msg
-        for chunk in chunks[1:]:
+        for index, chunk in enumerate(chunks[1:], start=2):
+            attach = self._overflow_file_kwargs(content, len(split)) if index == len(chunks) else {}
             reference = None
             if hasattr(prev_msg, "to_reference"):
                 try:
@@ -3355,7 +3368,7 @@ class DiscordAdapter(DiscordMediaMixin, DiscordThreadTitlesMixin, BasePlatformAd
                 # Prior message without to_reference (duck-typed): build the reference from ids.
                 reference = self._message_reference_from_ids(prev_msg.id, channel)
             try:
-                sent = await channel.send(content=chunk, reference=reference)
+                sent = await channel.send(content=chunk, reference=reference, **attach)
             except Exception as send_err:
                 # Drop the reply anchor and retry once: deleted anchor (10008) / system message (50035).
                 logger.warning(
@@ -3363,7 +3376,8 @@ class DiscordAdapter(DiscordMediaMixin, DiscordThreadTitlesMixin, BasePlatformAd
                     self.name, send_err,
                 )
                 try:
-                    sent = await channel.send(content=chunk, reference=None)
+                    sent = await channel.send(content=chunk, reference=None,
+                                              **(self._overflow_file_kwargs(content, len(split)) if attach else {}))
                 except Exception as retry_err:
                     logger.warning(
                         "[%s] Overflow split: stopped at %d/%d chunks delivered: %s",
