@@ -2009,6 +2009,8 @@ export const esOverrides = {
         'Plataforma remota no compatible. El modo SSH de Hermes Desktop admite hosts remotos Linux, macOS y Windows.',
       sshErrTimeout: 'La conexión SSH agotó el tiempo de espera. Es posible que el host no responda o esté en reposo.',
       sshErrUpdateRequired: 'Actualiza Hermes en el host remoto antes de conectarte con Desktop SSH.',
+      sshErrInteractiveAuth:
+        'Tailscale SSH requiere una comprobación interactiva del navegador. Ejecuta `ssh <host> true` en la terminal, completa la comprobación y vuelve a intentarlo; Hermes ejecuta SSH de forma no interactiva.',
       sshErrUnknown: 'Falló la conexión SSH.'
     },
     keys: {

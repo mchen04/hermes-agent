@@ -3138,6 +3138,7 @@
     "settings.gateway.sshDesc",
     "settings.gateway.sshErrAuth",
     "settings.gateway.sshErrHostKey",
+    "settings.gateway.sshErrInteractiveAuth",
     "settings.gateway.sshErrNotInstalled",
     "settings.gateway.sshErrPlatform",
     "settings.gateway.sshErrTimeout",
