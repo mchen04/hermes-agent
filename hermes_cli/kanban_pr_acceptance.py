@@ -7,6 +7,9 @@ receipts only after rechecking the captured run/status/contract under its lock.
 login: :func:`_gh_env` resolves that profile's own credentials/config for the
 subprocess — a multi-profile host's default ``gh`` login cannot read another
 org's private repos (#122689).
+
+``kanban.github_read_transport`` (opt-in, exact OWNER/REPO) instead runs a repository's reads
+on another host's existing ``gh`` login over ssh — see :func:`_read_route`.
 """
 from __future__ import annotations
 
@@ -29,16 +32,24 @@ def validate_contract(value: str | None) -> str:
 
 
 def _api(endpoint: str, *, query: str | None = None, paginate: bool = False,
-         profile_home: str | None = None, timeout: int = 30):
-    command = ["gh", "api", endpoint, "--hostname", "github.com"]
-    if query is not None:
-        command += ["-f", "query=" + query]
-    if paginate:
-        command += ["--paginate", "--slurp"]
+         profile_home: str | None = None, timeout: int = 30, repo: str | None = None):
+    repo = _endpoint_repo(endpoint, query, repo)
+    route = _read_route(repo, profile_home) if repo else None
+    if route is None:
+        command = ["gh", "api", endpoint, "--hostname", "github.com"]
+        if query is not None:
+            command += ["-f", "query=" + query]
+        if paginate:
+            command += ["--paginate", "--slurp"]
+        env = _gh_env(profile_home)
+    else:
+        command = _remote_command(route, endpoint, query, paginate, repo)
+        from tools.environments.local import hermes_subprocess_env
+        env = hermes_subprocess_env()  # GitHub secrets scrubbed; the token never exists locally
     try:
         result = subprocess.run(command, stdin=subprocess.DEVNULL, capture_output=True,
                                 text=True, encoding="utf-8", errors="replace", timeout=timeout,
-                                check=True, env=_gh_env(profile_home))
+                                check=True, env=env)
     except subprocess.CalledProcessError as exc:
         # 401/403/404 = the login cannot see this repository (wrong profile identity
         # or missing grant), not a transient API failure. Persist only the status
@@ -57,6 +68,124 @@ def _api(endpoint: str, *, query: str | None = None, paginate: bool = False,
     if isinstance(value, dict) and value.get("errors"):
         raise ValueError("GitHub returned incomplete GraphQL evidence")
     return value
+
+
+# LOCAL-PATCH kanban-github-read-transport: an opt-in, exact-repository route that runs the
+# read on another host's existing ``gh`` login over ssh, as one named account selected per
+# command (``gh auth token --user``). Only the endpoints the acceptance/guard reads use pass.
+_REST_REPO = re.compile(r"repos/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)/(.*)")
+_ROUTED_REST = re.compile(
+    r"(?:pulls/[1-9][0-9]*|commits/[0-9a-f]{40}/(?:check-runs|statuses)|rules/branches/[A-Za-z0-9%._~-]+)"
+    r"(?:\?[A-Za-z0-9_.=&-]*)?")
+_GRAPHQL_REPO = re.compile(r'\s*\{repository\(owner:("[A-Za-z0-9_.-]+"),name:("[A-Za-z0-9_.-]+")\)\{')
+# The one GraphQL document a route may carry: collect_acceptance's query, byte for byte.
+_ACCEPTANCE_QUERY = '''{repository(owner:%s,name:%s){pullRequest(number:%d){headRefOid baseRefName state
+            baseRef{branchProtectionRule{requiredStatusChecks{context app{databaseId}}}}}}}'''
+_ACCEPTANCE_QUERY_SHAPE = re.compile(re.escape(_ACCEPTANCE_QUERY).replace("%s", '"([A-Za-z0-9_.-]+)"', 1)
+                                     .replace("%s", '"([A-Za-z0-9_.-]+)"', 1).replace("%d", "([1-9][0-9]{0,9})"))
+_SSH_HOST = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,252}")
+_GH_LOGIN = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}")
+_GH_EXE = re.compile(r"(?:/[A-Za-z0-9_.+-]+)*/gh")
+_ROUTE_KEYS = frozenset({"ssh_host", "gh_user", "gh"})
+
+
+def _acceptance_query(repo: str, number: int) -> str:
+    owner, name = repo.split("/")
+    return _ACCEPTANCE_QUERY % (json.dumps(owner), json.dumps(name), number)
+
+
+def _is_acceptance_query(query: str | None, repo: str) -> bool:
+    """True only for collect_acceptance's exact query of ``repo``: one repository, one positive
+    32-bit PR number, the fixed field tree — no alias, extra root/field, or other operation."""
+    match = _ACCEPTANCE_QUERY_SHAPE.fullmatch(query or "")
+    if not match or f"{match[1]}/{match[2]}".lower() != repo.lower() or int(match[3]) > 2**31 - 1:
+        return False
+    return query == _acceptance_query(f"{match[1]}/{match[2]}", int(match[3]))
+
+
+def _endpoint_repo(endpoint: str, query: str | None, repo: str | None) -> str | None:
+    """OWNER/REPO an ``_api`` call reads, or None (never routed). GraphQL is routable only when
+    the caller declares ``repo=`` (historical callers without it keep the local login); a declared
+    repo must agree with the query's repository or the REST path."""
+    if repo is not None and not _REPO.fullmatch(repo):
+        raise ValueError("Malformed repository for GitHub read")
+    if endpoint == "graphql":
+        if repo is None:
+            return None
+        match = _GRAPHQL_REPO.match(query or "")
+        if not match or f"{json.loads(match[1])}/{json.loads(match[2])}".lower() != repo.lower():
+            raise ValueError("GraphQL query does not match its declared repository")
+        return repo
+    match = _REST_REPO.fullmatch(endpoint)
+    path_repo = f"{match[1]}/{match[2]}" if match else None
+    if repo is not None and (path_repo or "").lower() != repo.lower():
+        raise ValueError("GitHub endpoint does not match its declared repository")
+    return path_repo
+
+
+def _read_route(repo: str, profile_home: str | None) -> dict | None:
+    """The configured route for exactly ``repo``, or None. Read per call (edits apply without a
+    reload) from ONE file: the assignee profile's config.yaml when the read acts for a profile,
+    else the root config.yaml (operator/dispatcher reads). A profile never inherits the root's
+    route. A missing file, an absent key or no matching entry keeps the local login. A config
+    that cannot be read or parsed, a table that is not a mapping, or a matching but malformed
+    route cannot prove the route absent, so the read fails closed."""
+    from hermes_constants import get_default_hermes_root
+    from utils import fast_safe_load
+
+    path = Path(profile_home or get_default_hermes_root()) / "config.yaml"
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            config = fast_safe_load(f) or {}
+    except FileNotFoundError:
+        return None
+    except Exception:
+        raise _GateAuthError("config.yaml unreadable; GitHub read route unknown") from None
+    kanban = config.get("kanban") if isinstance(config, dict) else None
+    table = kanban.get("github_read_transport") if isinstance(kanban, dict) else None
+    if table is None:
+        return None
+    if not isinstance(table, dict):
+        raise _GateAuthError("kanban.github_read_transport must be a mapping")
+    matches = [value for key, value in table.items()
+               if isinstance(key, str) and key.lower() == repo.lower()]
+    if not matches:
+        return None
+    route = matches[0]
+    if (len(matches) != 1 or not _REPO.fullmatch(repo) or not isinstance(route, dict)
+            or set(route) != _ROUTE_KEYS or not all(isinstance(v, str) for v in route.values())
+            or not _SSH_HOST.fullmatch(route["ssh_host"]) or not _GH_LOGIN.fullmatch(route["gh_user"])
+            or not _GH_EXE.fullmatch(route["gh"]) or "/../" in route["gh"] + "/" or "/./" in route["gh"] + "/"):
+        raise _GateAuthError(f"kanban.github_read_transport route for {repo} is malformed")
+    return route
+
+
+def _remote_command(route: dict, endpoint: str, query: str | None, paginate: bool,
+                    repo: str) -> list[str]:
+    """ssh argv for one read. The remote script fetches the named account's token into a shell
+    variable (never argv), refuses an empty token (gh would otherwise fall back to its active
+    login), and execs ``gh api`` with fully quoted arguments. Exit 4 = no such login (auth)."""
+    from shlex import quote
+
+    gh = quote(route["gh"])
+    if endpoint == "graphql":
+        if paginate or not _is_acceptance_query(query, repo):
+            raise ValueError("Only the exact acceptance GraphQL query is an allowed routed read")
+        args = [route["gh"], "api", "graphql", "--hostname", "github.com", "-f", "query=" + query]
+    else:
+        match = _REST_REPO.fullmatch(endpoint)
+        if query is not None or not match or not _ROUTED_REST.fullmatch(match[3]):
+            raise ValueError("GitHub endpoint is not an allowed routed read")
+        args = [route["gh"], "api", "--method", "GET", endpoint, "--hostname", "github.com"]
+        if paginate:
+            args += ["--paginate", "--slurp"]
+    # The token travels only as a shell variable / exported env, never as an argv word.
+    others = "-u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN"
+    script = (f't="$(env -u GH_TOKEN {others} GH_PROMPT_DISABLED=1 {gh} auth token --hostname github.com '
+              f'--user {quote(route["gh_user"])} 2>/dev/null)" && [ -n "$t" ] || exit 4; '
+              f'GH_TOKEN="$t" exec env {others} ' + " ".join(quote(a) for a in args))
+    return ["ssh", "-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ForwardAgent=no",
+            "-o", "ClearAllForwardings=yes", "--", route["ssh_host"], "/bin/sh -c " + quote(script)]
 
 
 class _PlanRestricted(RuntimeError):
@@ -129,11 +258,8 @@ def collect_acceptance(contract: str, published_pr: str | None,
             return receipt
         repo, number = match[1], int(match[2])
         receipt["pr_url"] = url
-        owner, name = repo.split("/")
-        query = '''{repository(owner:%s,name:%s){pullRequest(number:%d){headRefOid baseRefName state
-            baseRef{branchProtectionRule{requiredStatusChecks{context app{databaseId}}}}}}}''' % (
-                json.dumps(owner), json.dumps(name), number)
-        repository = _api("graphql", query=query, profile_home=profile_home)["data"]["repository"]
+        repository = _api("graphql", query=_acceptance_query(repo, number), profile_home=profile_home,
+                          repo=repo)["data"]["repository"]
         if repository is None:
             # A private repo the login cannot read resolves to null, not an error.
             raise _GateAuthError(f"HTTP 404 on graphql {repo}")
