@@ -43,6 +43,10 @@ def _api(endpoint: str, *, query: str | None = None, paginate: bool = False,
         # 401/403/404 = the login cannot see this repository (wrong profile identity
         # or missing grant), not a transient API failure. Persist only the status
         # code + endpoint, never gh's stderr (credentials/host details).
+        # LOCAL-PATCH kanban-plan-restricted-rules: GitHub's free plan answers rules reads on a
+        # private repo with this 403; the repo enforces no rules, so it is not an identity problem.
+        if "Upgrade to GitHub Pro" in (exc.stderr or ""):
+            raise _PlanRestricted(endpoint.split('?')[0]) from None
         denied = re.search(r"HTTP (40[134])", exc.stderr or "")
         if denied:
             raise _GateAuthError(f"HTTP {denied[1]} on {endpoint.split('?')[0]}") from None
@@ -53,6 +57,11 @@ def _api(endpoint: str, *, query: str | None = None, paginate: bool = False,
     if isinstance(value, dict) and value.get("errors"):
         raise ValueError("GitHub returned incomplete GraphQL evidence")
     return value
+
+
+class _PlanRestricted(RuntimeError):
+    """LOCAL-PATCH kanban-plan-restricted-rules: GitHub refused a rules read because the
+    owner's plan has no branch rules on private repos (HTTP 403 "Upgrade to GitHub Pro")."""
 
 
 class _GateAuthError(RuntimeError):
@@ -135,8 +144,13 @@ def collect_acceptance(contract: str, published_pr: str | None,
             raise ValueError("PR is closed or current head is unavailable")
         protection = (pr.get("baseRef") or {}).get("branchProtectionRule") or {}
         required = {(r["context"], (r.get("app") or {}).get("databaseId")) for r in protection.get("requiredStatusChecks", [])}
-        rules = _api(f"repos/{repo}/rules/branches/{quote(branch, safe='')}?per_page=100",
-                     paginate=True, profile_home=profile_home)
+        try:
+            rules = _api(f"repos/{repo}/rules/branches/{quote(branch, safe='')}?per_page=100",
+                         paginate=True, profile_home=profile_home)
+        except _PlanRestricted:
+            if pr["state"] == "MERGED" and not required:
+                return _accept_plan_restricted_merge(receipt, repo, sha, profile_home)
+            rules = []
         for page in rules:
             for rule in page:
                 if rule["type"] == "required_status_checks":
@@ -197,6 +211,40 @@ def collect_acceptance(contract: str, published_pr: str | None,
         # Never persist gh stderr (credentials/host details); the failed phase is actionable.
         receipt.update(classification="infra", detail="GitHub acceptance evidence unavailable or incomplete; check gh authentication/API access and retry.")
         return receipt
+
+
+def _accept_plan_restricted_merge(receipt: dict, repo: str, sha: str, profile_home: str | None) -> dict:
+    """LOCAL-PATCH kanban-plan-restricted-rules: a merged PR on a plan without branch rules
+    is accepted when no check on its head failed or is still running."""
+    pages = _api(f"repos/{repo}/commits/{sha}/check-runs?per_page=100&filter=latest",
+                 paginate=True, profile_home=profile_home)
+    runs = [run for page in pages for run in page["check_runs"]]
+    statuses = [s for page in _api(f"repos/{repo}/commits/{sha}/statuses?per_page=100",
+                                   paginate=True, profile_home=profile_home) for s in page]
+    latest = {}
+    for status in statuses:
+        if status["context"] not in latest or status["id"] > latest[status["context"]]["id"]:
+            latest[status["context"]] = {**status, "sha": sha}
+    outcomes = []
+    for check in [*runs, *latest.values()]:
+        is_run = "conclusion" in check
+        outcome = check.get("conclusion") if is_run else check["state"]
+        if is_run and outcome in {"neutral", "skipped"}:
+            outcome = "success"
+        classification = _classify(check, sha, outcome, is_run)
+        outcomes.append(classification)
+        receipt["checks"].append({"name": check.get("name", check.get("context")), "id": check["id"],
+            "head_sha": check.get("head_sha", check.get("sha")),
+            "classification": classification, "conclusion": outcome})
+    receipt["required"] = []
+    bad = next((x for x in outcomes if x != "success"), None)
+    if bad:
+        receipt.update(classification=bad, detail="PR merged, but a check on its head did not pass.")
+        return receipt
+    receipt.update(ok=True, classification="success",
+                   detail=f"PR merged; GitHub's plan has no branch rules on this private repo; "
+                          f"{len(outcomes)} head checks passed.")
+    return receipt
 
 
 def _classify(check: dict, sha: str, outcome: str | None, is_run: bool) -> str:
