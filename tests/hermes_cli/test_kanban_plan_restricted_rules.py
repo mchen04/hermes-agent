@@ -17,8 +17,9 @@ PLAN = ("gh: Upgrade to GitHub Pro or make this repository public to enable this
 def github(monkeypatch):
     state = {"pr_state": "MERGED", "runs": [], "statuses": [], "rules_error": "plan"}
 
-    def fake_api(endpoint, *, query=None, paginate=False, profile_home=None):
+    def fake_api(endpoint, *, query=None, paginate=False, profile_home=None, repo=None):
         if endpoint == "graphql":
+            assert repo == "acme/repo"  # GraphQL acceptance names its repository explicitly
             return {"data": {"repository": {"pullRequest": {
                 "headRefOid": "a" * 40, "baseRefName": "main", "state": state["pr_state"],
                 "baseRef": {"branchProtectionRule": None}}}}}

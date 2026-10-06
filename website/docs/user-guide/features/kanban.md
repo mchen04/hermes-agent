@@ -78,6 +78,56 @@ login. A login that cannot see the repository is rejected with
 `classification=auth`, naming the profile and repository, instead of a
 retryable infra failure.
 
+**Remote read route (opt-in).** When the only `gh` login that can read a repository
+lives on another machine you can already reach over ssh, map that exact repository
+to it:
+
+```yaml
+kanban:
+  github_read_transport:
+    Epoch-ML/zerg:                # exact OWNER/REPO; case-insensitive, no prefix/sibling match
+      ssh_host: mbp               # an ssh alias (no user@, no options)
+      gh_user: michaelluochen     # an account already logged in to gh on that host
+      gh: /opt/homebrew/bin/gh    # absolute path to gh on that host
+```
+
+Every GitHub read for that repository then runs as
+`ssh -T -o BatchMode=yes <ssh_host> gh api ...`. The reads covered are completion
+acceptance, the `active_pr` guard state, stale-PR recovery and the authorized-PR
+resume evidence. The remote shell fetches the named account's token with
+`gh auth token --user` into memory for that one command. The token never reaches
+the local machine, argv or logs, and the remote host's active `gh` account is not
+switched. Only two kinds of read can travel the route:
+
+- GET reads of PRs, exact-head check runs/statuses and branch rules;
+- the completion-acceptance GraphQL query, matched exactly: that one repository, one
+  positive PR number, the fixed head/base/state/protection fields, nothing else.
+
+Anything else is refused before ssh runs: a second repository, an alias, an extra
+field or root, any other operation, or a reformatted query. GraphQL reads take the
+route only when the caller declares the repository; a declared repository that
+disagrees with the query is refused, routed or not.
+
+- **Which config is read:** the route is read on every call, so edits apply without
+  a restart. Reads acting for an assignee profile (completion acceptance) use only
+  that profile's `config.yaml`. Operator and dispatcher reads (guard state,
+  stale-PR recovery, authorized resume) use only the root `config.yaml`. A profile
+  never inherits the root's route.
+- **Failures fail closed:** a malformed entry for the repository (including
+  case-colliding duplicates), a missing or empty remote token, a remote
+  401/403/404, or an ssh failure refuses the read. It never falls back to the local
+  login.
+- **Repositories without an entry** behave exactly as before. That covers a missing
+  `config.yaml`, no `github_read_transport` key, or a mapping with no entry for the
+  repository.
+- **Config that cannot rule a route out:** if `config.yaml` exists but cannot be read
+  or parsed, or `github_read_transport` is set to something other than a mapping,
+  every kanban GitHub read from that config fails closed (`auth`), including reads
+  of unrouted repositories. Fix the file to restore reads.
+- **Code reload:** the route is new code. Long-running processes (the gateway's
+  dispatcher, an already-running worker) keep the code they loaded until they
+  restart. Freshly spawned workers load it.
+
 Rejection retains the active card and workspace. Durable `pr_acceptance` events
 store PR URL, SHA, required contexts, check IDs/URLs, classifications and recovery
 instructions; `last_failure_error` surfaces the next step. Fix failures, rerun
