@@ -1167,6 +1167,11 @@ def _live_tui_session_key(session_key: str, profile: Optional[str]) -> str:
         return session_key
 
 
+def _chat_delivery_mode() -> str:
+    from hermes_cli.kanban_db_notify import chat_delivery_mode
+    return chat_delivery_mode()
+
+
 def _resolve_notify_target() -> Optional[dict[str, Any]]:
     """``kanban_db.add_notify_sub`` kwargs for the calling session, or None (CLI/cron/tests).
     Gateway sessions: ``HERMES_SESSION_PLATFORM``/``CHAT_ID`` ContextVars. TUI/desktop:
@@ -1209,7 +1214,7 @@ def _resolve_notify_target() -> Optional[dict[str, Any]]:
         user_id=env("HERMES_SESSION_USER_ID", "") or None,
         user_id_alt=env("HERMES_SESSION_USER_ID_ALT", "") or None,
         notifier_profile=notifier_profile,
-        delivery_mode="notify+wake" if platform != "tui" else None,
+        delivery_mode=_chat_delivery_mode() if platform != "tui" else None,
         delivery_metadata=delivery_metadata or None)
 
 
