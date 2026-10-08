@@ -25,6 +25,20 @@ if TYPE_CHECKING:
 # (default); "notify+wake" = send AND wake the destination agent; "wake" = wake only.
 _NOTIFY_DELIVERY_MODES = ("notify", "notify+wake", "wake")
 
+
+def chat_delivery_mode() -> str:
+    """Delivery mode for subscriptions created from a chat session (LOCAL-PATCH kanban-quiet-notices).
+
+    ``kanban.notify_delivery_mode`` picks it; "wake" lets the woken agent tell the user instead of
+    posting the raw notice. Unset, invalid or unreadable config keeps "notify+wake".
+    """
+    try:
+        from hermes_cli.config import cfg_get, load_config
+        mode = cfg_get(load_config(), "kanban", "notify_delivery_mode", default="notify+wake")
+    except Exception:
+        return "notify+wake"
+    return mode if mode in ("notify+wake", "wake") else "notify+wake"
+
 _SCALAR_TYPES = (str, int, float, bool)
 
 # Subscription primary key predicate; every per-row statement below binds
