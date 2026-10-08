@@ -410,8 +410,9 @@ class GatewaySlashCommandsMixin(
                     # the same session key only when the alt id survives the round-trip.
                     user_id_alt=_field("user_id_alt"),
                     notifier_profile=_field("profile") or getattr(self, "_kanban_notifier_profile", None) or self._active_profile_name(),
-                    # Subscribing from chat: deliver the passive message and wake the destination agent.
-                    delivery_mode="notify+wake", delivery_metadata=delivery_metadata)
+                    # Subscribing from chat wakes the destination agent; kanban.notify_delivery_mode
+                    # decides whether the raw notice is also posted.
+                    delivery_mode=_kbn.chat_delivery_mode(), delivery_metadata=delivery_metadata)
             finally:
                 conn.close()
         await asyncio.to_thread(_sub)

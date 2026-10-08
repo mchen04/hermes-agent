@@ -1903,6 +1903,10 @@ DEFAULT_CONFIG = {
         # kanban_create is called from a session with a persistent delivery channel. Disable for
         # profiles that prefer explicit kanban_notify-subscribe calls per task.
         "auto_subscribe_on_create": True,
+        # Chat subscriptions: "notify+wake" posts the raw notice and wakes the agent; "wake" only
+        # wakes the agent, which tells the user itself (artifacts still upload). LOCAL-PATCH
+        # kanban-quiet-notices.
+        "notify_delivery_mode": "notify+wake",
         # Poll and deliver Kanban subscriptions from this gateway. Disable on profiles that do
         # not own notification subscriptions to avoid an idle five-second board probe.
         "notify_in_gateway": True,
