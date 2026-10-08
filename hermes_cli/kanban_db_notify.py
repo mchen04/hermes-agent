@@ -105,7 +105,14 @@ def add_notify_sub(
     caught up (``last_event_id`` =
     ``MAX(task_events.id)``) so the notifier never replays history at boot.
     """
+    # LOCAL-PATCH kanban-sub-route: a Discord conversation is keyed "group", "thread" or "dm";
+    # "channel" is only a channel-directory label, and storing it wakes a separate session.
+    if (platform or "").lower() == "discord" and (chat_type or "").lower() == "channel":
+        chat_type = "group"
     valid_mode = delivery_mode if delivery_mode in _NOTIFY_DELIVERY_MODES else None
+    # A configured wake-only chat mode also governs explicit notify+wake subscriptions.
+    if valid_mode == "notify+wake" and platform != "api_server" and chat_delivery_mode() == "wake":
+        valid_mode = "wake"
     # api_server is stateless: the adapter has no send(), the wake self-post IS
     # the delivery. A plain 'notify' default would leave those subs with no
     # delivery mechanism at all. Explicit modes still win.
