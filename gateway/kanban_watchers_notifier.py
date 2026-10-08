@@ -708,6 +708,32 @@ class _KanbanNotification:
                 logger.debug("kanban notifier: artifact delivery for %s failed: %s", self.task_id, art_exc)
         return True
 
+    async def _send_wake_only_artifacts(self, ev: Any) -> None:
+        """Wake-only push subscriptions still upload a handoff's files (LOCAL-PATCH kanban-quiet-notices).
+
+        The ping checkpoint keeps a wake retry from uploading them twice. Upload errors are logged
+        and never block the wake.
+        """
+        if not self.is_push_adapter or ev.kind not in ("completed", "review_requested"):
+            return
+        if ev.id <= self.sub.get("last_ping_event_id", 0):
+            return
+        delivery_metadata = self.sub.get("delivery_metadata")
+        metadata: dict[str, Any] = dict(delivery_metadata) if isinstance(delivery_metadata, dict) else {}
+        if self.sub.get("thread_id") and not metadata.get("thread_id"):
+            metadata["thread_id"] = self.sub["thread_id"]
+        try:
+            await self.runner._deliver_kanban_artifacts(
+                adapter=self.adapter, chat_id=self.sub["chat_id"], metadata=metadata,
+                event_payload=getattr(ev, "payload", None), task=self.task,
+            )
+            await _to_thread_process_service(partial(
+                self.runner._kanban_sub_op, self.board_slug, "record_notify_ping", self.sub,
+                event_id=ev.id,
+            ))
+        except Exception as art_exc:
+            logger.debug("kanban notifier: wake-only artifact delivery for %s failed: %s", self.task_id, art_exc)
+
     async def _send_pings(self) -> bool:
         """Send every text ping; False when a send failed (claim already rewound/dropped)."""
         for ev in self.d["events"]:
@@ -725,7 +751,8 @@ class _KanbanNotification:
                 )
                 continue
             if not self.send_passive:
-                # Wake-only: the wake path is the sole delivery and resolves the counter.
+                # Wake-only: the wake path is the sole text delivery and resolves the counter.
+                await self._send_wake_only_artifacts(ev)
                 continue
             if ev.id <= self.sub.get("last_ping_event_id", 0):
                 continue
