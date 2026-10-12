@@ -342,6 +342,18 @@ class ToolCallGuardrailController:
     def halt_decision(self) -> ToolGuardrailDecision | None:
         return self._halt_decision
 
+    def forget_results_after_compaction(self) -> None:
+        """Compaction removed earlier tool results from context, so re-reading one is new information, not a
+        no-progress loop. Mirrors the skill_view/read_file dedup reset at the same boundary. Without this, a
+        kanban worker (one turn for the whole run) that reloads a pruned skill after each compaction is
+        halted on the fifth compaction. Failure counts and loop caps are kept."""
+        self._no_progress.clear()
+        self._identical_streak_sig = None
+        self._identical_streak_result_hash = ""
+        self._identical_streak_count = 0
+        self._identical_streak_first_call_id = ""
+        self._call_history.clear()
+
     def _decide(
         self, action: str, code: str, tool_name: str, count: int, signature: ToolCallSignature,
         *, message: str | None = None, **fmt: Any,

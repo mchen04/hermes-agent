@@ -219,12 +219,11 @@ class TestMarkerSurvivesRealCompress:
         # Stored iterative-update state carries the marker too.
         assert _skill_pruned_marker("pdf") in c._previous_summary
 
-    def test_marker_survives_iterative_recompression(self):
-        """Markers in a rehydrated handoff summary survive iterative rewrites.
+    def test_old_handoff_marker_not_carried_forward(self):
+        """A marker from an earlier handoff is history, not a loss at this boundary.
 
-        On re-compression the previous handoff (carrying the marker) is
-        rehydrated into ``_previous_summary``; even when the summarizer's
-        iterative update drops the marker, re-injection restores it.
+        Carrying it forward on every iterative update made the model reload
+        the same skill on every later turn, even right after reloading it.
         """
         c = _make_compressor(protect_first_n=1, protect_last_n=2)
         prior_handoff = (
@@ -239,14 +238,32 @@ class TestMarkerSurvivesRealCompress:
             {"role": "assistant" if i % 2 == 0 else "user", "content": f"turn {i} " + "q" * 300}
             for i in range(8)
         ]
-        drop_response = self._mock_response("## Goal\nNext task in flight.")
+        copy_response = self._mock_response(
+            "## Goal\nNext task in flight.\n\n## Pruned Skills\n" + _skill_pruned_marker("pdf")
+        )
         with (
             patch.object(c, "_find_tail_cut_by_tokens", return_value=8),
-            patch("agent.context_compressor.call_llm", return_value=drop_response),
+            patch("agent.context_compressor.call_llm", return_value=copy_response),
         ):
             result = c.compress(msgs, force=True)
         summary_text = self._summary_text_of(result)
-        assert _skill_pruned_marker("pdf") in summary_text
+        assert SKILL_PRUNED_MARKER_PREFIX not in summary_text
+
+    def test_no_marker_when_skill_body_survives_in_tail(self):
+        c = _make_compressor(protect_first_n=1, protect_last_n=4)
+        msgs = (
+            [{"role": "system", "content": "System prompt"}, {"role": "user", "content": "Build the PDF report"}]
+            + _skill_view_pair("call_old", "pdf", size=6100)  # differs, so dedupe does not stub it
+            + [{"role": "assistant", "content": "work " + "z" * 500}, {"role": "user", "content": "continue"}]
+            + _skill_view_pair("call_new", "pdf")
+            + [{"role": "user", "content": "latest ask"}, {"role": "assistant", "content": "ack"}]
+        )
+        with (
+            patch.object(c, "_find_tail_cut_by_tokens", return_value=6),
+            patch("agent.context_compressor.call_llm", return_value=self._mock_response("## Goal\nPDF report.")),
+        ):
+            result = c.compress(msgs, force=True)
+        assert _skill_pruned_marker("pdf") not in self._summary_text_of(result)
 
 class TestReinjectionBoundsAndRedaction:
         # The cap is applied at the collection sites in _generate_summary /
