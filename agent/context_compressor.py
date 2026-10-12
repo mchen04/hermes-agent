@@ -883,10 +883,60 @@ def _collect_ghosted_skill_names(turns: list[dict[str, Any]]) -> list[str]:
     names: list[str] = []
     for msg in turns:
         content = msg.get("content")
-        names += _extract_pruned_skill_names(_content_text_for_contains(content))
+        text = _content_text_for_contains(content)
+        # An earlier handoff's markers are history, not a loss at this boundary (they ratcheted forward).
+        if not _looks_like_compaction_summary(msg, text):
+            names += _extract_pruned_skill_names(text)
+            # A channel-bound skill auto-loaded into this user turn leaves context with it.
+            if msg.get("role") == "user":
+                names += [m.group(1) for m in _LIVE_SKILL_BANNER_RE.finditer(text)]
         if msg.get("role") == "tool" and isinstance(content, str) and len(content) > _SKILL_VIEW_PRUNE_MIN_CHARS:
             names.append(call_id_to_skill.get(str(msg.get("tool_call_id") or ""), ""))
     return [name for name in dict.fromkeys(names) if name]
+
+
+# Banners for skills whose SKILL.md is pinned in the system prompt (skills.auto_load, kanban/CLI --skills)
+# or auto-loaded into a kept user turn (gateway channel bindings).
+_LIVE_SKILL_BANNER_RE = re.compile(
+    r'\[IMPORTANT: The (?:user launched this CLI session with the )?"([^"]+)" skill (?:is auto-loaded|preloaded)'
+)
+
+
+def _skill_key(name: str) -> str:
+    return (name or "").strip().lower().rsplit("/", 1)[-1]
+
+
+def _collect_live_skill_names(kept: List[Dict[str, Any]], pinned_text: str = "") -> set[str]:
+    """Skills whose SKILL.md text survives this compaction: a full ``skill_view`` body (no file_path) in the
+    kept head/tail, or a pinned/auto-loaded banner there or in the system prompt. A prune marker for one of
+    these sends the model to reload text it can still see (and feeds the identical-result loop guard)."""
+    live = {_skill_key(m.group(1)) for m in _LIVE_SKILL_BANNER_RE.finditer(pinned_text or "")}
+    body_calls: dict[str, str] = {}
+    for msg in kept:
+        if msg.get("role") == "assistant":
+            for tc in msg.get("tool_calls") or []:
+                fn = _tc_get(tc, "function", {})
+                if _tc_get(fn, "name") != "skill_view":
+                    continue
+                args = _json_dict(_tc_get(fn, "arguments") or "{}")
+                if (args.get("file_path") or "SKILL.md") == "SKILL.md" and isinstance(args.get("name"), str):
+                    body_calls[str(_tc_get(tc, "id"))] = args["name"]
+        content = _content_text_for_contains(msg.get("content"))
+        live.update(_skill_key(m.group(1)) for m in _LIVE_SKILL_BANNER_RE.finditer(content))
+        name = body_calls.get(str(msg.get("tool_call_id") or ""))
+        if (msg.get("role") == "tool" and name and len(content) > _PRUNE_MIN_CHARS
+                and SKILL_PRUNED_MARKER_PREFIX not in content and not _is_summary_stub(content)):
+            live.add(_skill_key(name))
+    return live
+
+
+def _strip_pruned_skill_markers(summary: str) -> str:
+    """Drop marker lines and the Pruned Skills block the summarizer copied; the caller re-injects the current set.
+    Copied markers ratchet: every iterative update carried every earlier marker forward, even after a reload."""
+    summary = re.sub(
+        r"\n*" + re.escape(_PRUNED_SKILLS_SECTION_HEADING) + r"\n.*?(?=\n## |\Z)", "\n", summary or "", flags=re.S,
+    )
+    return re.sub(r"[ \t]*" + re.escape(SKILL_PRUNED_MARKER_PREFIX) + r"[^\]\n]*\]", "", summary).rstrip()
 
 
 _PRUNED_SKILLS_SECTION_HEADING = "## Pruned Skills"
@@ -902,10 +952,8 @@ def _reinject_pruned_skill_markers(summary: str, skill_names: list[str]) -> str:
     block = (
         "\n\n" + _PRUNED_SKILLS_SECTION_HEADING + "\n"
         + "\n".join(missing)
-        + "\n(The listed skills' instructions were pruned during context "
-        "compression. Reload with the skill_view call in each marker before "
-        "relying on that skill; one reload per skill is enough — ignore any "
-        "older markers for the same skill.)"
+        + "\n(These skills' instructions left context in this compaction. Reload one only "
+        "when the current request needs it, once; a reload is not a reason to reload again.)"
     )
     return summary + _redact_compaction_text(block)
 
@@ -3795,9 +3843,10 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         # routinely cuts [SKILL_PRUNED: ...] markers out of the compacted turns. Re-derive the ghosted
         # skills from the raw turn contents and re-inject deterministically, exactly like the LLM-summary
         # path.
-        _pruned_names = _collect_ghosted_skill_names(turns_to_summarize)
+        _live = getattr(self, "_live_skill_names", set())
+        _pruned_names = [n for n in _collect_ghosted_skill_names(turns_to_summarize) if _skill_key(n) not in _live]
         del _pruned_names[_MAX_PRUNED_SKILL_MARKERS:]
-        summary = self._with_summary_prefix(_redact_compaction_text(body.strip()))
+        summary = self._with_summary_prefix(_strip_pruned_skill_markers(_redact_compaction_text(body.strip())))
         summary = elide(summary, _FALLBACK_SUMMARY_MAX_CHARS)
         # Re-inject AFTER the size cap: markers live at the end, where truncation cuts.
         summary = _reinject_pruned_skill_markers(summary, _pruned_names)
@@ -4152,9 +4201,12 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         summary_budget = self._compute_summary_budget(turns_to_summarize)
         # Ghost-skill defense: LLMs paraphrase [SKILL_PRUNED] markers away; collect the names
         # deterministically BEFORE the call (from the turn LIST, not the bounded text), re-inject after.
-        _pruned_skill_names = list(dict.fromkeys(
-            _collect_ghosted_skill_names(turns_to_summarize) + _extract_pruned_skill_names(self._previous_summary or "")
-        ))[:_MAX_PRUNED_SKILL_MARKERS]
+        # Only skills lost in THIS compaction and not still visible (kept tail/head, pinned prompt): carrying
+        # every earlier marker forward made the model reload the same skills on every later turn.
+        _live = getattr(self, "_live_skill_names", set())
+        _pruned_skill_names = [
+            name for name in _collect_ghosted_skill_names(turns_to_summarize) if _skill_key(name) not in _live
+        ][:_MAX_PRUNED_SKILL_MARKERS]
         # Lean mode even-samples oversized input (one bounded request, never a second).
         if getattr(self, "tail_mode", "lean") == "lean":
             records = self._serialize_records_for_summary(turns_to_summarize)
@@ -4173,9 +4225,8 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             from agent.agent_runtime_helpers import strip_think_blocks
             content = strip_think_blocks(None, content).strip() or content
             # The summarizer may echo secrets verbatim; redact the output too.
-            summary = _redact_compaction_text(content.strip())
-            # Restore any [SKILL_PRUNED] marker the summarizer paraphrased away.
-            # See #32106.
+            summary = _strip_pruned_skill_markers(_redact_compaction_text(content.strip()))
+            # Re-inject the current marker set deterministically (#32106).
             summary = _reinject_pruned_skill_markers(summary, _pruned_skill_names)
             summary = self._ground_historical_task_snapshot(summary, turns_to_summarize)
             summary = with_tool_facts_section(summary, self._summary_tool_facts)
@@ -4347,11 +4398,8 @@ the user's correction and record what changed as a result.]
 ## Critical Context
 [Any specific values, error messages, configuration details, or data that would be lost without explicit preservation. NEVER include API keys, tokens, passwords, or credentials — write [REDACTED] instead.]{_session_log_section}
 
-{_PRUNED_SKILLS_SECTION_HEADING}
-[If any [SKILL_PRUNED: ...reload with skill_view(...)] markers appear in the input,
-repeat each one verbatim here — copy the exact text, do NOT paraphrase, summarize,
-or describe them. These markers tell the agent which skills must be reloaded before
-use. If none appear, omit this section entirely.]
+[Do not copy [SKILL_PRUNED: ...] markers or a "{_PRUNED_SKILLS_SECTION_HEADING}" section; the system appends
+the current list itself.]
 
 Target ~{summary_budget + (_LEAN_SESSION_LOG_BUDGET_TOKENS if _session_log_section else 0)} tokens. Be CONCRETE — include file paths, command outputs, error messages, line numbers, and specific values. Avoid vague descriptions like "made some changes" — say exactly what changed.
 {_temporal_anchoring_rule}
@@ -5776,6 +5824,9 @@ Write only the summary body. Do not include any preamble or prefix."""
         # Lean mode demotes stale tail tool results before summary generation so stubs exist even if it aborts.
         if getattr(self, "tail_mode", "lean") == "lean":
             messages = self._demote_stale_tail_tools(messages, compress_end)
+        self._live_skill_names = _collect_live_skill_names(
+            messages[:compress_start] + messages[compress_end:], getattr(self, "_live_skill_source_text", ""),
+        )
         scan = self._scan_window_handoffs(messages, compress_start, compress_end, turns_to_summarize)
         turns_to_summarize = scan.turns_to_summarize
         self._record_compression_regions(

@@ -2991,6 +2991,11 @@ def _resolve_compress_call(
 ) -> tuple[Callable[..., Any], dict[str, Any]]:
     """Bind ``compress()`` and only the kwargs its signature accepts."""
     compress_fn = agent.context_compressor.compress
+    # Pinned skills (skills.auto_load, kanban --skills) live in the system prompt and survive compaction;
+    # the compressor must not tell the model to reload them.
+    with _swallow("live-skill prompt capture failed"):
+        agent.context_compressor._live_skill_source_text = "\n".join(
+            filter(None, (getattr(agent, "_cached_system_prompt", None), getattr(agent, "ephemeral_system_prompt", None))))
     compress_kwargs = _supported_compression_kwargs(
         compress_fn, current_tokens=approx_tokens, focus_topic=focus_topic, force=force, memory_context=memory_context,
         bypass_cooldown=bypass_cooldown,
@@ -3417,6 +3422,12 @@ def _warn_summary_or_aux_fallback(agent: Any) -> None:
             )
 
 
+def _forget_tool_guard_results(agent: Any) -> None:
+    """Restart the per-turn identical-result counts at a compaction boundary (see the dedup reset below)."""
+    with contextlib.suppress(Exception):
+        agent._tool_guardrails.forget_results_after_compaction()
+
+
 def _reset_read_dedup_caches(task_id: str, *, session_id: str = "") -> None:
     """Advance the file-read and skill_view repeat-read dedup to a fresh generation after a boundary.
     The mtime map is kept: the first read of each unchanged key returns full content compaction may have
@@ -3526,6 +3537,7 @@ def _finish_compaction_boundary(
         else:
             compressor._verify_compaction_cleared_threshold = True
     _reset_read_dedup_caches(task_id, session_id=agent.session_id or "")
+    _forget_tool_guard_results(agent)
     return _compressed_est
 
 
