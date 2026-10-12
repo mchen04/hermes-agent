@@ -54,7 +54,8 @@ class CompactionWindowMixin:
         so early user turns don't fossilize across repeated compactions (#11996).
         """
         head = 1 if messages and messages[0].get("role") == "system" else 0
-        return head + self._effective_protect_first_n(messages)
+        from agent.context_compressor_skills import bound_skill_head_end
+        return max(head + self._effective_protect_first_n(messages), bound_skill_head_end(messages))
 
     def _compress_window(self, messages: list[dict[str, Any]]) -> tuple[int, int]:
         """Return ``(compress_start, compress_end)`` for the summarizable middle."""
@@ -84,6 +85,11 @@ class CompactionWindowMixin:
         )
         working = self._drop_blank_echoes(working)
         compress_start, compress_end = self._compress_window(working)
+        from agent.context_compressor import _collect_live_skill_names
+
+        self._live_skill_names = _collect_live_skill_names(
+            working[:compress_start] + working[compress_end:], getattr(self, "_live_skill_source_text", ""),
+        )
         return working, pruned_count, compress_start, compress_end
 
     def _take_prepared_summary(

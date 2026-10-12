@@ -57,7 +57,7 @@ def _compress_context_via_codex_app_server(
     Hermes' transcript is left unchanged. Every exit, raising ones included, logs one attempt record."""
     from agent.conversation_compression import (
         COMPACTION_STATUS, _CompressionActivityHeartbeat, _emit_compaction_done, _existing_system_prompt,
-        _reset_read_dedup_caches, _swallow,
+        _forget_tool_guard_results, _reset_read_dedup_caches, _swallow,
     )
 
     def _record(commit_status: str, failure_class: Optional[str], method: str = "none") -> None:
@@ -124,6 +124,7 @@ def _compress_context_via_codex_app_server(
         if hasattr(agent.context_compressor, "update_from_response"):
             _record_codex_app_server_usage(agent, result, messages=messages)
     _reset_read_dedup_caches(task_id, session_id=agent.session_id or "")
+    _forget_tool_guard_results(agent)  # LOCAL-PATCH guard-reset-on-compaction
     logger.info(
         "codex app-server compaction done: session=%s thread=%s turn=%s", _sid,
         getattr(result, "thread_id", None) or "", getattr(result, "turn_id", None) or "",
