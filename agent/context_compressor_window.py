@@ -41,6 +41,11 @@ class CompactionWindowMixin:
         )
         working = self._drop_blank_echoes(working)
         compress_start, compress_end = self._compress_window(working)
+        from agent.context_compressor import _collect_live_skill_names
+
+        self._live_skill_names = _collect_live_skill_names(
+            working[:compress_start] + working[compress_end:], getattr(self, "_live_skill_source_text", ""),
+        )
         return working, pruned_count, compress_start, compress_end
 
     def _take_prepared_summary(

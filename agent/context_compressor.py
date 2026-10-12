@@ -33,6 +33,7 @@ from agent.auxiliary_client import (
 from agent.context_engine import ContextEngine, sanitize_memory_context
 from agent.context_compressor_prellm import PreLlmSkipMixin
 from agent.context_compressor_window import CompactionWindowMixin
+from agent.context_compressor_skills import bound_skill_head_end, bound_skill_names
 from agent.context_compressor_prune import ProactivePruneMixin
 from agent.context_compressor_summary import SummaryDispatchMixin
 from agent.context_compressor_retry import retryable_user_text
@@ -894,12 +895,59 @@ def _collect_ghosted_skill_names(turns: list[dict[str, Any]]) -> list[str]:
     for msg in turns:
         content = msg.get("content")
         text = _content_text_for_contains(content)
-        names += _extract_pruned_skill_names(text)
+        # LOCAL-PATCH skill-reload-markers: an earlier handoff's markers are history, not a loss at this
+        # boundary; carrying them forward made the model reload the same skills on every later turn.
+        if not _looks_like_compaction_summary(msg, text):
+            names += _extract_pruned_skill_names(text)
         if msg.get("role") == "user":
             names += skills_loaded_by_scaffold(text)
         elif msg.get("role") == "tool" and not _skill_view_failed(content) and not is_demoted_stub(text):
             names.append(call_id_to_skill.get(str(msg.get("tool_call_id") or ""), ""))
     return [name for name in dict.fromkeys(names) if name]
+
+
+# Banners for skills whose SKILL.md is pinned in the system prompt (skills.auto_load, kanban/CLI --skills)
+# or auto-loaded into a kept user turn (gateway channel bindings).
+_LIVE_SKILL_BANNER_RE = re.compile(
+    r'\[IMPORTANT: The (?:user launched this CLI session with the )?"([^"]+)" skill (?:is auto-loaded|preloaded)'
+)
+
+
+def _skill_key(name: str) -> str:
+    return (name or "").strip().lower().rsplit("/", 1)[-1]
+
+
+def _collect_live_skill_names(kept: list[dict[str, Any]], pinned_text: str = "") -> set[str]:
+    """Skills whose SKILL.md text survives this compaction: a full ``skill_view`` body (no file_path) in the
+    kept head/tail, or a pinned/auto-loaded banner there or in the system prompt. A prune marker for one of
+    these sends the model to reload text it can still see (and feeds the identical-result loop guard)."""
+    live = {_skill_key(m.group(1)) for m in _LIVE_SKILL_BANNER_RE.finditer(pinned_text or "")}
+    body_calls: dict[str, str] = {}
+    for msg in kept:
+        if msg.get("role") == "assistant":
+            for tc in msg.get("tool_calls") or []:
+                fn = _tc_get(tc, "function", {})
+                if _tc_get(fn, "name") != "skill_view":
+                    continue
+                args = _json_dict(_tc_get(fn, "arguments") or "{}")
+                if (args.get("file_path") or "SKILL.md") == "SKILL.md" and isinstance(args.get("name"), str):
+                    body_calls[str(_tc_get(tc, "id"))] = args["name"]
+        content = _content_text_for_contains(msg.get("content"))
+        live.update(_skill_key(m.group(1)) for m in _LIVE_SKILL_BANNER_RE.finditer(content))
+        name = body_calls.get(str(msg.get("tool_call_id") or ""))
+        if (msg.get("role") == "tool" and name and len(content) > _PRUNE_MIN_CHARS
+                and SKILL_PRUNED_MARKER_PREFIX not in content and not _is_summary_stub(content)):
+            live.add(_skill_key(name))
+    return live
+
+
+def _strip_pruned_skill_markers(summary: str) -> str:
+    """Drop marker lines and the Pruned Skills block the summarizer copied; the caller re-injects the current set.
+    Copied markers ratchet: every iterative update carried every earlier marker forward, even after a reload."""
+    summary = re.sub(
+        r"\n*" + re.escape(_PRUNED_SKILLS_SECTION_HEADING) + r"\n.*?(?=\n## |\Z)", "\n", summary or "", flags=re.DOTALL,
+    )
+    return re.sub(r"[ \t]*" + re.escape(SKILL_PRUNED_MARKER_PREFIX) + r"[^\]\n]*\]", "", summary).rstrip()
 
 
 _PRUNED_SKILLS_SECTION_HEADING = "## Pruned Skills"
@@ -3314,10 +3362,14 @@ class ContextCompressor(
     def _dedupe_tool_results(result: list[dict[str, Any]]) -> int:
         """Pass 1: keep the newest copy of identical tool results, back-reference older ones."""
         pruned = 0
+        bound = bound_skill_names(result)
+        bound_calls = {call_id for call_id, name in skill_view_names_by_call_id(result).items() if name.lower() in bound}
         content_hashes: set = set()
         for i in range(len(result) - 1, -1, -1):
             msg = result[i]
             content = msg.get("content") or ""
+            if msg.get("tool_call_id") in bound_calls:
+                continue
             # Non-string/multimodal-envelope shapes can't be hashed by text.
             if msg.get("role") != "tool" or not isinstance(content, str) or len(content) < _PRUNE_MIN_CHARS:
                 continue
@@ -3377,6 +3429,7 @@ class ContextCompressor(
         budget (#61932). Keeps a short recent floor and the ``spared`` pending tool round verbatim; overrides
         the skill guard (else the dead-end recurs). Tool-call arguments stay byte-exact. Returns the number of
         tool results demoted."""
+        protected_skills = bound_skill_names(result)
         soft_ceiling = self._tail_soft_ceiling(protect_tail_tokens)
         demote_end = len(result) - min(_PRESSURE_KEEP_RECENT_MESSAGES, len(result))
         start = max(0, prune_boundary)
@@ -3390,7 +3443,7 @@ class ContextCompressor(
             nonlocal demoted
             if i in spared:
                 return
-            if self._demote_tool_result_at(result, i, call_id_to_tool, min_prune_chars):
+            if self._demote_tool_result_at(result, i, call_id_to_tool, min_prune_chars, protected_skills):
                 demoted += 1
 
         if demote_end <= prune_boundary or _protected_region_tokens() <= soft_ceiling:
@@ -3409,7 +3462,7 @@ class ContextCompressor(
             if (
                 last_tool_idx is not None and last_tool_idx not in spared and last_tool_idx >= prune_boundary
                 and _protected_region_tokens() > soft_ceiling
-            ) and self._demote_tool_result_at(result, last_tool_idx, call_id_to_tool, min_prune_chars):
+            ) and self._demote_tool_result_at(result, last_tool_idx, call_id_to_tool, min_prune_chars, protected_skills):
                 demoted += 1
         if demoted and not self.quiet_mode:
             logger.info(
@@ -3452,7 +3505,7 @@ class ContextCompressor(
         # Just-loaded / tail-referenced skills keep full skill_view bodies through the ordinary passes.
         # Without this, a skill loaded moments before a compaction can be demoted to metadata while the
         # model still believes its instructions are in context. See #32106.
-        protected_skills = _collect_protected_skill_names(result, prune_boundary)
+        protected_skills = _collect_protected_skill_names(result, prune_boundary) | bound_skill_names(result)
         # Pass 2: summarize old tool results. Tool-call arguments are canonical execution
         # records and are never rewritten; summary input is bounded separately by
         # _render_tool_call_for_summary().
@@ -3724,9 +3777,10 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         # routinely cuts [SKILL_PRUNED: ...] markers out of the compacted turns. Re-derive the ghosted
         # skills from the raw turn contents and re-inject deterministically, exactly like the LLM-summary
         # path.
-        _pruned_names = _collect_ghosted_skill_names(turns_to_summarize)
+        _live = getattr(self, "_live_skill_names", set())
+        _pruned_names = [n for n in _collect_ghosted_skill_names(turns_to_summarize) if _skill_key(n) not in _live]
         del _pruned_names[_MAX_PRUNED_SKILL_MARKERS:]
-        summary = self._with_summary_prefix(_redact_compaction_text(body.strip()))
+        summary = self._with_summary_prefix(_strip_pruned_skill_markers(_redact_compaction_text(body.strip())))
         summary = elide(summary, _FALLBACK_SUMMARY_MAX_CHARS)
         # Re-inject AFTER the size cap: markers live at the end, where truncation cuts.
         summary = _reinject_pruned_skill_markers(summary, _pruned_names)
@@ -3735,7 +3789,9 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
 
     def _demote_stale_tail_tools(self, messages: list[dict[str, Any]], tail_start: int) -> list[dict[str, Any]]:
         """Lean mode: demote stale tail tool results to recovery stubs (``demote_stale_tail_tools``)."""
-        result, demoted = demote_stale_tail_tools(messages, tail_start, getattr(self, "_session_id", "") or "")
+        result, demoted = demote_stale_tail_tools(
+            messages, tail_start, getattr(self, "_session_id", "") or "", bound_skill_names(messages),
+        )
         if demoted and not self.quiet_mode:
             logger.info("Lean tail: demoted %d stale tool result(s)", demoted)
         return result
@@ -4060,9 +4116,12 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         summary_budget = self._compute_summary_budget(turns_to_summarize)
         # Ghost-skill defense: LLMs paraphrase [SKILL_PRUNED] markers away; collect the names
         # deterministically BEFORE the call (from the turn LIST, not the bounded text), re-inject after.
-        _pruned_skill_names = list(dict.fromkeys(
-            _collect_ghosted_skill_names(turns_to_summarize) + _extract_pruned_skill_names(self._previous_summary or "")
-        ))[:_MAX_PRUNED_SKILL_MARKERS]
+        # Only skills lost in THIS compaction and not still visible (kept tail/head, pinned prompt): carrying
+        # every earlier marker forward made the model reload the same skills on every later turn.
+        _live = getattr(self, "_live_skill_names", set())
+        _pruned_skill_names = [
+            name for name in _collect_ghosted_skill_names(turns_to_summarize) if _skill_key(name) not in _live
+        ][:_MAX_PRUNED_SKILL_MARKERS]
         # Lean mode even-samples oversized input (one bounded request, never a second).
         if getattr(self, "tail_mode", "lean") == "lean":
             records = self._serialize_records_for_summary(turns_to_summarize)
@@ -4081,9 +4140,8 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             from agent.agent_runtime_helpers import strip_think_blocks
             content = strip_think_blocks(None, content).strip() or content
             # The summarizer may echo secrets verbatim; redact the output too.
-            summary = _redact_compaction_text(content.strip())
-            # Restore any [SKILL_PRUNED] marker the summarizer paraphrased away.
-            # See #32106.
+            summary = _strip_pruned_skill_markers(_redact_compaction_text(content.strip()))
+            # Re-inject the current marker set deterministically (#32106).
             summary = _reinject_pruned_skill_markers(summary, _pruned_skill_names)
             summary = self._ground_historical_task_snapshot(summary, turns_to_summarize)
             summary = with_tool_facts_section(summary, self._summary_tool_facts)
@@ -4259,11 +4317,8 @@ the user's correction and record what changed as a result.]
 ## Critical Context
 [Any specific values, error messages, configuration details, or data that would be lost without explicit preservation. NEVER include API keys, tokens, passwords, or credentials — write [REDACTED] instead.]{_session_log_section}
 
-{_PRUNED_SKILLS_SECTION_HEADING}
-[If any [SKILL_PRUNED: ...reload with skill_view(...)] markers appear in the input,
-repeat each one verbatim here — copy the exact text, do NOT paraphrase, summarize,
-or describe them. These markers tell the agent which skills must be reloaded before
-use. If none appear, omit this section entirely.]
+[Do not copy [SKILL_PRUNED: ...] markers or a "{_PRUNED_SKILLS_SECTION_HEADING}" section; the system appends
+the current list itself.]
 
 Target ~{summary_budget + (_LEAN_SESSION_LOG_BUDGET_TOKENS if _session_log_section else 0)} tokens. Be CONCRETE — include file paths, command outputs, error messages, line numbers, and specific values. Avoid vague descriptions like "made some changes" — say exactly what changed.
 {_temporal_anchoring_rule}
@@ -4767,7 +4822,7 @@ Write only the summary body. Do not include any preamble or prefix."""
         so early user turns don't fossilize across repeated compactions (#11996).
         """
         head = 1 if messages and messages[0].get("role") == "system" else 0
-        return head + self._effective_protect_first_n(messages)
+        return max(head + self._effective_protect_first_n(messages), bound_skill_head_end(messages))
 
     def _align_boundary_backward(self, messages: list[dict[str, Any]], idx: int) -> int:
         """Pull a compress-end boundary back so a tool group is not split (orphaned tail results would be dropped)."""
@@ -5677,6 +5732,9 @@ Write only the summary body. Do not include any preamble or prefix."""
         # Lean mode demotes stale tail tool results before summary generation so stubs exist even if it aborts.
         if getattr(self, "tail_mode", "lean") == "lean":
             messages = self._demote_stale_tail_tools(messages, compress_end)
+        self._live_skill_names = _collect_live_skill_names(
+            messages[:compress_start] + messages[compress_end:], getattr(self, "_live_skill_source_text", ""),
+        )
         scan = self._scan_window_handoffs(messages, compress_start, compress_end, turns_to_summarize)
         turns_to_summarize = scan.turns_to_summarize
         self._record_compression_regions(

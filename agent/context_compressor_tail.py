@@ -69,7 +69,7 @@ def skill_view_names_by_call_id(messages: list[dict[str, Any]]) -> dict[str, str
 
 
 def demote_stale_tail_tools(
-    messages: list[dict[str, Any]], tail_start: int, session_id: str,
+    messages: list[dict[str, Any]], tail_start: int, session_id: str, protected_skills: set[str] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Demote tail tool results older than the newest ``_LEAN_TAIL_KEEP_TOOL_ROUNDS`` rounds to recovery stubs;
     skill-marker rows untouched. A demoted ``skill_view`` body carries the canonical reload marker, as its
@@ -100,7 +100,10 @@ def demote_stale_tail_tools(
             continue
         stub = _lean_recovery_stub(msg.get("tool_name") or "", len(content), session_id)
         skills = skill_view_names_by_call_id(messages) if skills is None else skills
-        if (skill := skills.get(str(msg.get("tool_call_id") or ""))) and not _result_failure_suffix(content):
+        skill = skills.get(str(msg.get("tool_call_id") or ""))
+        if skill and skill.lower() in (protected_skills or ()):
+            continue
+        if skill and not _result_failure_suffix(content):
             stub += " " + _skill_pruned_marker(skill)
         result[i] = _rewritten(msg, stub)
         demoted += 1
