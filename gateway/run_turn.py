@@ -261,11 +261,20 @@ class GatewayTurnMixin:
                 if ch.model:
                     model = ch.model
                 if ch.provider:
-                    runtime_kwargs = _resolve_runtime_agent_kwargs_for_provider(ch.provider, target_model=model or None)
+                    runtime_kwargs = _resolve_runtime_agent_kwargs_for_provider(
+                        ch.provider, target_model=model or None, fallback_chain=ch.fallback_providers or None)
                     ch_runtime_model = runtime_kwargs.pop("model", None)
-                    # Adopt the provider's bundled model only when the override named none.
-                    if ch_runtime_model and not ch.model:
-                        model = ch_runtime_model
+                    ch_fallback_notice = runtime_kwargs.pop("_fallback_notice", None)
+                    if ch_fallback_notice:
+                        # The channel's provider could not resolve (e.g. every allowed pool key benched)
+                        # and its own fallback_providers chain took the turn: send the fallback's model.
+                        model = ch_runtime_model or model
+                        self._note_channel_route_fallback(source, ch, ch_fallback_notice)
+                    else:
+                        self._note_channel_route_fallback(source, ch, None)
+                        # Adopt the provider's bundled model only when the override named none.
+                        if ch_runtime_model and not ch.model:
+                            model = ch_runtime_model
 
         if override and skey:
             model, runtime_kwargs = self._apply_session_model_override(skey, model, runtime_kwargs)
@@ -304,6 +313,25 @@ class GatewayTurnMixin:
             self._session_state("*").conversation.last_resolved_model = model
 
         return model, runtime_kwargs
+
+    def _note_channel_route_fallback(self, source, ch, notice: Optional[str]) -> None:
+        """Surface a channel route's resolution-time fallback once per gateway process, not every turn.
+
+        A depleted API-key pool keeps the channel on its fallback until the bench lifts, which can be
+        a day or more; repeating the switch line on every reply would be noise. The latch clears
+        when the channel's own provider resolves again, so a later switch is announced again."""
+        latch = getattr(self, "_channel_route_fallback_noticed", None)
+        if latch is None:
+            latch = self._channel_route_fallback_noticed = set()
+        key = (str(getattr(getattr(source, "platform", None), "value", "") or ""),
+               str(ch.provider or ""), str(ch.model or ""))
+        if notice is None:
+            latch.discard(key)
+            return
+        logger.info("Channel route %s/%s unavailable; using channel fallback (%s)", ch.provider, ch.model, notice)
+        if key not in latch:
+            latch.add(key)
+            self._pre_agent_fallback_notice = notice
 
     def _resolve_turn_agent_config(self, user_message: str, model: str, runtime_kwargs: dict) -> dict:
         """Effective model/runtime config for one turn. With `/fast` priority on, fast-mode
@@ -2523,7 +2551,7 @@ class GatewayTurnMixin:
                     session_db=getattr(self._session_db, "_db", self._session_db),
                     # Reload from disk — do not reuse the startup snapshot.
                     # See #60955.
-                    fallback_model=self._refresh_fallback_model(),
+                    fallback_model=self._fallback_chain_for_source(source),
                 )
                 try:
                     return agent.run_conversation(user_message=enriched_prompt, task_id=task_id)

@@ -2430,17 +2430,39 @@ def _resolve_gateway_model_context(
         context_length=context_length, context_source=context_source)
 
 
-def _resolve_runtime_agent_kwargs_for_provider(provider: str, target_model: Optional[str] = None) -> dict:
+def _resolve_runtime_agent_kwargs_for_provider(
+    provider: str, target_model: Optional[str] = None, fallback_chain: Optional[list] = None,
+) -> dict:
     """Resolve runtime credentials for a specific provider (e.g. from channel override).
 
     ``target_model`` is the model the override will actually send: the ladder's model-keyed rungs
     (Zen/Go relay + api_mode) must see it rather than config's ``default``, or a Go-only override
-    resolves an api_mode/base_url the sent model cannot use (#112600)."""
-    from hermes_cli.runtime_provider import resolve_runtime_provider, format_runtime_provider_error
+    resolves an api_mode/base_url the sent model cannot use (#112600).
+
+    ``fallback_chain`` (a channel's ``fallback_providers``): an ``AuthError`` from *provider* — e.g. an
+    API-key-only pool whose keys are all benched — walks that chain through the shared
+    ``resolve_runtime_with_fallback``; the result then carries the entry's ``model`` and a
+    ``_fallback_notice`` exactly like the profile-level path in :func:`_resolve_runtime_agent_kwargs`."""
+    from hermes_cli.runtime_provider import (
+        resolve_runtime_provider, resolve_runtime_with_fallback, format_runtime_provider_error)
+    fallback_entry = None
     try:
-        runtime = resolve_runtime_provider(requested=provider, target_model=target_model or None)
+        if fallback_chain:
+            runtime, fallback_entry = resolve_runtime_with_fallback(
+                {"fallback_providers": list(fallback_chain)}, requested=provider, target_model=target_model or None)
+        else:
+            runtime = resolve_runtime_provider(requested=provider, target_model=target_model or None)
     except Exception as exc:
         raise RuntimeError(format_runtime_provider_error(exc)) from exc
+    if fallback_entry is not None:
+        return {
+            **_runtime_agent_kwargs(runtime), "model": fallback_entry["model"],
+            "request_overrides": dict(runtime.get("request_overrides") or {}),
+            "capabilities": dict(runtime.get("capabilities") or {}),
+            "_fallback_notice": pre_agent_fallback_notice(
+                provider, target_model, runtime.get("provider") or fallback_entry.get("provider") or "unknown",
+                fallback_entry.get("model") or "default"),
+        }
     return {
         **_runtime_agent_kwargs(runtime),
         "request_overrides": dict(runtime.get("request_overrides") or {}),

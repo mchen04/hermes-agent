@@ -143,6 +143,14 @@ EXHAUSTED_TTL_SOLE_CREDENTIAL_SECONDS = 60
 # failure semantics to JSON and must not import the classifier.
 FAILURE_REASON_BILLING = "billing"
 
+# ``credential_pool_policies.<provider>.billing_recheck_hours`` is capped at one day so a depleted
+# balance is re-probed at least daily (prepaid credits can refill on a billing cycle that is not the
+# calendar month). A provider-declared reset hint for a billing failure is honoured when it is in
+# the future and no more than BILLING_RESET_HINT_MAX_SECONDS out; it never shortens the bench
+# below EXHAUSTED_TTL_DEFAULT_SECONDS, so a bogus "retry in 1s" cannot turn into a probe storm.
+BILLING_RECHECK_MAX_HOURS = 24
+BILLING_RESET_HINT_MAX_SECONDS = 35 * 24 * 60 * 60
+
 # Billing verdict resting on an ambiguous body (#82154): Anthropic's "out of
 # extra usage" 400 is returned both for genuine overage and for a server-side
 # content-filter rejection, which leaves the credential healthy. Unverified
@@ -466,9 +474,33 @@ def _normalize_error_context(error_context: Optional[dict[str, Any]]) -> dict[st
     return normalized
 
 
+def _billing_policy_until(entry: PooledCredential) -> Optional[float]:
+    """Bench end for a verified billing exhaustion under a ``billing_recheck_hours`` policy, else None.
+
+    The provider's reset hint wins when it is plausible (future relative to the failure, within
+    BILLING_RESET_HINT_MAX_SECONDS); it is floored at the default one-hour bench. Without a usable
+    hint the entry re-enters rotation ``billing_recheck_hours`` after the failure — the next request
+    after that is the recovery probe, so a refilled balance is detected without a timer.
+    """
+    is_billing = entry.last_error_code == 402 or entry.failure_reason == FAILURE_REASON_BILLING
+    if not is_billing or not entry.last_status_at:
+        return None
+    recheck = get_pool_billing_recheck_seconds(entry.provider)
+    if recheck is None:
+        return None
+    marked_at = float(entry.last_status_at)
+    hint = _parse_absolute_timestamp(entry.last_error_reset_at)
+    if hint is not None and marked_at < hint <= marked_at + BILLING_RESET_HINT_MAX_SECONDS:
+        return max(hint, marked_at + EXHAUSTED_TTL_DEFAULT_SECONDS)
+    return marked_at + recheck
+
+
 def _exhausted_until(entry: PooledCredential, *, sole_credential: bool = False) -> Optional[float]:
     if entry.last_status != STATUS_EXHAUSTED:
         return None
+    billing_until = _billing_policy_until(entry)
+    if billing_until is not None:
+        return billing_until
     reset_at = _parse_absolute_timestamp(entry.last_error_reset_at)
     if reset_at is not None:
         return reset_at
@@ -605,6 +637,44 @@ def get_pool_strategy(provider: str) -> str:
         return STRATEGY_FILL_FIRST
     strategy = str(strategies.get(provider, "") or "").strip().lower()
     return strategy if strategy in SUPPORTED_POOL_STRATEGIES else STRATEGY_FILL_FIRST
+
+
+def _pool_policy(provider: str) -> dict[str, Any]:
+    """``credential_pool_policies.<provider>`` mapping from config.yaml ({} when unset/invalid)."""
+    config = _load_config_safe()
+    policies = config.get("credential_pool_policies") if config else None
+    policy = policies.get((provider or "").strip().lower()) if isinstance(policies, dict) else None
+    return policy if isinstance(policy, dict) else {}
+
+
+def get_pool_auth_types(provider: str) -> Optional[frozenset[str]]:
+    """Allowed ``auth_type`` values for *provider*'s pool, or None when unrestricted.
+
+    ``credential_pool_policies.<provider>.auth_types: [api_key]`` keeps the pool (and runtime
+    resolution, see ``runtime_provider._resolve_from_pool``) on API keys only: OAuth logins such as
+    a borrowed Claude Code login are neither seeded nor selected, so exhausting the keys falls
+    through to the configured fallback instead of billing a subscription.
+    """
+    raw = _pool_policy(provider).get("auth_types")
+    values = [raw] if isinstance(raw, str) else raw if isinstance(raw, (list, tuple)) else None
+    if not values:
+        return None
+    allowed = frozenset(str(v).strip().lower().replace("-", "_") for v in values if str(v).strip())
+    return allowed or None
+
+
+def get_pool_billing_recheck_seconds(provider: str) -> Optional[int]:
+    """Bench length for a verified billing exhaustion (``credential_pool_policies.<provider>.
+    billing_recheck_hours``), or None for the default one-hour bench. A spent prepaid balance only
+    refills on the provider's billing cycle, so an hourly re-probe of every depleted key is waste."""
+    raw = _pool_policy(provider).get("billing_recheck_hours")
+    try:
+        hours = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not (hours > 0) or hours != hours:
+        return None
+    return int(min(hours, BILLING_RECHECK_MAX_HOURS) * 3600)
 
 
 def _keyed_custom_pool_matches(
@@ -1014,6 +1084,9 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         self._borrowed_root_ids: set[str] = set()
         self._persisted_token_pairs: dict[str, tuple[Any, Any]] = {}
         self._strategy = get_pool_strategy(provider)
+        # ``credential_pool_policies.<provider>.auth_types``: entries of other auth types stay on
+        # disk untouched but are never selected (None = unrestricted).
+        self._allowed_auth_types = get_pool_auth_types(provider)
         # RLock: _replace_entry/_persist self-acquire it so the DEFERRED
         # single-use-token refresh path (network I/O outside the lock by
         # design) still serializes its pool mutations; in-lock callers
@@ -1036,7 +1109,11 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
 
     def has_credentials(self) -> bool:
         with self._lock:
-            return bool(self._entries)
+            return any(self._auth_type_allowed(entry) for entry in self._entries)
+
+    def _auth_type_allowed(self, entry: PooledCredential) -> bool:
+        allowed = getattr(self, "_allowed_auth_types", None)
+        return allowed is None or entry.auth_type in allowed
 
     def has_available(self, *, model: Optional[str] = None) -> bool:
         """True if at least one entry is not currently in exhaustion cooldown.
@@ -2087,6 +2164,8 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         pending_refresh: list[PooledCredential] = []
         sole_credential = self._is_sole_credential()
         for entry in self._entries:
+            if not self._auth_type_allowed(entry):
+                continue
             # Borrowed credentials persist as metadata-only references and are
             # hydrated from their live source on load; never lease an
             # unhydrated duplicate as an empty key.
@@ -2601,6 +2680,14 @@ def _seed_anthropic_singletons(seed: _Seeder) -> None:
     # forces the Claude Code identity injection, `mcp_` tool-name rewrite and
     # claude-cli User-Agent the user explicitly opted out of. Prefer
     # ~/.hermes/.env over os.environ, as `_seed_from_env` does.
+    allowed_auth_types = get_pool_auth_types("anthropic")
+    if allowed_auth_types is not None and AUTH_TYPE_OAUTH not in allowed_auth_types:
+        # API-key-only policy: same outcome as the API-key signal below, decided by config instead of
+        # .env so it also holds when the key lives only in the pool. Claude Code / Hermes PKCE logins
+        # are never read, and rows an earlier process seeded from them are dropped.
+        seed.changed |= _retain_sources_not_in(seed.entries, {"hermes_pkce", "claude_code"})
+        return
+
     _env_file = load_env()
 
     def _env_val(key: str) -> str:

@@ -570,6 +570,24 @@ class GatewayConfigLoadersMixin:
         by_home[home_key] = self._fallback_model = get_fallback_chain(cfg) or None
         return self._fallback_model
 
+    def _fallback_chain_for_source(self, source) -> list | None:
+        """The fallback chain for an agent serving *source*: the channel's own
+        ``channel_overrides.<id>.fallback_providers`` when set (``[]`` = no fallback), else the
+        profile chain from :meth:`_refresh_fallback_model`. Threads inherit their parent channel's
+        chain through the same lookup as the model override; other channels never see it."""
+        chain = self._refresh_fallback_model()
+        if source is None:
+            return chain
+        override = self._channel_override(
+            source.platform, str(source.chat_id) if getattr(source, "chat_id", None) else "",
+            str(source.thread_id) if getattr(source, "thread_id", None) else None,
+            str(source.parent_chat_id) if getattr(source, "parent_chat_id", None) else None,
+        )
+        raw = getattr(override, "fallback_providers", None)
+        if raw is None:
+            return chain
+        return get_fallback_chain({"fallback_providers": raw}) or None
+
     @staticmethod
     def _apply_fallback_chain_to_agent(agent: Any, chain: list | None) -> None:
         """Keep a cached agent's fallback chain aligned with current config.

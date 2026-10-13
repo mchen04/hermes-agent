@@ -90,7 +90,39 @@ def bind_route_entry(agent: Any, entry: dict[str, Any], provider: str, model: st
     _update_fallback_context_compressor(agent)
     _reresolve_fallback_reasoning_config(agent)
     _rescope_fallback_extra_body(agent, old_model, old_provider, old_base_url)
+    _rescope_static_fast_overrides(agent)
     return old_model, old_provider
+
+
+def _rescope_static_fast_overrides(agent: Any) -> None:
+    """Re-pin a static ``/fast`` tier (``priority`` / ``ultrafast``) for the route just bound.
+
+    The turn route pins the tier's request keys (``service_tier`` / ``speed``) for the PRIMARY model;
+    a fallback onto another provider must get the keys valid for itself (e.g. an Opus primary has no
+    ultrafast, its Codex fallback does) instead of inheriting the primary's. Restoring the primary
+    puts its snapshot's overrides back (``_apply_primary_runtime_fields``). Bounded tiers
+    (auto/cold) are resolved per request already and are left alone.
+    """
+    from agent.fast_mode import STATIC_TIERS
+    tier = getattr(agent, "service_tier", None)
+    if tier not in STATIC_TIERS:
+        return
+    try:
+        from hermes_cli.models import resolve_fast_mode_overrides
+        base_url = getattr(agent, "base_url", None)
+        if getattr(agent, "api_mode", None) == "anthropic_messages":
+            base_url = getattr(agent, "_anthropic_base_url", None) or base_url
+        fast = resolve_fast_mode_overrides(
+            getattr(agent, "model", None), provider=getattr(agent, "provider", None), base_url=base_url, tier=tier,
+        ) or {}
+    except Exception:
+        logger.debug("Static fast-tier re-scope failed for %s; keeping overrides", getattr(agent, "model", None), exc_info=True)
+        return
+    overrides = {k: v for k, v in dict(getattr(agent, "request_overrides", None) or {}).items()
+                 if k not in ("service_tier", "speed")}
+    overrides.update(fast)
+    agent.request_overrides = overrides
+    logger.info("Fallback %s: %s tier request keys %s", getattr(agent, "model", None), tier, sorted(fast) or "none")
 
 
 def reinstall_runtime_snapshot(agent: Any, rt: dict[str, Any]) -> None:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
@@ -644,6 +645,15 @@ def _exchange_copilot_pool_entry(entry: Any, pool_api_key: str) -> str:
     return api_token
 
 
+def _pool_auth_types_restricted(provider: str) -> bool:
+    """True when ``credential_pool_policies.<provider>.auth_types`` limits this provider's pool."""
+    from agent.credential_pool import get_pool_auth_types
+    try:
+        return get_pool_auth_types(provider) is not None
+    except Exception:
+        return False
+
+
 def _resolve_from_pool(provider: str, requested_provider: str, model_cfg: dict[str, Any], explicit_api_key, explicit_base_url,
                        target_model) -> Optional[dict[str, Any]]:
     """Runtime from the provider's credential pool, or None to continue down the ladder."""
@@ -653,21 +663,39 @@ def _resolve_from_pool(provider: str, requested_provider: str, model_cfg: dict[s
         pool = load_pool(provider) if should_use_pool else None
     except Exception:
         pool = None
+    restricted = should_use_pool and _pool_auth_types_restricted(provider)
     if not (pool and pool.has_credentials()):
+        if restricted:
+            # credential_pool_policies.<provider>.auth_types: the later ladder rungs (env OAuth tokens,
+            # a borrowed Claude Code login) are exactly what the policy excludes.
+            raise AuthError(f"No {provider} credential allowed by credential_pool_policies is configured; "
+                            f"add one with `hermes auth add {provider}`.", provider=provider,
+                            code="credential_pool_empty", retryable=False)
         return None
     entry = pool.select(model=target_model or None)
     if entry is None:
+        if restricted:
+            # Every allowed credential is benched (billing/quota/auth). An AuthError lets the caller's
+            # fallback chain take the turn without touching the benched keys again.
+            next_at = pool.next_available_at(model=target_model or None)
+            retry_after = max(0.0, next_at - time.time()) if next_at else None
+            raise AuthError(f"All {provider} pool credentials are cooling down (billing/quota/auth); "
+                            "next eligible " + (f"in ~{int(retry_after)} s" if retry_after is not None else "after reset"),
+                            provider=provider, code="credential_pool_exhausted", retry_after=retry_after,
+                            retryable=True)
         return None
     pool_api_key = _pool_entry_api_key(entry)
     if provider == "nous":
         entry, pool_api_key = _refresh_nous_pool_entry(pool, entry, pool_api_key)
     elif provider == "copilot":
         pool_api_key = _exchange_copilot_pool_entry(entry, pool_api_key)
-    if not has_usable_secret(pool_api_key):
-        return None
-    if pool_api_key and credential_pool_matches_provider(pool, provider, base_url=_pool_entry_base_url(entry)):
+    if has_usable_secret(pool_api_key) and pool_api_key and credential_pool_matches_provider(
+            pool, provider, base_url=_pool_entry_base_url(entry)):
         return _resolve_runtime_from_pool_entry(provider=provider, entry=entry, requested_provider=requested_provider,
                                                 model_cfg=model_cfg, pool=pool, target_model=target_model)
+    if restricted:
+        raise AuthError(f"The selected {provider} pool credential is unusable for this endpoint.",
+                        provider=provider, code="credential_pool_unusable", retryable=False)
     return None
 
 
