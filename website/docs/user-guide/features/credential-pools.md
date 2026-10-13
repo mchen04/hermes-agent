@@ -250,6 +250,28 @@ the remaining cooldown (or the `hermes auth add <provider>` re-login for a dead 
 "No inference provider is configured yet" wizard is offered only when the resolver finds nothing
 configured at all.
 
+## Pool Policies
+
+`credential_pool_policies.<provider>` narrows what a provider's pool may use and how long a spent
+balance is benched:
+
+```yaml
+credential_pool_policies:
+  anthropic:
+    auth_types: [api_key]      # only API-key rows are selected; OAuth logins are neither seeded nor used
+    billing_recheck_hours: 24  # bench for a verified billing failure (max 24)
+```
+
+| Key | Effect |
+|-----|--------|
+| `auth_types` | Allowed `auth_type` values (`api_key`, `oauth`). Rows of other types stay in `auth.json` but are never selected. For `anthropic` without `oauth`, the Claude Code / Hermes PKCE logins are not read and rows an earlier process seeded from them are dropped; runtime resolution never falls back to `ANTHROPIC_TOKEN` or a borrowed Claude Code login. When every allowed key is benched, resolution raises an auth error instead, so the configured fallback (profile `fallback_providers` or a channel's own chain) takes the turn without touching the benched keys. |
+| `billing_recheck_hours` | A verified billing failure (HTTP 402, or a classified billing body such as Anthropic's `credit balance is too low` 400) benches the key for this many hours instead of one, capped at 24 so a refilled balance is detected at least daily. A provider reset hint is honoured when it lies in the future and within 35 days, never below one hour. The next request after the bench lifts is the recovery probe; no timer or background call is made. `hermes auth reset <provider>` clears the bench at once. |
+
+The bench is persisted in `auth.json` and shared by every process of the profile (gateway, CLI,
+cron), so a restart does not retry a depleted key early. Two keys from the same billing account
+share one balance; the pool still tries each key once before handing the turn to a fallback,
+because an API key does not reveal which account it bills.
+
 ## Custom Endpoint Pools
 
 Custom OpenAI-compatible endpoints (Together.ai, RunPod, local servers) get their own pools, keyed by the endpoint name from the `providers:` dict in config.yaml (or the legacy `custom_providers` list, which is auto-migrated).

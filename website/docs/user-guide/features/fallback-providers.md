@@ -39,6 +39,8 @@ fallback_providers:
 
 Each entry requires both `provider` and `model`. Entries missing either field are ignored.
 
+A messaging channel can carry its own chain instead: `channel_overrides.<id>.fallback_providers` (see [per-channel overrides](../messaging/index.md#per-channel-model--system-prompt-overrides)) replaces this list for that channel and its threads only.
+
 When a rate-limit response names its reset time, the primary is benched until exactly then (a provider that says nothing gets the exponential 60 s → 4 h backoff). Optionally, skip the switch when the primary reopens soon:
 
 ```yaml

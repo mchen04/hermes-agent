@@ -697,11 +697,25 @@ def _available_anthropic_token(token: Optional[str], model: Optional[str]) -> Op
     return token
 
 
+def _api_key_only_policy() -> bool:
+    """True when ``credential_pool_policies.anthropic.auth_types`` is set and excludes ``oauth``
+    (``get_pool_auth_types`` reads config fail-open, so no handler is needed here)."""
+    from agent.credential_pool import AUTH_TYPE_OAUTH, get_pool_auth_types
+    allowed = get_pool_auth_types("anthropic")
+    return allowed is not None and AUTH_TYPE_OAUTH not in allowed
+
+
 def resolve_anthropic_token(*, model: Optional[str] = None) -> Optional[str]:
     """Resolve an Anthropic token from all sources in priority order (see module docstring).
 
     With *model*, a token the credential pool has benched for that model resolves to ``None``
     instead of being handed straight back to the caller that just saw it rate-limited."""
+    if _api_key_only_policy():
+        # credential_pool_policies.anthropic.auth_types excludes OAuth: never hand back ANTHROPIC_TOKEN,
+        # a Hermes PKCE grant or a borrowed Claude Code login (callers would swap it in on a 401 or
+        # build a client from it). Pool API keys are reached through the pool, not this resolver.
+        api_key = _first_env("ANTHROPIC_API_KEY")
+        return _available_anthropic_token(api_key, model) if api_key and not _is_oauth_token(api_key) else None
     _read_creds = functools.cache(read_claude_code_credentials)  # read the file at most once per resolve
     token = _first_env("ANTHROPIC_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN")
     if token:

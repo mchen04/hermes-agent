@@ -377,13 +377,17 @@ def persist_home_channel(home: HomeChannel, *, enabled_if_new: bool = False) -> 
 
 @dataclass
 class ChannelOverride:
-    """Per-channel model/provider/system_prompt/service_tier override (``platforms.<name>.channel_overrides[channel_id]``)."""
+    """Per-channel model/provider/system_prompt/service_tier/fallback_providers override
+    (``platforms.<name>.channel_overrides[channel_id]``)."""
     model: Optional[str] = None
     provider: Optional[str] = None
     system_prompt: Optional[str] = None
     # LOCAL-PATCH channel-service-tier: an ``agent.service_tier`` word for this channel only
     # (session /fast > channel > profile); None = inherit the profile tier.
     service_tier: Optional[str] = None
+    # Channel-local fallback chain (same shape as top-level ``fallback_providers``); replaces the
+    # profile chain for this channel and its threads only. None = inherit the profile chain; [] = none.
+    fallback_providers: Optional[list] = None
 
     def to_dict(self) -> dict[str, Any]:
         return {k: v for k, v in asdict(self).items() if v is not None}

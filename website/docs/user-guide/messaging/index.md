@@ -337,6 +337,9 @@ platforms:
         provider: anthropic
         system_prompt: "You are the #dev channel code-review specialist."
         service_tier: fast         # this channel only; others keep agent.service_tier
+        fallback_providers:        # this channel only; replaces the profile chain here
+          - provider: openai-codex
+            model: gpt-6.1-sol
       "987654321098765432":
         model: openai/gpt-5-mini
 ```
@@ -347,6 +350,7 @@ Details:
 - `service_tier` takes the same words as `agent.service_tier` (`normal`, `fast`, `ultrafast`, `auto`, `cold`) for that channel only. Priority is session `/fast` → `channel_overrides` → `agent.service_tier`; Ultrafast still needs a route and account catalog that offer it. Set it with `hermes config set discord.channel_overrides.<id>.service_tier ultrafast` and restart the gateway (channel overrides load at gateway start).
 - Lookup order is exact channel/thread id first, then the **parent** channel/forum id — so Discord threads inherit their parent channel's override automatically.
 - Resolution priority for the model is: session `/model` override → `channel_overrides` → global config. A user running `/model` in a chat still wins over the channel default.
+- `fallback_providers` (same shape as the top-level [`fallback_providers`](../features/fallback-providers.md)) gives the channel its own fallback chain; `[]` disables fallback there, and an absent key inherits the profile chain. It applies mid-turn (pool exhausted → fallback, effort from `agent.reasoning_overrides`, and a static `service_tier` re-applied for the fallback model) and at resolution time: when the channel's `provider` cannot resolve because every allowed pool credential is cooling down (see [pool policies](../features/credential-pools.md#pool-policies)), the turn starts on the first chain entry without contacting the benched provider. The switch notice is shown once per gateway process until the channel's provider resolves again. Other channels and profiles never inherit it.
 - The `system_prompt` override replaces the global gateway prompt for that channel (it is ephemeral — injected per turn, not stored in history).
 
 ## Security

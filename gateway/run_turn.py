@@ -177,7 +177,7 @@ class GatewayTurnMixin:
         Priority (highest first): session ``/model`` → ``channel_overrides`` → global config/env
         (``_resolve_gateway_model(user_config)`` and default provider resolution)."""
         from gateway.run import (
-            _credential_pool_for_provider, _get_channel_override, _resolve_gateway_model,
+            _credential_pool_for_provider, _resolve_gateway_model,
             _resolve_runtime_agent_kwargs, _resolve_runtime_agent_kwargs_for_provider,
         )
         skey = self._resolve_session_key_or_none(source, session_key)
@@ -250,22 +250,8 @@ class GatewayTurnMixin:
             self._pre_agent_fallback_notice = pre_agent_fallback_notice(
                 unavailable_override["provider"], unavailable_override.get("model"), runtime_kwargs.get("provider"), model)
 
-        cfg = getattr(self, "config", None)  # getattr: bare object.__new__ test runners
-        if cfg and source is not None:
-            ch = _get_channel_override(
-                cfg, source.platform, str(source.chat_id) if source.chat_id else "",
-                thread_id=str(source.thread_id) if getattr(source, "thread_id", None) else None,
-                parent_id=str(source.parent_chat_id) if getattr(source, "parent_chat_id", None) else None,
-            )
-            if ch:
-                if ch.model:
-                    model = ch.model
-                if ch.provider:
-                    runtime_kwargs = _resolve_runtime_agent_kwargs_for_provider(ch.provider, target_model=model or None)
-                    ch_runtime_model = runtime_kwargs.pop("model", None)
-                    # Adopt the provider's bundled model only when the override named none.
-                    if ch_runtime_model and not ch.model:
-                        model = ch_runtime_model
+        from gateway.run_turn_channel_route import apply_channel_route
+        model, runtime_kwargs = apply_channel_route(self, source, model, runtime_kwargs)
 
         if override and skey:
             model, runtime_kwargs = self._apply_session_model_override(skey, model, runtime_kwargs)
@@ -2523,7 +2509,7 @@ class GatewayTurnMixin:
                     session_db=getattr(self._session_db, "_db", self._session_db),
                     # Reload from disk — do not reuse the startup snapshot.
                     # See #60955.
-                    fallback_model=self._refresh_fallback_model(),
+                    fallback_model=self._fallback_chain_for_source(source),
                 )
                 try:
                     return agent.run_conversation(user_message=enriched_prompt, task_id=task_id)

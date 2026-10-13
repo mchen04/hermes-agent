@@ -4,6 +4,12 @@ from __future__ import annotations
 
 from agent.credential_pool_admin import CredentialPoolAdminMixin
 from agent.credential_pool_model_cooldowns import CredentialPoolModelCooldownMixin, model_cooldown_until
+from agent.credential_pool_cooldown import (  # re-exported: callers import these from agent.credential_pool
+    BILLING_RECHECK_MAX_HOURS, BILLING_RESET_HINT_MAX_SECONDS, EXHAUSTED_TTL_401_SECONDS, EXHAUSTED_TTL_429_SECONDS,
+    EXHAUSTED_TTL_DEFAULT_SECONDS, EXHAUSTED_TTL_SOLE_CREDENTIAL_SECONDS, FAILURE_REASON_BILLING,
+    FAILURE_REASON_BILLING_UNVERIFIED, _billing_policy_until, _exhausted_ttl, _parse_absolute_timestamp,
+    get_pool_auth_types, get_pool_billing_recheck_seconds,
+)
 
 import logging
 import os
@@ -128,26 +134,6 @@ SUPPORTED_POOL_STRATEGIES = {
     STRATEGY_LEAST_USED,
 }
 
-# Cooldowns before retrying an exhausted credential. Transient 401s cool down
-# briefly so single-key setups recover; 429/402/other take an hour.
-# Provider-supplied reset_at timestamps override these defaults.
-EXHAUSTED_TTL_401_SECONDS = 5 * 60
-EXHAUSTED_TTL_429_SECONDS = 60 * 60
-EXHAUSTED_TTL_DEFAULT_SECONDS = 60 * 60
-# When the offending key is the sole non-DEAD entry, an hour-long bench means
-# an hour of hard failures. Throttles (429/403/5xx) reset in seconds, so a sole
-# credential cools down briefly instead.
-EXHAUSTED_TTL_SOLE_CREDENTIAL_SECONDS = 60
-
-# ``FailoverReason.billing`` as a bare string: the pool persists classified
-# failure semantics to JSON and must not import the classifier.
-FAILURE_REASON_BILLING = "billing"
-
-# Billing verdict resting on an ambiguous body (#82154): Anthropic's "out of
-# extra usage" 400 is returned both for genuine overage and for a server-side
-# content-filter rejection, which leaves the credential healthy. Unverified
-# billing gets the short transient cooldown; genuine depletion re-latches.
-FAILURE_REASON_BILLING_UNVERIFIED = "billing_unverified"
 
 # Throttle window for the "no available entries" INFO line. Selection runs on
 # every model call; on Windows several processes share one rotating log behind
@@ -370,61 +356,6 @@ def _is_manual_source(source: str) -> bool:
     return normalized == SOURCE_MANUAL or normalized.startswith(f"{SOURCE_MANUAL}:")
 
 
-def _exhausted_ttl(
-    error_code: Optional[int],
-    *,
-    sole_credential: bool = False,
-    failure_reason: Optional[str] = None,
-) -> int:
-    """Return cooldown seconds based on the HTTP status that caused exhaustion.
-
-    *sole_credential*: the pool has nothing to rotate to, so transient
-    throttles (429 and the catch-all default covering 403/5xx/unknown) are
-    capped to a brief cooldown; 401 keeps its own already-short TTL.
-
-    *failure_reason* is the classifier verdict: an OpenRouter ``key limit
-    exceeded`` and an xAI spending block both arrive as 403 but are billing,
-    and a 60s retry on a spent account just re-fails. Billing keeps the full
-    bench regardless of status; 402 is billing by definition.
-    Unverified billing (#82154) gets the short cooldown regardless of pool
-    size (the credential may be healthy), unless the status is a true 402.
-    """
-    if error_code == 401:
-        return EXHAUSTED_TTL_401_SECONDS
-    base = EXHAUSTED_TTL_429_SECONDS if error_code == 429 else EXHAUSTED_TTL_DEFAULT_SECONDS
-    if failure_reason == FAILURE_REASON_BILLING_UNVERIFIED and error_code != 402:
-        return min(base, EXHAUSTED_TTL_SOLE_CREDENTIAL_SECONDS)
-    is_billing = error_code == 402 or failure_reason == FAILURE_REASON_BILLING
-    if sole_credential and not is_billing:
-        return min(base, EXHAUSTED_TTL_SOLE_CREDENTIAL_SECONDS)
-    return base
-
-
-def _parse_absolute_timestamp(value: Any) -> Optional[float]:
-    """Best-effort parse of epoch seconds / epoch ms / ISO-8601 into epoch seconds."""
-    if value is None or value == "":
-        return None
-    if isinstance(value, (int, float)):
-        numeric = float(value)
-        if numeric <= 0:
-            return None
-        return numeric / 1000.0 if numeric > 1_000_000_000_000 else numeric
-    if isinstance(value, str):
-        raw = value.strip()
-        if not raw:
-            return None
-        try:
-            numeric = float(raw)
-            return numeric / 1000.0 if numeric > 1_000_000_000_000 else numeric
-        except ValueError:
-            pass
-        try:
-            return datetime.fromisoformat(raw).timestamp()
-        except ValueError:
-            return None
-    return None
-
-
 def _singleton_predates_entry(state: Any, entry: PooledCredential) -> bool:
     """True only when the auth.json singleton is PROVABLY older than *entry*.
 
@@ -469,6 +400,9 @@ def _normalize_error_context(error_context: Optional[dict[str, Any]]) -> dict[st
 def _exhausted_until(entry: PooledCredential, *, sole_credential: bool = False) -> Optional[float]:
     if entry.last_status != STATUS_EXHAUSTED:
         return None
+    billing_until = _billing_policy_until(entry)
+    if billing_until is not None:
+        return billing_until
     reset_at = _parse_absolute_timestamp(entry.last_error_reset_at)
     if reset_at is not None:
         return reset_at
@@ -1014,6 +948,9 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         self._borrowed_root_ids: set[str] = set()
         self._persisted_token_pairs: dict[str, tuple[Any, Any]] = {}
         self._strategy = get_pool_strategy(provider)
+        # ``credential_pool_policies.<provider>.auth_types``: entries of other auth types stay on
+        # disk untouched but are never selected (None = unrestricted).
+        self._allowed_auth_types = get_pool_auth_types(provider)
         # RLock: _replace_entry/_persist self-acquire it so the DEFERRED
         # single-use-token refresh path (network I/O outside the lock by
         # design) still serializes its pool mutations; in-lock callers
@@ -1036,7 +973,11 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
 
     def has_credentials(self) -> bool:
         with self._lock:
-            return bool(self._entries)
+            return any(self._auth_type_allowed(entry) for entry in self._entries)
+
+    def _auth_type_allowed(self, entry: PooledCredential) -> bool:
+        allowed = getattr(self, "_allowed_auth_types", None)
+        return allowed is None or entry.auth_type in allowed
 
     def has_available(self, *, model: Optional[str] = None) -> bool:
         """True if at least one entry is not currently in exhaustion cooldown.
@@ -2087,6 +2028,8 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         pending_refresh: list[PooledCredential] = []
         sole_credential = self._is_sole_credential()
         for entry in self._entries:
+            if not self._auth_type_allowed(entry):
+                continue
             # Borrowed credentials persist as metadata-only references and are
             # hydrated from their live source on load; never lease an
             # unhydrated duplicate as an empty key.
@@ -2461,7 +2404,6 @@ class CredentialPool(CredentialPoolAdminMixin, CredentialPoolModelCooldownMixin)
         return refreshed
 
 
-
 # --- Seeding --------------------------------------------------------------
 
 
@@ -2601,6 +2543,14 @@ def _seed_anthropic_singletons(seed: _Seeder) -> None:
     # forces the Claude Code identity injection, `mcp_` tool-name rewrite and
     # claude-cli User-Agent the user explicitly opted out of. Prefer
     # ~/.hermes/.env over os.environ, as `_seed_from_env` does.
+    allowed_auth_types = get_pool_auth_types("anthropic")
+    if allowed_auth_types is not None and AUTH_TYPE_OAUTH not in allowed_auth_types:
+        # API-key-only policy: same outcome as the API-key signal below, decided by config instead of
+        # .env so it also holds when the key lives only in the pool. Claude Code / Hermes PKCE logins
+        # are never read, and rows an earlier process seeded from them are dropped.
+        seed.changed |= _retain_sources_not_in(seed.entries, {"hermes_pkce", "claude_code"})
+        return
+
     _env_file = load_env()
 
     def _env_val(key: str) -> str:
