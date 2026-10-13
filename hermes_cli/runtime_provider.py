@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 from hermes_cli import auth as auth_mod
 from agent.credential_pool import (  # custom_provider_pool_key_candidates is read via origin by runtime_provider_custom
     CredentialPool, PooledCredential, credential_pool_matches_provider, custom_provider_pool_key_candidates,
-    load_pool,
+    get_pool_auth_types, load_pool,
 )
 from agent.secret_scope import get_secret_str
 from hermes_cli.auth import (  # resolve_external_process_provider_credentials is read via origin by runtime_provider_backends
@@ -645,15 +645,6 @@ def _exchange_copilot_pool_entry(entry: Any, pool_api_key: str) -> str:
     return api_token
 
 
-def _pool_auth_types_restricted(provider: str) -> bool:
-    """True when ``credential_pool_policies.<provider>.auth_types`` limits this provider's pool."""
-    from agent.credential_pool import get_pool_auth_types
-    try:
-        return get_pool_auth_types(provider) is not None
-    except Exception:
-        return False
-
-
 def _resolve_from_pool(provider: str, requested_provider: str, model_cfg: dict[str, Any], explicit_api_key, explicit_base_url,
                        target_model) -> Optional[dict[str, Any]]:
     """Runtime from the provider's credential pool, or None to continue down the ladder."""
@@ -663,7 +654,8 @@ def _resolve_from_pool(provider: str, requested_provider: str, model_cfg: dict[s
         pool = load_pool(provider) if should_use_pool else None
     except Exception:
         pool = None
-    restricted = should_use_pool and _pool_auth_types_restricted(provider)
+    # credential_pool_policies.<provider>.auth_types: get_pool_auth_types reads config fail-open (None).
+    restricted = should_use_pool and get_pool_auth_types(provider) is not None
     if not (pool and pool.has_credentials()):
         if restricted:
             # credential_pool_policies.<provider>.auth_types: the later ladder rungs (env OAuth tokens,

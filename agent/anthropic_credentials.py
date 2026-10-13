@@ -698,12 +698,10 @@ def _available_anthropic_token(token: Optional[str], model: Optional[str]) -> Op
 
 
 def _api_key_only_policy() -> bool:
-    """True when ``credential_pool_policies.anthropic.auth_types`` is set and excludes ``oauth``."""
-    try:
-        from agent.credential_pool import AUTH_TYPE_OAUTH, get_pool_auth_types
-        allowed = get_pool_auth_types("anthropic")
-    except Exception:
-        return False
+    """True when ``credential_pool_policies.anthropic.auth_types`` is set and excludes ``oauth``
+    (``get_pool_auth_types`` reads config fail-open, so no handler is needed here)."""
+    from agent.credential_pool import AUTH_TYPE_OAUTH, get_pool_auth_types
+    allowed = get_pool_auth_types("anthropic")
     return allowed is not None and AUTH_TYPE_OAUTH not in allowed
 
 

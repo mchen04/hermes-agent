@@ -1061,23 +1061,12 @@ def _merge_disk_cooldown_state(
         from agent.credential_pool_model_cooldowns import merge_model_cooldowns
         merged_cooldowns = merge_model_cooldowns(disk_entry.get("model_cooldowns"), entry.get("model_cooldowns"))
         merged = {**entry, "model_cooldowns": merged_cooldowns} if merged_cooldowns else entry
-        disk_status_fields = {f: disk_entry.get(f) for f in _POOL_STATUS_FIELDS}
-
-        def _with_disk_status(base: dict[str, Any]) -> dict[str, Any]:
-            # The classifier verdict sizes the bench (billing vs throttle) and belongs to the same
-            # observation as the status fields: adopting a peer's newer cooldown without it would
-            # turn a peer's day-long billing bench into this writer's one-hour default.
-            adopted = {**base, **disk_status_fields}
-            if disk_entry.get("failure_reason") is not None:
-                adopted["failure_reason"] = disk_entry["failure_reason"]
-            else:
-                adopted.pop("failure_reason", None)
-            return adopted
+        disk_status_fields = {f: disk_entry.get(f) for f in (*_POOL_STATUS_FIELDS, "failure_reason")}  # verdict sizes the bench
 
         mem_ts = _parse_absolute_timestamp(entry.get("last_status_at")) or 0.0
         cleared_ts = _parse_absolute_timestamp(disk_entry.get("status_cleared_at")) or 0.0
         if entry.get("last_status") in (STATUS_DEAD, STATUS_EXHAUSTED) and cleared_ts > mem_ts:
-            return _with_disk_status(merged)
+            return {**merged, **disk_status_fields}
         disk_status = disk_entry.get("last_status")
         if disk_status not in (STATUS_DEAD, STATUS_EXHAUSTED):
             return merged
@@ -1094,7 +1083,7 @@ def _merge_disk_cooldown_state(
             until = _exhausted_until(PooledCredential.from_dict(provider_id, disk_entry))
             if until is None or until <= time.time():
                 return merged
-        return _with_disk_status(merged)
+        return {**merged, **disk_status_fields}
     except Exception:  # pragma: no cover - best-effort merge
         return entry
 
