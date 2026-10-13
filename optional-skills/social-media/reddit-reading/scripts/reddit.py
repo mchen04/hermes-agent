@@ -44,7 +44,7 @@ ATOM = {"a": "http://www.w3.org/2005/Atom"}
 WWW = "https://www.reddit.com"
 OAUTH = "https://oauth.reddit.com"
 _WS_RE = re.compile(r"\s+")
-_THREAD_RE = re.compile(r"reddit\.com/r/([^/]+)/comments/([a-z0-9]+)", re.I)
+_THREAD_RE = re.compile(r"reddit\.com/r/([^/]+)/comments/([a-z0-9]+)", re.IGNORECASE)
 
 
 class _TextExtractor(HTMLParser):
