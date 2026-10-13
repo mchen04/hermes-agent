@@ -7,7 +7,6 @@ worker exited while its review thread was still running, so the review never com
 from __future__ import annotations
 
 import threading
-import time
 from types import SimpleNamespace
 
 import pytest
@@ -31,8 +30,21 @@ def _clean_state(monkeypatch):
     bre._exit_review_task = ""
 
 
+class _JoinGatedThread(threading.Thread):
+    """A bg-review thread that can finish only after someone joins it. An exit path that stopped
+    waiting would leave the review unfinished, so the assertions fail deterministically."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.join_started = threading.Event()
+
+    def join(self, timeout=None):
+        self.join_started.set()
+        super().join(timeout)
+
+
 class _WorkerAgent:
-    """An agent whose last turn ran four tool calls; its review takes 0.3 s like a short fork."""
+    """An agent whose last turn ran four tool calls; its review finishes only once it is joined."""
 
     def __init__(self):
         self.session_id = "s_worker"
@@ -51,11 +63,12 @@ class _WorkerAgent:
 
     def _spawn_background_review(self, *, messages_snapshot, review_memory=False, review_skills=False):
         def _review():
-            time.sleep(0.3)
+            thread.join_started.wait(timeout=10)
             self.review_done.set()
 
-        self._background_review_thread = threading.Thread(target=_review, daemon=True, name="bg-review")
-        self._background_review_thread.start()
+        thread = _JoinGatedThread(target=_review, daemon=True, name="bg-review")
+        self._background_review_thread = thread
+        thread.start()
 
 
 def _run_worker(monkeypatch, *, turn_result=None, review_during_turn=False):
