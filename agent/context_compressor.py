@@ -906,7 +906,7 @@ def _skill_key(name: str) -> str:
     return (name or "").strip().lower().rsplit("/", 1)[-1]
 
 
-def _collect_live_skill_names(kept: List[Dict[str, Any]], pinned_text: str = "") -> set[str]:
+def _collect_live_skill_names(kept: list[dict[str, Any]], pinned_text: str = "") -> set[str]:
     """Skills whose SKILL.md text survives this compaction: a full ``skill_view`` body (no file_path) in the
     kept head/tail, or a pinned/auto-loaded banner there or in the system prompt. A prune marker for one of
     these sends the model to reload text it can still see (and feeds the identical-result loop guard)."""
@@ -934,7 +934,7 @@ def _strip_pruned_skill_markers(summary: str) -> str:
     """Drop marker lines and the Pruned Skills block the summarizer copied; the caller re-injects the current set.
     Copied markers ratchet: every iterative update carried every earlier marker forward, even after a reload."""
     summary = re.sub(
-        r"\n*" + re.escape(_PRUNED_SKILLS_SECTION_HEADING) + r"\n.*?(?=\n## |\Z)", "\n", summary or "", flags=re.S,
+        r"\n*" + re.escape(_PRUNED_SKILLS_SECTION_HEADING) + r"\n.*?(?=\n## |\Z)", "\n", summary or "", flags=re.DOTALL,
     )
     return re.sub(r"[ \t]*" + re.escape(SKILL_PRUNED_MARKER_PREFIX) + r"[^\]\n]*\]", "", summary).rstrip()
 
@@ -2209,7 +2209,7 @@ def _tool_result_facts(text: str) -> list:
     return list(dict.fromkeys(facts))
 
 
-def latest_tool_facts(turns: List[Dict[str, Any]]) -> List[str]:
+def latest_tool_facts(turns: list[dict[str, Any]]) -> list[str]:
     """One redacted line per recent tool result that states a key fact (state, merged, exit
     code, test totals), newest ``_TOOL_FACTS_MAX_RESULTS`` results, oldest first."""
     names = _tool_calls_by_id(turns)
@@ -2233,7 +2233,7 @@ def latest_tool_facts(turns: List[Dict[str, Any]]) -> List[str]:
     return list(reversed(lines))
 
 
-def with_tool_facts_section(summary: str, facts: List[str]) -> str:
+def with_tool_facts_section(summary: str, facts: list[str]) -> str:
     """Replace any earlier facts section with ``facts`` (no-op when there are none)."""
     if not facts:
         return summary
@@ -2241,7 +2241,7 @@ def with_tool_facts_section(summary: str, facts: List[str]) -> str:
     return f"{summary}\n\n{_TOOL_FACTS_HEADING}\n" + "\n".join(facts) + "\n"
 
 
-def user_turn_reply_status(messages: List[Dict[str, Any]], window: List[Dict[str, Any]], is_synthetic) -> tuple:
+def user_turn_reply_status(messages: list[dict[str, Any]], window: list[dict[str, Any]], is_synthetic) -> tuple:
     """``(unanswered, answered_later)`` as sets of ``id()`` of real user turns in ``window``.
     A turn is answered by the next assistant text reply (a row without tool calls) anywhere in
     ``messages``; ``answered_later`` = that reply lies outside ``window`` (kept in the tail)."""
@@ -2262,7 +2262,7 @@ def user_turn_reply_status(messages: List[Dict[str, Any]], window: List[Dict[str
     return set(pending) & in_window, answered_later & in_window
 
 
-def unanswered_user_turn_ids(messages: List[Dict[str, Any]], is_synthetic) -> set:
+def unanswered_user_turn_ids(messages: list[dict[str, Any]], is_synthetic) -> set:
     """``id()`` of each real user turn no later assistant text reply followed in ``messages``."""
     return user_turn_reply_status(messages, messages, is_synthetic)[0]
 

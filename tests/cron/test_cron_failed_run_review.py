@@ -50,7 +50,7 @@ def run_env(monkeypatch, tmp_path):
     monkeypatch.setattr(s, "mark_job_run", lambda *a, **kw: True)
     monkeypatch.setattr(s, "finish_execution", lambda *a, **kw: None)
     monkeypatch.setattr(s, "_upsert_incident_for_failure", lambda *_a, **_kw: (False, None))
-    monkeypatch.setattr(s, "load_config", lambda: {})
+    monkeypatch.setattr(s, "load_config", dict)
 
     def _teardown(agent, job_id, **_kw):
         state["torn_down"].append(agent)

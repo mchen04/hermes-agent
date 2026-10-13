@@ -4,7 +4,7 @@ import io
 import json
 import sys
 import urllib.error
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, UTC
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -152,7 +152,7 @@ def test_search_filters_dates_in_subreddit_and_deduplicates_results(capsys):
     assert listing.call_args.kwargs["restrict_sr"] == 1
     assert len(found) == 1 and found[0]["url"] == posts[0]["url"]
     assert "not an exhaustive search" in capsys.readouterr().err
-    epoch = datetime(2026, 4, 3, tzinfo=timezone.utc).timestamp()
+    epoch = datetime(2026, 4, 3, tzinfo=UTC).timestamp()
     assert reddit._in_date_window({"created_utc": epoch}, args.after, args.before)
 
 

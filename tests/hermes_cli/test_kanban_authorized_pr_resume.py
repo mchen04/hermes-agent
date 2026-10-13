@@ -23,8 +23,8 @@ def board(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     for key in ("HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_KANBAN_TASK"):
         monkeypatch.delenv(key, raising=False)
-    import hermes_cli.config as config
-    import hermes_cli.profiles as profiles
+    from hermes_cli import config
+    from hermes_cli import profiles
     monkeypatch.setattr(config, "load_config", lambda: {"kanban": {}})
     monkeypatch.setattr(profiles, "profile_exists", lambda name: True)
     monkeypatch.setattr(kbd, "_memory_pressure_level", lambda: "unknown")

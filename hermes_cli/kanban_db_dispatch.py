@@ -94,7 +94,7 @@ _RESPAWN_GUARD_PR_URL_RE = re.compile(
 # process, so a held card re-checked every tick costs one lookup per TTL.
 _GUARD_PR_LOOKUP_TIMEOUT = 8  # seconds per ``gh api`` call
 _GUARD_PR_STATE_TTL = {"open": 120, "closed": 600, "merged": 86400, "unknown": 60}
-_guard_pr_state_cache: "dict[str, tuple[str, float]]" = {}
+_guard_pr_state_cache: dict[str, tuple[str, float]] = {}
 _GUARD_PR_PARTS_RE = re.compile(r"https?://github\.com/([^/\s]+)/([^/\s]+)/pull/(\d+)", re.IGNORECASE)
 
 
@@ -1554,7 +1554,7 @@ def check_respawn_guard(
 
 def respawn_guard_verdict(
     conn: sqlite3.Connection, task_id: str, *, lane: str = "ready",
-) -> "tuple[Optional[str], dict]":
+) -> tuple[Optional[str], dict]:
     """``(reason, detail)``: the guard reason (or None) and, for the PR holds,
     the URLs that hold (``open_prs`` / ``unknown_prs``).
 

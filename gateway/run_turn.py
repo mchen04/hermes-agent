@@ -1975,7 +1975,7 @@ class GatewayTurnMixin:
         delivery policy the adapter applies. For each path it will drop, stage a note for the
         agent's next turn and return a one-line notice for the user ("" when nothing drops).
         The policy itself is unchanged."""
-        dropped: List[dict] = []
+        dropped: list[dict] = []
         try:
             media_files, _ = adapter.extract_media(response)
             if not media_files:

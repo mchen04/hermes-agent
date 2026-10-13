@@ -17,7 +17,7 @@ def conn(tmp_path, monkeypatch):
 
 
 def _config(monkeypatch, kanban):
-    import hermes_cli.config as config
+    from hermes_cli import config
     monkeypatch.setattr(config, "load_config", lambda: {"kanban": kanban})
 
 

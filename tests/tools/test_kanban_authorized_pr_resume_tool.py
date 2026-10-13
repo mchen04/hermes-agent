@@ -28,8 +28,8 @@ def board(tmp_path, monkeypatch):
     for key in ("HERMES_KANBAN_DB", "HERMES_KANBAN_BOARD", "HERMES_KANBAN_TASK",
                 "HERMES_KANBAN_RUN_ID", "HERMES_DELEGATED_CHILD_CONTEXT", "HERMES_SESSION_ID"):
         monkeypatch.delenv(key, raising=False)
-    import hermes_cli.config as config
-    import hermes_cli.profiles as profiles
+    from hermes_cli import config
+    from hermes_cli import profiles
     monkeypatch.setattr(config, "load_config", lambda: {"kanban": {}})
     monkeypatch.setattr(kt, "load_config", lambda: {"kanban": {}})
     monkeypatch.setattr(profiles, "profile_exists", lambda name: True)
@@ -142,8 +142,8 @@ def test_resume_preserves_other_respawn_guards(worker, monkeypatch, guard):
 @pytest.mark.parametrize("guard", ["board_lock", "global_cap", "profile_cap", "unknown_profile", "dependency", "dispatch_allowlist"])
 def test_targeted_spawn_keeps_dispatch_admission_checks(worker, monkeypatch, guard):
     from contextlib import nullcontext
-    import hermes_cli.config as config
-    import hermes_cli.profiles as profiles
+    from hermes_cli import config
+    from hermes_cli import profiles
     cfg = {"kanban": {}}
     if guard == "global_cap": cfg["kanban"]["max_in_progress"] = 1
     if guard == "profile_cap":

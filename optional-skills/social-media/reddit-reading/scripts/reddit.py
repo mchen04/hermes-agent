@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import argparse
 import base64
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timezone, UTC
 from html.parser import HTMLParser
 import json
 import os
@@ -287,7 +287,7 @@ def _post_key(url: str) -> str:
 def _in_date_window(post: dict, after: date | None, before: date | None) -> bool:
     if post.get("created_utc") is not None:
         try:
-            day = datetime.fromtimestamp(float(post["created_utc"]), timezone.utc).date()
+            day = datetime.fromtimestamp(float(post["created_utc"]), UTC).date()
         except (TypeError, ValueError, OverflowError):
             return False
     else:
@@ -295,12 +295,12 @@ def _in_date_window(post: dict, after: date | None, before: date | None) -> bool
         if not published:
             return False
         try:
-            timestamp = datetime.fromisoformat(published.replace("Z", "+00:00"))
+            timestamp = datetime.fromisoformat(published)
         except ValueError:
             return False
         if timestamp.tzinfo is None:
             return False
-        day = timestamp.astimezone(timezone.utc).date()
+        day = timestamp.astimezone(UTC).date()
     return (after is None or day >= after) and (before is None or day < before)
 
 

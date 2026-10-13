@@ -108,7 +108,7 @@ def _display_flag_enabled(agent, *, env_var: str, config_key: str, cache_attr: s
         return True
 
 
-def _write_content_sha(tool_name: str, args: Dict[str, Any]) -> Optional[str]:
+def _write_content_sha(tool_name: str, args: dict[str, Any]) -> Optional[str]:
     """sha256 of a ``write_file`` call's full content, else None."""
     content = args.get("content") if tool_name == "write_file" and isinstance(args, dict) else None
     if not isinstance(content, str):
@@ -197,12 +197,11 @@ class TurnExplainersMixin:
                 for p in (landed_paths if landed else targets)
             }
             for path, info in list(state.items()):
-                if info.get("identity", _file_mutation_identity(path, task_id)) in cleared:
-                    state.pop(path, None)
                 # LOCAL-PATCH file-mutation-footer-scratch: a refused write_file whose exact
                 # content then landed at another path (a retry under a new name) is no
                 # missing edit.
-                elif landed and content_sha and info.get("content_sha") == content_sha:
+                if (info.get("identity", _file_mutation_identity(path, task_id)) in cleared
+                        or (landed and content_sha and info.get("content_sha") == content_sha)):
                     state.pop(path, None)
 
     @staticmethod
@@ -220,7 +219,7 @@ class TurnExplainersMixin:
         }
 
     @staticmethod
-    def _file_mutations_user_visible(failed: Dict[str, Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    def _file_mutations_user_visible(failed: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
         """LOCAL-PATCH file-mutation-footer-scratch: drop failures on scratch targets (Hermes
         cache dirs of any profile, the OS temp dir). Those are the agent's own working files,
         not edits the user asked for, so a refused write there never reaches the user."""

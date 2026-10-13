@@ -37,7 +37,7 @@ def _invoke(tmp_path, *, fast, prompt, stdin):
         [sys.executable, "-c", DRIVER, str(capture), "--safe-mode", "-m", "gpt-5.6-luna",
          "--provider", "openai-codex", "--reasoning", "low", "-t", "web",
          "--usage-file", str(usage), "-z", prompt],
-        input=stdin, text=True, encoding="utf-8", capture_output=True, env=env, cwd=REPO, timeout=90,
+        input=stdin, text=True, encoding="utf-8", capture_output=True, env=env, cwd=REPO, timeout=90, check=False,
     )
     return completed, capture, usage
 
