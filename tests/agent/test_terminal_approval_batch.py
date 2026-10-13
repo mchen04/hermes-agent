@@ -47,6 +47,7 @@ def test_desktop_publishes_final_commands_before_wait_and_runs_in_order(tmp_path
     monkeypatch.setenv("TERMINAL_ENV", "local")
     monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
     monkeypatch.setattr("tools.approval_context._get_approval_mode", lambda: "manual")
+    monkeypatch.setattr("tools.approval._tirith_scan", lambda command: {"action": "allow"})
     monkeypatch.setattr("agent.title_generator.maybe_auto_title", lambda *a, **kw: None)
     nested = tmp_path / "nested"
     nested.mkdir()
@@ -152,6 +153,7 @@ def test_cancelled_preparation_drains_requests_without_reusing_once(tmp_path, mo
 
     monkeypatch.setenv("HERMES_EXEC_ASK", "1")
     monkeypatch.setattr("tools.approval_context._get_approval_mode", lambda: "manual")
+    monkeypatch.setattr("tools.approval._tirith_scan", lambda command: {"action": "allow"})
     monkeypatch.setattr("agent.title_generator.maybe_auto_title", lambda *a, **kw: None)
     key = "cancelled-terminal-batch"
     command = "rm -rf absent; printf executed > effect.txt"
@@ -245,6 +247,7 @@ def test_failed_command_re_gates_later_prepared_approvals(tmp_path, monkeypatch)
     monkeypatch.setenv("TERMINAL_ENV", "local")
     monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
     monkeypatch.setattr("tools.approval_context._get_approval_mode", lambda: "manual")
+    monkeypatch.setattr("tools.approval._tirith_scan", lambda command: {"action": "allow"})
     monkeypatch.setattr("agent.title_generator.maybe_auto_title", lambda *a, **kw: None)
     key = "regate-terminal-batch"
     # First command fails (exit 1); second would succeed if allowed to run.
@@ -329,6 +332,7 @@ def test_switching_yolo_off_mid_batch_re_gates_later_commands(tmp_path, monkeypa
 
     monkeypatch.setenv("HERMES_EXEC_ASK", "1")
     monkeypatch.setattr("tools.approval_context._get_approval_mode", lambda: "manual")
+    monkeypatch.setattr("tools.approval._tirith_scan", lambda command: {"action": "allow"})
     monkeypatch.setattr("agent.title_generator.maybe_auto_title", lambda *a, **kw: None)
     key = "yolo-off-terminal-batch"
     agent = _agent()
