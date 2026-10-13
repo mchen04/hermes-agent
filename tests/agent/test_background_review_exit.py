@@ -39,16 +39,29 @@ def _session(*tool_names: str) -> list:
     ]
 
 
+class _JoinGatedThread(threading.Thread):
+    """A bg-review thread that can finish only after someone joins it. An exit path that stopped
+    waiting would leave the review unfinished, so the assertions fail deterministically."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.join_started = threading.Event()
+
+    def join(self, timeout=None):
+        self.join_started.set()
+        super().join(timeout)
+
+
 class _ReviewingAgent:
     """Stands in for AIAgent: ``_spawn_background_review`` starts a thread like the real one."""
 
-    def __init__(self, messages, review_seconds=0.2, tools=("memory", "skill_manage")):
+    def __init__(self, messages, hold=None, tools=("memory", "skill_manage")):
         self.session_id = "s_learn"
         self.valid_tool_names = set(tools)
         self._memory_store = object()
         self._session_messages = messages
         self._delegate_depth = 0
-        self.review_seconds = review_seconds
+        self.hold = hold  # an Event set at teardown: the review then outlasts any bounded wait
         self.spawned = []
         self.finished = threading.Event()
 
@@ -56,11 +69,14 @@ class _ReviewingAgent:
         self.spawned.append((len(messages_snapshot), review_memory, review_skills))
 
         def _review():
-            time.sleep(self.review_seconds)
+            thread.join_started.wait(timeout=10)
+            if self.hold is not None:
+                self.hold.wait(timeout=10)
             self.finished.set()
 
-        self._background_review_thread = threading.Thread(target=_review, daemon=True, name="bg-review")
-        self._background_review_thread.start()
+        thread = _JoinGatedThread(target=_review, daemon=True, name="bg-review")
+        self._background_review_thread = thread
+        thread.start()
 
 
 def test_worker_turn_defers_the_review_instead_of_spawning_a_thread_that_dies(kanban_worker):
@@ -107,10 +123,15 @@ def test_board_bookkeeping_alone_is_not_worth_a_review():
 
 
 def test_exit_wait_is_bounded():
-    agent = _ReviewingAgent(_session("terminal", "read_file", "patch"), review_seconds=5)
+    hold = threading.Event()
+    agent = _ReviewingAgent(_session("terminal", "read_file", "patch"), hold=hold)
     started = time.monotonic()
-    assert bre.run_worker_exit_review(agent, wait_seconds=0.3, min_tool_calls=3) == "timed_out"
-    assert time.monotonic() - started < 2
+    try:
+        assert bre.run_worker_exit_review(agent, wait_seconds=0.3, min_tool_calls=3) == "timed_out"
+        assert time.monotonic() - started < 2
+        assert not agent.finished.is_set()
+    finally:
+        hold.set()
 
 
 def test_zero_wait_turns_the_exit_review_off():
