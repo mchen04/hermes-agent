@@ -1314,7 +1314,7 @@ def _handle_recover_stale_pr(args: dict, **kw) -> str:
     dry_run = _parse_bool_arg(args, "dry_run")
     spawn = _parse_bool_arg(args, "spawn") and not dry_run
     reason = args.get("reason")
-    with _board(board) as (kb, conn):
+    with _board(board) as (_kb, conn):
         rec = kbd.recover_stale_pr_guard(conn, tid, actor=_persisted_identity(),
                                          note=_redact_opt(reason), record=not dry_run)
         evidence = {"task_id": tid, "status": rec.status, "detail": rec.detail,
@@ -1358,7 +1358,7 @@ def _handle_resume_authorized_pr(args: dict, **kw) -> str:
     _check(isinstance(reason, str) and reason.strip(), "reason must be non-empty")
     dry_run = _parse_bool_arg(args, "dry_run")
     spawn = _parse_bool_arg(args, "spawn") and not dry_run
-    with _board(board) as (kb, conn):
+    with _board(board) as (_kb, conn):
         rec = kanban_pr_resume.recover_authorized_pr_resume(
             conn, tid, comment_id, actor=_persisted_identity(), reason=_redact_opt(reason),
             dry_run=dry_run, caller_task_id=env_tid)

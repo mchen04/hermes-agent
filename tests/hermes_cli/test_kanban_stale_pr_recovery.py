@@ -218,7 +218,6 @@ def test_recovery_is_idempotent_and_dispatch_spawns_exactly_one_owner(kanban_hom
 
         def spawn(task, workspace):
             spawned.append(task.id)
-            return None
 
         first = kbd.dispatch_task(conn, tid, spawn_fn=spawn)
         assert [s[0] for s in first.spawned] == [tid]
@@ -237,7 +236,7 @@ def test_recovery_is_idempotent_and_dispatch_spawns_exactly_one_owner(kanban_hom
 
 
 def test_dispatch_task_keeps_guards_caps_and_board_lock(kanban_home):
-    spawn = lambda task, workspace: None  # noqa: E731
+    spawn = lambda task, workspace: None
     with kbc.connect() as conn:
         tid, _ = _guarded_card(conn)
         # No recovery: still guarded, and the guard event is written as usual.
@@ -258,7 +257,7 @@ def test_dispatch_task_keeps_guards_caps_and_board_lock(kanban_home):
 
 
 def test_held_card_records_its_guard_once_per_hold_not_per_tick(kanban_home):
-    spawn = lambda task, workspace: None  # noqa: E731
+    spawn = lambda task, workspace: None
     with kbc.connect() as conn:
         tid, _ = _guarded_card(conn)
 
@@ -345,7 +344,7 @@ def test_cli_refusal_exits_nonzero(kanban_home, monkeypatch, capsys):
 ])
 def test_malformed_recovery_payload_never_crashes_or_lifts_guard(kanban_home, payload):
     with kbc.connect() as conn:
-        tid, cid = _guarded_card(conn)
+        tid, _cid = _guarded_card(conn)
         sha = kbd._guarded_pr_comments(conn, tid, int(time.time()))[0]["sha256"]
         with kb.write_txn(conn):
             conn.execute("INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, ?)",

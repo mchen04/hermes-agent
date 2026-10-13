@@ -35,7 +35,7 @@ async def _tick(monkeypatch, runner):
 
     async def fake_sleep(delay):
         if delay == 5:
-            return None
+            return
         runner._running = False
         await real_sleep(0)
 
@@ -108,7 +108,7 @@ def test_notify_wake_still_posts_notice(tmp_path, monkeypatch):
 
 
 def _config(monkeypatch, kanban):
-    import hermes_cli.config as config
+    from hermes_cli import config
     monkeypatch.setattr(config, "load_config", lambda: {"kanban": kanban})
 
 
@@ -122,7 +122,7 @@ def test_chat_delivery_mode_reads_config(monkeypatch):
 
 
 def test_auto_subscribe_target_uses_configured_mode(monkeypatch):
-    import gateway.session_context as session_context
+    from gateway import session_context
     from tools import kanban_tools
 
     session = {"HERMES_SESSION_PLATFORM": "discord", "HERMES_SESSION_CHAT_ID": "123",

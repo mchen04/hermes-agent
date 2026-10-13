@@ -4,6 +4,7 @@ Tests both the _handle_update_command handler (spawns update process) and
 the _send_update_notification startup hook (sends results after restart).
 """
 
+import asyncio
 import json
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -107,7 +108,8 @@ class TestHandleUpdateCommand:
              patch("importlib.util.find_spec", return_value=fake_spec):
             result = _resolve_hermes_bin()
 
-        completed = subprocess.run(result, cwd=tmp_path, capture_output=True, text=True, timeout=20)
+        completed = await asyncio.to_thread(
+            subprocess.run, result, cwd=tmp_path, capture_output=True, text=True, timeout=20, check=False)
         assert completed.returncode == 0, completed.stderr
         assert completed.stdout.strip() == "correct installation"
 

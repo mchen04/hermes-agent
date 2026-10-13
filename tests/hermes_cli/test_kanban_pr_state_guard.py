@@ -65,7 +65,6 @@ def _spawn_log():
 
     def spawn(task, workspace):
         spawned.append(task.id)
-        return None
     return spawned, spawn
 
 

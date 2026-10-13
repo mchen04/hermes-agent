@@ -118,7 +118,7 @@ def test_orientation_read_keeps_only_the_latest_comments_and_runs(board):
                              (tid, "crashed", 1_000 + i, 1_001 + i))
     first = json.loads(registry.dispatch("kanban_show", {}))
     assert len(first["comments"]) == 30
-    assert [c["body"] for c in first["comments"]][0] == "note 10"
+    assert first["comments"][0]["body"] == "note 10"
     assert first["comments"][-1]["body"] == "note 39"
     assert len(first["runs"]) == 10 and first["runs"][0]["id"] == 4 and first["runs"][-1]["id"] == 1  # live run last
     assert first["truncated"] == {"events": False, "comments": True, "runs": True}
