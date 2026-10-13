@@ -15,6 +15,7 @@ logger = logging.getLogger(__name__)
 _catalogs: dict[str, tuple[dict[str, frozenset[str]], float]] = {}
 _TTL = 3600
 _MAX_CATALOGS = 128
+_warned_clamps: set[tuple[str, str]] = set()
 
 
 def _advertised_tiers(entry: dict[str, Any]) -> frozenset[str] | None:
@@ -127,11 +128,12 @@ def negotiate_request_tier(agent: Any, overrides: dict[str, Any]) -> None:
     supported = _tiers_for_model(token, base_url, model)
     if supported is None:
         return
-    candidates = ("ultrafast", "priority") if requested == "ultrafast" else ("priority",)
-    effective = next((tier for tier in candidates if tier in supported), "default")
+    # LOCAL-PATCH ultrafast-no-priority-substitute: an unadvertised tier falls to Standard, never to
+    # a different paid tier, and says so (upstream clamped ultrafast -> priority at debug level).
+    effective = requested if requested in supported else "default"
     if effective == "default":
         overrides.pop("service_tier", None)  # Codex represents Standard by omission.
-    else:
-        overrides["service_tier"] = effective
-    if effective != requested:
-        logger.debug("Codex service tier %s -> %s: not advertised for selected credential", requested, effective)
+    if effective != requested and (model, requested) not in _warned_clamps:
+        _warned_clamps.add((model, requested))
+        logger.warning("Codex service tier %s not advertised for %s on the selected credential; sending Standard",
+                       requested, model)
