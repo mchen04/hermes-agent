@@ -50,7 +50,8 @@ def test_rotation_restores_requested_tier(monkeypatch):
         assert wire["model"] == "gpt-6-astra"
         assert agent.request_overrides == {"service_tier": "ultrafast"}
         assert agent.service_tier == "ultrafast"
-    assert emitted == ["ultrafast", "priority", "ultrafast"]
+    # LOCAL-PATCH ultrafast-no-priority-substitute: account A lacks Ultrafast -> Standard, never Priority.
+    assert emitted == ["ultrafast", None, "ultrafast"]
     assert seen == ["B", "A"]
 
 
