@@ -683,11 +683,23 @@ def _migrate_to_49(results: dict[str, Any], quiet: bool) -> None:
             print("  ✓ Cleared TERMINAL_VERCEL_RUNTIME from .env (was the old default; the image is used instead)")
 
 
+_RETIRED_TIRITH_KEYS = ("tirith_enabled", "tirith_path", "tirith_timeout", "tirith_fail_open")
+
+
 def _migrate_to_50(results: dict[str, Any], quiet: bool) -> None:
-    # LOCAL-PATCH tirith-keep: upstream's 49 → 50 step dropped security.tirith_* when it removed the
-    # bundled scanner (911da42e9e). This install keeps the scanner, so its keys (including an explicit
-    # fail-closed ``tirith_fail_open: false``) stay; the step only advances the schema stamp.
-    return None
+    # 49 → 50: the bundled tirith scanner left Hermes. Nothing reads its keys now, so they are
+    # dropped; nothing replaces them.
+    config = read_raw_config()
+    security = config.get("security")
+    if not isinstance(security, dict):
+        return
+    present = [key for key in _RETIRED_TIRITH_KEYS if key in security]
+    if not present:
+        return
+    for key in present:
+        del security[key]
+    _commit(config, results, quiet, "removed security.tirith_* (scanner no longer bundled)",
+            "  ✓ Removed security.tirith_* — the tirith scanner is no longer bundled with Hermes.")
 
 
 MIGRATIONS: tuple[tuple[int, Callable[[dict[str, Any], bool], None]], ...] = (
@@ -821,7 +833,7 @@ MIGRATIONS: tuple[tuple[int, Callable[[dict[str, Any], bool], None]], ...] = (
     (48, _migrate_to_48),
     # 48 → 49: the seeded Vercel runtime pin is dropped so fresh sandboxes use the managed image (see _migrate_to_49).
     (49, _migrate_to_49),
-    # 49 → 50: upstream drops security.tirith_*; LOCAL-PATCH tirith-keep keeps them (see _migrate_to_50).
+    # 49 → 50: security.tirith_* dropped; the bundled scanner is gone (see _migrate_to_50).
     (50, _migrate_to_50),
 )
 
@@ -834,7 +846,7 @@ MIGRATIONS: tuple[tuple[int, Callable[[dict[str, Any], bool], None]], ...] = (
 #: out: it clears OPENAI_MODEL from .env, a generic name Hermes never reads but the user's tools may.
 #: v41 is left out too: it rewrites profile SOUL.md on a heading match, an artifact whose
 #: provenance the config stamp says nothing about.
-LEGACY_KEY_STEPS = frozenset({12, 14, 16, 17, 29, 33, 38, 39, 42, 43, 46})
+LEGACY_KEY_STEPS = frozenset({12, 14, 16, 17, 29, 33, 38, 39, 42, 43, 46, 50})
 
 
 def run_migrations(

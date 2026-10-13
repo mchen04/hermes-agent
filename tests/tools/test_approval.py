@@ -81,10 +81,6 @@ class TestSmartApproval:
         )
         monkeypatch.setattr(approval_module, "_YOLO_MODE_FROZEN", False)
         monkeypatch.setattr(approval_smart, "_smart_approve", lambda *_: "approve")
-        monkeypatch.setattr(
-            "tools.tirith_security.check_command_security",
-            lambda _command: {"action": "allow", "findings": [], "summary": ""},
-        )
         approval_module.clear_session(session_key)
         approval_module._permanent_approved.clear()
 
@@ -276,10 +272,6 @@ class TestPipeToShellNameCoverage:
         from tools.approval import check_all_command_guards
         monkeypatch.setenv("HERMES_INTERACTIVE", "1")
         monkeypatch.delenv("HERMES_CRON_SESSION", raising=False)
-        monkeypatch.setattr(
-            "tools.tirith_security.check_command_security",
-            lambda _command: {"action": "allow", "findings": [], "summary": ""},
-        )
         prompts = []
 
         def deny(*args, **kwargs):
@@ -1935,85 +1927,6 @@ class TestConcurrentApprovalCoalescing:
         t1.join(timeout=5)
         t2.join(timeout=5)
         assert all(r is not None and r["choice"] == "session" for r in results)
-
-
-class TestTirithImportErrorFailOpenPolicy:
-    """Regression guard for #20733.
-
-    When ``tools.tirith_security`` cannot be imported, ``check_all_command_guards``
-    must honour the ``security.tirith_fail_open`` config knob:
-
-    * ``tirith_fail_open: true``  (default) → allow, no approval prompt.
-    * ``tirith_fail_open: false`` → surface a Tirith-style warning through
-      the normal approval flow so the command is not silently permitted.
-    """
-
-    def _make_failing_import(self, real_import):
-        """Return a builtins.__import__ replacement that raises for tirith."""
-        def _fake(name, *args, **kwargs):
-            if name == "tools.tirith_security":
-                raise ImportError("simulated tirith import failure")
-            return real_import(name, *args, **kwargs)
-        return _fake
-
-    @pytest.mark.parametrize(
-        ("enabled", "fail_open"),
-        [(True, True), (False, False)],
-    )
-    def test_import_error_allows_when_fail_open_or_disabled(self, enabled, fail_open):
-        """Default fail-open (and tirith disabled) swallow the ImportError."""
-        import builtins
-        from unittest.mock import patch as _patch
-        from tools.approval import check_all_command_guards
-
-        cfg = {
-            "approvals": {"mode": "manual"},
-            "security": {"tirith_enabled": enabled, "tirith_fail_open": fail_open},
-        }
-        real_import = builtins.__import__
-        with _patch("builtins.__import__", side_effect=self._make_failing_import(real_import)):
-            with _patch("hermes_cli.config.load_config_readonly", return_value=cfg):
-                with _patch("tools.approval.detect_dangerous_command", return_value=(False, None, None)):
-                    with mock_patch.dict("os.environ", {"HERMES_INTERACTIVE": "1"}, clear=False):
-                        result = check_all_command_guards("echo hello", "local")
-
-        assert result.get("approved") is True
-
-    def test_fail_open_false_escalates_to_approval_on_import_error(self):
-        """Fail-closed: ImportError must NOT silently allow when tirith_fail_open=false."""
-        import builtins
-        from unittest.mock import patch as _patch
-        from tools.approval import check_all_command_guards
-
-        cfg = {
-            "approvals": {"mode": "manual"},
-            "security": {"tirith_enabled": True, "tirith_fail_open": False},
-        }
-        calls = []
-
-        def approval_callback(command, description, **kwargs):
-            calls.append({"command": command, "description": description})
-            return "deny"
-
-        real_import = builtins.__import__
-        with _patch("builtins.__import__", side_effect=self._make_failing_import(real_import)):
-            with _patch("hermes_cli.config.load_config_readonly", return_value=cfg):
-                with _patch("tools.approval.detect_dangerous_command", return_value=(False, None, None)):
-                    with mock_patch.dict("os.environ", {"HERMES_INTERACTIVE": "1"}, clear=False):
-                        result = check_all_command_guards(
-                            "echo hello",
-                            "local",
-                            approval_callback=approval_callback,
-                        )
-
-        # The user must have been consulted — the command should NOT be silently allowed.
-        assert result.get("approved") is False, (
-            "Command was silently allowed despite tirith_fail_open=false and Tirith import failure. "
-            "This is the bug described in issue #20733."
-        )
-        assert calls, "Approval callback was never invoked — command slipped through silently"
-        assert "tirith" in calls[0]["description"].lower() or "unavailable" in calls[0]["description"].lower()
-
 
 class TestApprovalPromptRedaction:
     """Secrets are masked in user-facing approval surfaces (#13139).

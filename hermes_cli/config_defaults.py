@@ -1773,7 +1773,7 @@ DEFAULT_CONFIG = {
         # for one login without changing this key.
         "codex_login_flow": "device_code",
     },
-    "security": {  # Security: pre-exec scanning via tirith plus related guards.
+    "security": {  # Security: URL/private-network guards, redaction and approval presentation.
         "allow_private_urls": False,  # allow requests to private/internal IPs (OpenWrt, VPNs)
         # CIDR blocks a local TUN proxy answers DNS with (Mihomo/Clash fake-ip, Surge enhanced).
         # Answers inside these blocks are the proxy's sentinels, not internal hosts, so the guard
@@ -1793,10 +1793,6 @@ DEFAULT_CONFIG = {
         # globs on the basename (e.g. "*.mdc").
         "protected_instruction_files": True,
         "protected_instruction_extra_patterns": [],
-        "tirith_enabled": True,
-        "tirith_path": "tirith",
-        "tirith_timeout": 5,
-        "tirith_fail_open": True,
         "website_blocklist": {"enabled": False, "domains": [], "shared_files": []},
         # IDs of supply-chain advisories the user has read and acted on; acked ones stop the startup
         # banner. Add via `hermes doctor --ack <id>`; remove by editing the list. Catalog:
