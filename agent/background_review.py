@@ -800,6 +800,19 @@ def _classify_review_result(actions: list[str]) -> str:
     return "+".join(kind for kind, hit in (("skill", has_skill), ("memory", has_memory)) if hit) or "none"
 
 
+def _summarize_review(review_messages: list[dict], prior_snapshot: list[dict],
+                      notification_mode: str) -> tuple[list[str], str]:
+    """``(actions to show, result to log)``. LOCAL-PATCH review-result-truth: the logged result
+    classifies what the review did even when notifications are ``off``, whose shown summary is empty by
+    design; nothing extra is shown."""
+    actions = summarize_background_review_actions(review_messages, prior_snapshot,
+                                                  notification_mode=notification_mode)
+    if str(notification_mode or "on").lower() != "off":
+        return actions, _classify_review_result(actions)
+    done = summarize_background_review_actions(review_messages, prior_snapshot, notification_mode="on")
+    return actions, _classify_review_result(done)
+
+
 def _log_review_completion(usage: dict[str, Any], result: str) -> None:
     """Emit a per-fork completion line so cost is visible where it is incurred."""
     logger.info(
@@ -1258,10 +1271,8 @@ def _run_review_in_thread(
             # every successful action the fork DID complete before the crash. Coerce an exception into an
             # empty actions list so the partial valid actions from earlier in the messages are returned
             # instead.
-            actions = summarize_background_review_actions(
-                st.review_messages, messages_snapshot,
-                notification_mode=getattr(agent, "memory_notifications", "on"),
-            )
+            actions, result = _summarize_review(
+                st.review_messages, messages_snapshot, getattr(agent, "memory_notifications", "on"))
         except Exception as e:
             logger.warning(
                 "summarize_background_review_actions returned partial results "
@@ -1269,8 +1280,8 @@ def _run_review_in_thread(
                 "that previously aborted the entire review (#59437): %s",
                 e,
             )
-            actions = []
-        _log_review_completion(st.review_usage, _classify_review_result(actions))
+            actions, result = [], "none"
+        _log_review_completion(st.review_usage, result)
         if actions:
             _publish_review_summary(agent, actions)
     except Exception as e:
