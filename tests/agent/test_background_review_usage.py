@@ -9,6 +9,8 @@ parent session via the aux-accounting chokepoint.
 
 from __future__ import annotations
 
+import json
+
 import logging
 from unittest.mock import patch
 
@@ -139,6 +141,20 @@ def test_classify_review_result():
         background_review._classify_review_result(["User profile ➕ prefers terse"])
         == "memory"
     )
+
+def test_logged_result_counts_a_queued_skill_proposal_with_notifications_off():
+    """LOCAL-PATCH review-result-truth: notifications off shows nothing yet logs what the review did."""
+    staged = json.dumps({"success": True, "staged": True, "proposal_staged": True,
+                         "message": "Skill improvement queued for review (lesson L1)."})
+    messages = [
+        {"role": "assistant", "tool_calls": [{"id": "c1", "function": {"name": "skill_manage", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "c1", "content": staged},
+    ]
+    assert background_review._summarize_review(messages, [], "off") == ([], "skill")
+    shown, result = background_review._summarize_review(messages, [], "on")
+    assert result == "skill" and shown == ["Skill improvement queued for review (lesson L1)."]
+    assert background_review._summarize_review([], [], "off") == ([], "none")
+
 
 def test_enabled_config_failure_logs_warning(caplog):
     with patch(
