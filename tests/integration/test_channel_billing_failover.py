@@ -61,8 +61,8 @@ class VendorProxy(TLSInterceptProxy):
                 return
             self.connects.append(host)
             conn.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
-            tls = self._ctx.wrap_socket(conn, server_side=True)
-            self._handlers[host](tls, addr, None)
+            with self._ctx.wrap_socket(conn, server_side=True) as tls:
+                self._handlers[host](tls, addr, None)
         except (OSError, ssl.SSLError):
             return
         finally:

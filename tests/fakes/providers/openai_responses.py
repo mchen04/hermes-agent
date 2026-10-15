@@ -359,6 +359,9 @@ def _handler_for(server: FakeResponsesServer) -> type[BaseHTTPRequestHandler]:
 
         def do_POST(self) -> None:
             raw = self.rfile.read(int(self.headers.get("Content-Length", 0) or 0))
+            if self.headers.get("Content-Encoding", "").lower() == "zstd":
+                from compression import zstd
+                raw = zstd.decompress(raw)
             try:
                 body = json.loads(raw or b"{}")
             except json.JSONDecodeError:
