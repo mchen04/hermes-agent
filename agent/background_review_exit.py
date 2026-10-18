@@ -8,15 +8,19 @@ exit (SIGTERM from the dispatcher, Ctrl-C) skips the wait.
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
+from pathlib import Path
 from typing import Any, Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_WORKER_REVIEW_WAIT_SECONDS = 180.0
 DEFAULT_WORKER_REVIEW_MIN_TOOL_CALLS = 3
+DEFAULT_WORKER_REVIEW_INTERVAL_SECONDS = 86400.0
+CONTINUING_STATUSES = frozenset({"scheduled", "ready", "running", "todo", "triage"})
 
 # The Kanban task whose worker process promised to run its review at exit ("" = none).
 _exit_review_task = ""
@@ -67,6 +71,64 @@ def worker_review_min_tool_calls() -> int:
     """``kanban.worker_review_min_tool_calls``: work tool calls that make a session worth a review."""
     return max(0, int(_number(
         _section("kanban").get("worker_review_min_tool_calls"), DEFAULT_WORKER_REVIEW_MIN_TOOL_CALLS)))
+
+
+def worker_review_interval_seconds() -> float:
+    return max(0.0, _number(
+        _section("kanban").get("worker_review_interval_seconds"), DEFAULT_WORKER_REVIEW_INTERVAL_SECONDS))
+
+
+def _task_status(task_id: str) -> str:
+    try:
+        from hermes_cli import kanban_db as kb
+        from hermes_cli import kanban_db_connect as kbc
+
+        conn = kbc.connect()
+        try:
+            task = kb.get_task(conn, task_id)
+        finally:
+            conn.close()
+        return str(getattr(task, "status", "") or "")
+    except Exception:
+        logger.debug("kanban status read for %s failed", task_id, exc_info=True)
+        return ""
+
+
+def _stamps_path() -> Path:
+    from hermes_constants import get_hermes_home
+
+    return get_hermes_home() / "kanban" / "exit-reviews.json"
+
+
+def _stamps() -> dict:
+    try:
+        stamps = json.loads(_stamps_path().read_text())
+    except (OSError, ValueError):
+        return {}
+    return stamps if isinstance(stamps, dict) else {}
+
+
+def _record_review(task_id: str, now: float) -> None:
+    path = _stamps_path()
+    stamps = {key: value for key, value in _stamps().items()
+              if isinstance(value, (int, float)) and now - value < 7 * 86400}
+    stamps[task_id] = now
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(path.name + ".tmp")
+        temporary.write_text(json.dumps(stamps, indent=2) + "\n")
+        temporary.replace(path)
+    except OSError:
+        logger.debug("exit review stamp for %s not saved", task_id, exc_info=True)
+
+
+def reviewed_recently(task_id: str, interval: float, now: float) -> bool:
+    if not task_id or interval <= 0:
+        return False
+    last = _stamps().get(task_id)
+    if not isinstance(last, (int, float)) or now - last >= interval:
+        return False
+    return _task_status(task_id) in CONTINUING_STATUSES
 
 
 def _live_review_thread(agent: Any) -> Optional[threading.Thread]:
@@ -147,7 +209,7 @@ def start_review(agent: Any, messages: list, label: str) -> Optional[threading.T
 def run_worker_exit_review(agent: Any, *, wait_seconds: float, min_tool_calls: int) -> str:
     """Review a finished Kanban worker session and wait for the review, bounded by ``wait_seconds``.
 
-    Returns the outcome: ``off``, ``not_due``, ``not_started``, ``complete`` or ``timed_out``.
+    Returns the outcome: ``off``, ``not_due``, ``recent``, ``not_started``, ``complete`` or ``timed_out``.
     """
     if agent is None or wait_seconds <= 0:
         return "off"
@@ -164,10 +226,18 @@ def run_worker_exit_review(agent: Any, *, wait_seconds: float, min_tool_calls: i
         logger.info("Kanban worker exit: no review for session %s (%d work tool calls, minimum %d)",
                     session_id, calls, min_tool_calls)
         return "not_due"
+    task_id = _exit_review_task
+    now = time.time()
+    if reviewed_recently(task_id, worker_review_interval_seconds(), now):
+        logger.info("Kanban worker exit: no review for session %s; card %s was reviewed within %.0fs "
+                    "and continues", session_id, task_id, worker_review_interval_seconds())
+        return "recent"
     agent._exit_review_due = False
     thread = start_review(agent, messages, "Kanban worker exit")
     if thread is None:
         return "not_started"
+    if task_id:
+        _record_review(task_id, now)
     remaining = max(0.0, deadline - time.monotonic())
     thread.join(remaining)
     if thread.is_alive():

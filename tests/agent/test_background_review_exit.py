@@ -192,3 +192,38 @@ def test_review_fork_tools_are_untouched_otherwise(names):
     fork = SimpleNamespace(tools=[], valid_tool_names=set(names))
     bre.offer_skill_manage(fork)
     assert fork.valid_tool_names == names and fork.tools == []
+
+
+@pytest.fixture
+def card_stamps(monkeypatch, tmp_path, kanban_worker):
+    statuses = {"t_learn": "scheduled"}
+    monkeypatch.setattr(bre, "_stamps_path", lambda: tmp_path / "kanban" / "exit-reviews.json")
+    monkeypatch.setattr(bre, "_task_status", lambda task_id: statuses.get(task_id, ""))
+    monkeypatch.setattr(bre, "worker_review_interval_seconds", lambda: 86400.0)
+    return statuses
+
+
+def test_a_card_that_keeps_running_is_reviewed_once_a_day(card_stamps):
+    first = _ReviewingAgent(_session("terminal", "read_file", "patch"))
+    assert bre.run_worker_exit_review(first, wait_seconds=5, min_tool_calls=3) == "complete"
+    again = _ReviewingAgent(_session("terminal", "read_file", "patch"))
+    assert bre.run_worker_exit_review(again, wait_seconds=5, min_tool_calls=3) == "recent"
+    assert again.spawned == []
+
+
+def test_a_card_that_ends_is_reviewed_even_after_a_recent_review(card_stamps):
+    first = _ReviewingAgent(_session("terminal", "read_file", "patch"))
+    assert bre.run_worker_exit_review(first, wait_seconds=5, min_tool_calls=3) == "complete"
+    card_stamps["t_learn"] = "done"
+    last = _ReviewingAgent(_session("terminal", "read_file", "patch", "kanban_complete"))
+    assert bre.run_worker_exit_review(last, wait_seconds=5, min_tool_calls=3) == "complete"
+    assert last.spawned == [(3, True, True)]
+
+
+def test_a_day_old_review_lets_a_running_card_be_reviewed_again(card_stamps, monkeypatch):
+    first = _ReviewingAgent(_session("terminal", "read_file", "patch"))
+    assert bre.run_worker_exit_review(first, wait_seconds=5, min_tool_calls=3) == "complete"
+    later = time.time() + 86401
+    monkeypatch.setattr(bre.time, "time", lambda: later)
+    again = _ReviewingAgent(_session("terminal", "read_file", "patch"))
+    assert bre.run_worker_exit_review(again, wait_seconds=5, min_tool_calls=3) == "complete"
