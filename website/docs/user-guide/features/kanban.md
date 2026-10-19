@@ -1311,7 +1311,7 @@ Coverage window: desktop notifications ride the live event stream, so they fire 
 
 ## Gateway notifications
 
-When you run `/kanban create …` from the gateway (Telegram, Discord, Slack, etc.), the originating chat is automatically subscribed to the new task. The gateway's background notifier polls `task_events` every few seconds and delivers one message per terminal event (`completed`, `blocked`, `gave_up`, `crashed`, `timed_out`) to that chat. Completed tasks also send the first line of the worker's `--result` so you see the outcome without having to `/kanban show`.
+When you run `/kanban create …` from the gateway (Telegram, Discord, Slack, etc.), the originating chat is automatically subscribed to the new task. The gateway's background notifier polls `task_events` every few seconds and delivers one message per terminal event (`completed`, `blocked`, `gave_up`, `crashed`, `timed_out`) to that chat. Completed tasks also send the worker's summary (up to `kanban.wake.result_chars`) so you see the outcome without having to `/kanban show`.
 
 You can manage subscriptions explicitly from the CLI — useful when a script / cron job wants to notify a chat it didn't originate from:
 
@@ -1354,6 +1354,21 @@ For `notify+wake`, delivery completes only once the wake is admitted to the adap
 A "wake" forges a synthetic inbound message to the destination gateway agent so it takes a normal turn (reads the comment + result, reasons, replies) instead of getting a one-line passive notification. It only fires when the notifier runs inside a live gateway process; otherwise a `notify+wake` subscription still delivers its passive message, while a `wake`-only subscription does nothing in that process.
 
 **Which events wake.** The ones that return a task outcome or require orchestration attention: `completed`, `blocked`, `gave_up`, `crashed`, `timed_out`, `review_requested` (a worker finished the implementation and handed off via `kanban_request_review`) and `block_loop_detected` (the task was routed to `triage` after repeated blocks). `status`, `archived` and `unblocked` are delivered but never wake — they are bookkeeping transitions, not attention signals. When a `completed` or `review_requested` event carries a summary, that handoff rides the wake turn, so the woken agent sees what the worker actually did.
+
+**What a wake says.** Below the header, each wake carries one line per event: `event: <kind> · caused_by <worker|operator|dispatcher|restart replay> · <age> ago`; for blocks `block: <kind> — <reason>` and `needs_human: yes — <question>` (only `needs_input` and `capability`) or `needs_human: no`; for completions and review handoffs `Result:` with the run summary; `publish:` with the PR, its state, head and merge SHA and the deploy state when the card recorded them; `evidence (paths, not uploaded):` for machine evidence; `new since last wake:` with comment ids and event kinds; and `delta read: kanban_show(task_id=..., cursor=...)`, a cursor that returns only what happened since the previous wake.
+
+The notifier does not wake for a `blocked`, `completed` or `review_requested` event that the subscribed chat caused itself (an operator action taken from that chat's session), nor for a `crashed` or `timed_out` event delivered later than `replay_max_age_seconds` (a replay after a restart; `gave_up` still wakes). A second wake on the same card inside `merge_window_seconds` waits and is delivered as one merged wake. Handoff files whose suffix is in `evidence_suffixes` stay paths in the wake text; only the rest upload to the chat.
+
+```yaml
+kanban:
+  wake:
+    reason_chars: 300
+    result_chars: 500
+    replay_max_age_seconds: 120
+    merge_window_seconds: 120
+    drop_self_caused: true
+    evidence_suffixes: [.zip, .json, .jsonl, .ndjson, .gz, .tgz, .tar, .log, .whl, .diff, .patch, .sqlite, .db]
+```
 
 `--chat-type` (`dm` | `group` | `channel` | `thread`) records the originating chat's type so a woken turn resolves the operator's **real** session: `build_session_key` keys groups, channels, and threads differently from DMs, so an inaccurate `chat_type` would route the wake into a separate, context-less session. The `/kanban` auto-subscribe and slash-command paths capture this automatically — you only set it by hand when subscribing a chat from a script or cron. Omit it to leave an existing subscription unchanged (new subscriptions default to `dm`).
 
