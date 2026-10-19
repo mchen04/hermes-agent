@@ -324,6 +324,7 @@ DEFAULT_CONFIG = {
         # Bounded linger (seconds) for one-shot CLI runs (-q/-Q/-z) that exit while background processes
         # spawned with notify_on_complete=true are still running. See #90879.
         "oneshot_completion_wait_seconds": 600.0,
+        "process_result_command_chars": 200,
         # Env vars passed into sandboxed terminal/execute_code (skill-declared
         # required_environment_variables pass through automatically).
         "env_passthrough": [],

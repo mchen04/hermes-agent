@@ -237,6 +237,12 @@ terminal:
   daytona_image: "nousresearch/hermes-sandbox:desktop"               # Container image for Daytona backend
 ```
 
+`terminal.process_result_command_chars` (default `200`, `0` = off) caps the
+`command` echoed back by the background-process tool's `poll`, `wait`, `log`,
+`kill`, `list` and `handoff` results. A longer command comes back as its first
+characters plus `command_sha256` and `command_chars`, so a long inline
+instruction is not re-read on every status check.
+
 `terminal.temp_dir` controls where Hermes puts session temp artifacts on the
 local backend — background-process logs/pid/exit files, code-execution
 sandboxes, and spilled tool results. When it's empty (the default), Hermes
