@@ -1,25 +1,23 @@
 """LOCAL-PATCH learn-workers: background review for short-lived runs.
 
 The post-turn review runs in a daemon thread, so a process that exits right after its last
-turn kills it. A Kanban worker defers its reviews to exit. At a normal exit it runs one review
-over the whole session when the session did real work, and waits for it (bounded). A signal
-exit (SIGTERM from the dispatcher, Ctrl-C) skips the wait.
+turn kills it. A Kanban worker defers its reviews to exit. At a normal exit of a card that has
+ended it runs one skills review over the whole session when the session did real work, and waits
+for it (bounded). A card that keeps running is reviewed only when it ends. A signal exit (SIGTERM
+from the dispatcher, Ctrl-C) skips the wait.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import threading
 import time
-from pathlib import Path
 from typing import Any, Iterable, Optional
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_WORKER_REVIEW_WAIT_SECONDS = 180.0
 DEFAULT_WORKER_REVIEW_MIN_TOOL_CALLS = 3
-DEFAULT_WORKER_REVIEW_INTERVAL_SECONDS = 86400.0
 CONTINUING_STATUSES = frozenset({"scheduled", "ready", "running", "todo", "triage"})
 
 # The Kanban task whose worker process promised to run its review at exit ("" = none).
@@ -73,11 +71,6 @@ def worker_review_min_tool_calls() -> int:
         _section("kanban").get("worker_review_min_tool_calls"), DEFAULT_WORKER_REVIEW_MIN_TOOL_CALLS)))
 
 
-def worker_review_interval_seconds() -> float:
-    return max(0.0, _number(
-        _section("kanban").get("worker_review_interval_seconds"), DEFAULT_WORKER_REVIEW_INTERVAL_SECONDS))
-
-
 def _task_status(task_id: str) -> str:
     try:
         from hermes_cli import kanban_db as kb
@@ -94,41 +87,8 @@ def _task_status(task_id: str) -> str:
         return ""
 
 
-def _stamps_path() -> Path:
-    from hermes_constants import get_hermes_home
-
-    return get_hermes_home() / "kanban" / "exit-reviews.json"
-
-
-def _stamps() -> dict:
-    try:
-        stamps = json.loads(_stamps_path().read_text())
-    except (OSError, ValueError):
-        return {}
-    return stamps if isinstance(stamps, dict) else {}
-
-
-def _record_review(task_id: str, now: float) -> None:
-    path = _stamps_path()
-    stamps = {key: value for key, value in _stamps().items()
-              if isinstance(value, (int, float)) and now - value < 7 * 86400}
-    stamps[task_id] = now
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(path.name + ".tmp")
-        temporary.write_text(json.dumps(stamps, indent=2) + "\n")
-        temporary.replace(path)
-    except OSError:
-        logger.debug("exit review stamp for %s not saved", task_id, exc_info=True)
-
-
-def reviewed_recently(task_id: str, interval: float, now: float) -> bool:
-    if not task_id or interval <= 0:
-        return False
-    last = _stamps().get(task_id)
-    if not isinstance(last, (int, float)) or now - last >= interval:
-        return False
-    return _task_status(task_id) in CONTINUING_STATUSES
+def card_continues(task_id: str) -> bool:
+    return bool(task_id) and _task_status(task_id) in CONTINUING_STATUSES
 
 
 def _live_review_thread(agent: Any) -> Optional[threading.Thread]:
@@ -186,22 +146,20 @@ def offer_skill_manage(review_agent: Any) -> None:
 
 
 def start_review(agent: Any, messages: list, label: str) -> Optional[threading.Thread]:
-    """Spawn a memory+skill review over ``messages``; return its thread, or None if none started."""
+    """Spawn a skills review over ``messages``; return its thread, or None if none started."""
     names = getattr(agent, "valid_tool_names", None) or set()
-    review_memory = "memory" in names and getattr(agent, "_memory_store", None) is not None
     # A one-shot parent hides skill_manage but keeps skill_view; its fork gets skill_manage back.
     review_skills = "skill_manage" in names or "skill_view" in names
     session_id = getattr(agent, "session_id", "?")
-    if not (review_memory or review_skills):
-        logger.info("%s review skipped for session %s: the run has no memory or skill tools", label, session_id)
+    if not review_skills:
+        logger.info("%s review skipped for session %s: the run has no skill tools", label, session_id)
         return None
     agent._background_review_thread = None
     agent._spawn_background_review(
-        messages_snapshot=list(messages), review_memory=review_memory, review_skills=review_skills)
+        messages_snapshot=list(messages), review_memory=False, review_skills=True)
     thread = getattr(agent, "_background_review_thread", None)
     if isinstance(thread, threading.Thread):
-        logger.info("%s review started for session %s (memory=%s skills=%s)",
-                    label, session_id, review_memory, review_skills)
+        logger.info("%s review started for session %s (skills only)", label, session_id)
         return thread
     return None
 
@@ -209,7 +167,7 @@ def start_review(agent: Any, messages: list, label: str) -> Optional[threading.T
 def run_worker_exit_review(agent: Any, *, wait_seconds: float, min_tool_calls: int) -> str:
     """Review a finished Kanban worker session and wait for the review, bounded by ``wait_seconds``.
 
-    Returns the outcome: ``off``, ``not_due``, ``recent``, ``not_started``, ``complete`` or ``timed_out``.
+    Returns the outcome: ``off``, ``not_due``, ``continues``, ``not_started``, ``complete`` or ``timed_out``.
     """
     if agent is None or wait_seconds <= 0:
         return "off"
@@ -226,18 +184,14 @@ def run_worker_exit_review(agent: Any, *, wait_seconds: float, min_tool_calls: i
         logger.info("Kanban worker exit: no review for session %s (%d work tool calls, minimum %d)",
                     session_id, calls, min_tool_calls)
         return "not_due"
-    task_id = _exit_review_task
-    now = time.time()
-    if reviewed_recently(task_id, worker_review_interval_seconds(), now):
-        logger.info("Kanban worker exit: no review for session %s; card %s was reviewed within %.0fs "
-                    "and continues", session_id, task_id, worker_review_interval_seconds())
-        return "recent"
+    if card_continues(_exit_review_task):
+        logger.info("Kanban worker exit: no review for session %s; card %s continues and is reviewed "
+                    "when it ends", session_id, _exit_review_task)
+        return "continues"
     agent._exit_review_due = False
     thread = start_review(agent, messages, "Kanban worker exit")
     if thread is None:
         return "not_started"
-    if task_id:
-        _record_review(task_id, now)
     remaining = max(0.0, deadline - time.monotonic())
     thread.join(remaining)
     if thread.is_alive():

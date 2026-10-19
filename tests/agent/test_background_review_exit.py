@@ -106,7 +106,7 @@ def test_exit_review_runs_over_the_whole_session_and_waits_for_it():
     outcome = bre.run_worker_exit_review(agent, wait_seconds=5, min_tool_calls=3)
     assert outcome == "complete"
     assert agent.finished.is_set(), "exit returned before the review finished"
-    assert agent.spawned == [(3, True, True)]
+    assert agent.spawned == [(3, False, True)]
 
 
 def test_exit_review_runs_when_the_nudge_came_due_even_below_the_minimum():
@@ -146,10 +146,10 @@ def test_session_without_memory_or_skill_tools_is_not_reviewed():
     assert agent.spawned == []
 
 
-def test_skill_only_session_reviews_skills_only():
-    agent = _ReviewingAgent(_session("terminal", "read_file", "patch"), tools=("skill_manage",))
-    bre.run_worker_exit_review(agent, wait_seconds=5, min_tool_calls=3)
-    assert agent.spawned == [(3, False, True)]
+def test_memory_alone_is_not_worth_a_worker_review():
+    agent = _ReviewingAgent(_session("terminal", "read_file", "patch"), tools=("memory",))
+    assert bre.run_worker_exit_review(agent, wait_seconds=5, min_tool_calls=3) == "not_started"
+    assert agent.spawned == []
 
 
 def test_spawn_records_the_review_thread_for_joiners(monkeypatch):
@@ -195,35 +195,23 @@ def test_review_fork_tools_are_untouched_otherwise(names):
 
 
 @pytest.fixture
-def card_stamps(monkeypatch, tmp_path, kanban_worker):
-    statuses = {"t_learn": "scheduled"}
-    monkeypatch.setattr(bre, "_stamps_path", lambda: tmp_path / "kanban" / "exit-reviews.json")
+def card_status(monkeypatch, kanban_worker):
+    statuses = {}
     monkeypatch.setattr(bre, "_task_status", lambda task_id: statuses.get(task_id, ""))
-    monkeypatch.setattr(bre, "worker_review_interval_seconds", lambda: 86400.0)
     return statuses
 
 
-def test_a_card_that_keeps_running_is_reviewed_once_a_day(card_stamps):
-    first = _ReviewingAgent(_session("terminal", "read_file", "patch"))
-    assert bre.run_worker_exit_review(first, wait_seconds=5, min_tool_calls=3) == "complete"
-    again = _ReviewingAgent(_session("terminal", "read_file", "patch"))
-    assert bre.run_worker_exit_review(again, wait_seconds=5, min_tool_calls=3) == "recent"
-    assert again.spawned == []
+@pytest.mark.parametrize("status", sorted(bre.CONTINUING_STATUSES))
+def test_a_card_that_keeps_running_is_not_reviewed(card_status, status):
+    card_status["t_learn"] = status
+    agent = _ReviewingAgent(_session("terminal", "read_file", "patch"))
+    assert bre.run_worker_exit_review(agent, wait_seconds=5, min_tool_calls=3) == "continues"
+    assert agent.spawned == []
 
 
-def test_a_card_that_ends_is_reviewed_even_after_a_recent_review(card_stamps):
-    first = _ReviewingAgent(_session("terminal", "read_file", "patch"))
-    assert bre.run_worker_exit_review(first, wait_seconds=5, min_tool_calls=3) == "complete"
-    card_stamps["t_learn"] = "done"
-    last = _ReviewingAgent(_session("terminal", "read_file", "patch", "kanban_complete"))
-    assert bre.run_worker_exit_review(last, wait_seconds=5, min_tool_calls=3) == "complete"
-    assert last.spawned == [(3, True, True)]
-
-
-def test_a_day_old_review_lets_a_running_card_be_reviewed_again(card_stamps, monkeypatch):
-    first = _ReviewingAgent(_session("terminal", "read_file", "patch"))
-    assert bre.run_worker_exit_review(first, wait_seconds=5, min_tool_calls=3) == "complete"
-    later = time.time() + 86401
-    monkeypatch.setattr(bre.time, "time", lambda: later)
-    again = _ReviewingAgent(_session("terminal", "read_file", "patch"))
-    assert bre.run_worker_exit_review(again, wait_seconds=5, min_tool_calls=3) == "complete"
+@pytest.mark.parametrize("status", ["done", "blocked", "review", ""])
+def test_a_card_that_ends_is_reviewed_for_skills(card_status, status):
+    card_status["t_learn"] = status
+    agent = _ReviewingAgent(_session("terminal", "read_file", "patch", "kanban_complete"))
+    assert bre.run_worker_exit_review(agent, wait_seconds=5, min_tool_calls=3) == "complete"
+    assert agent.spawned == [(3, False, True)]
