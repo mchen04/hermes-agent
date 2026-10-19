@@ -1976,6 +1976,17 @@ DEFAULT_CONFIG = {
         # activity for this many days so stale rows aren't scanned forever. 0 = off.
         "done_sub_retention_days": 30,
         "unblock_wait_seconds": 0,
+        "wake": {
+            "reason_chars": 300,
+            "result_chars": 500,
+            "replay_max_age_seconds": 120,
+            "merge_window_seconds": 120,
+            "drop_self_caused": True,
+            "evidence_suffixes": [
+                ".zip", ".json", ".jsonl", ".ndjson", ".gz", ".tgz", ".tar", ".log", ".whl",
+                ".diff", ".patch", ".sqlite", ".db",
+            ],
+        },
     },
     # Bot Mode cross-connection relay (tools/bot_relay.py): envelopes queued by message_agent for
     # agents on other connections wait in an on-disk outbox until the Desktop drains them.

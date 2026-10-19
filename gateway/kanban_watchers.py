@@ -87,6 +87,9 @@ class GatewayKanbanWatchersMixin:
             logger.warning("kanban notifier: kanban_db not importable; notifier disabled")
             return
 
+        from gateway.kanban_wake_contract import wake_settings
+
+        self._kanban_wake_settings = wake_settings(kanban_cfg)
         sub_fail_counts: dict[tuple, int] = getattr(self, "_kanban_sub_fail_counts", {})
         self._kanban_sub_fail_counts = sub_fail_counts
         notifier_profile = getattr(self, "_kanban_notifier_profile", None) or self._active_profile_name()
@@ -181,8 +184,13 @@ class GatewayKanbanWatchersMixin:
         if not candidates:
             return
 
+        from gateway.kanban_watchers_notifier import _wake_settings
+        from gateway.kanban_wake_contract import split_deliverables
         from gateway.platforms.base import BasePlatformAdapter
         candidates = BasePlatformAdapter.filter_local_delivery_paths(candidates)
+        candidates, evidence = split_deliverables(candidates, _wake_settings(self))
+        if evidence:
+            logger.info("kanban notifier: kept %d evidence file(s) as paths, not uploads", len(evidence))
         if not candidates:
             return
 
