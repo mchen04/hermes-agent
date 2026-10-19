@@ -384,6 +384,14 @@ kanban:
                                    # nothing, and so does an unreadable config.
 ```
 
+`kanban_unblock` and `hermes kanban unblock` report what the dispatcher does
+with the card: `respawn_guarded` with its reason (for example an open PR),
+`per_profile_capped`, `at_capacity`, `waits_on_parents`, `eligible` (the next
+tick spawns it) or `spawned` with the run id. `worker_spawned` is true only
+after a real `spawned` event. `kanban.unblock_wait_seconds` (default `0`) sets
+how long unblock waits for the dispatcher's next tick to see the real spawn;
+`hermes kanban unblock --wait N` overrides it for one call.
+
 Override the config flag at runtime via `HERMES_KANBAN_DISPATCH_IN_GATEWAY=0`
 for debugging. Standard gateway supervision applies: run `hermes gateway
 start` directly, or wire the gateway up as a systemd user unit (see the
