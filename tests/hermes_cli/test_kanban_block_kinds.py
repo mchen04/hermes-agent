@@ -228,3 +228,61 @@ def test_needs_input_does_not_shield_a_capability_loop(kanban_home: Path) -> Non
         _make_running_again(conn, tid)
         kb.block_task(conn, tid, reason="no browser", kind="capability")
         assert kb.get_task(conn, tid).status == "triage"
+
+
+def test_stop_rule_block_parks_the_card_and_never_counts_as_a_loop(kanban_home: Path) -> None:
+    with kbc.connect_closing() as conn:
+        tid = _running_task(conn)
+        for attempt in range(kb.BLOCK_RECURRENCE_LIMIT + 1):
+            assert kb.block_task(conn, tid, reason=f"Round {attempt}: no new fix; Stop met", kind="stop-rule")
+            task = kb.get_task(conn, tid)
+            assert (task.status, task.block_kind, task.block_recurrences) == ("blocked", "stop-rule", 1)
+            assert kb.unblock_task(conn, tid)
+            _make_running_again(conn, tid)
+
+
+def _blocked_board(conn) -> dict[str, str]:
+    ids = {}
+    for kind in ("needs_input", "capability", "capacity", "stop-rule", "transient"):
+        ids[kind] = _running_task(conn, title=kind)
+        assert kb.block_task(conn, ids[kind], reason=f"why {kind}", kind=kind)
+    parent = kb.create_task(conn, title="open parent", assignee="worker")
+    child = _running_task(conn, title="dependency")
+    kb.link_tasks(conn, parent_id=parent, child_id=child,
+                  expected_child_run_id=kb.get_task(conn, child).current_run_id)
+    assert kb.block_task(conn, child, reason="wait for parent", kind="dependency")
+    ids["dependency"] = child
+    ids["resumed"] = _running_task(conn, title="resumed")
+    kb.block_task(conn, ids["resumed"], reason="answer?", kind="needs_input")
+    kb.unblock_task(conn, ids["resumed"])
+    return ids
+
+
+_EXPECTED_WAITS_ON = {
+    "needs_input": "human", "capability": "human", "capacity": "capacity", "stop-rule": "stop-rule",
+    "transient": "retry", "dependency": "dependency", "resumed": None,
+}
+
+
+def test_board_reads_tell_a_human_wait_from_capacity_stop_rule_and_dependency(
+    kanban_home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import json
+
+    from tools import kanban_tools as kt
+
+    with kbc.connect_closing() as conn:
+        ids = _blocked_board(conn)
+    by_id = {tid: name for name, tid in ids.items()}
+
+    cli_rows = json.loads(kanban_cli.run_slash("list --json"))
+    assert {by_id[r["id"]]: r["waits_on"] for r in cli_rows if r["id"] in by_id} == _EXPECTED_WAITS_ON
+    text = kanban_cli.run_slash("list")
+    assert f"{ids['capacity']}" in text and "(waits on capacity)" in text
+    assert "(waits on human)" in text and "(waits on stop-rule)" in text
+
+    monkeypatch.delenv("HERMES_KANBAN_TASK", raising=False)
+    tool_rows = json.loads(kt._handle_list({"limit": 50}))["tasks"]
+    assert {by_id[r["id"]]: r["waits_on"] for r in tool_rows if r["id"] in by_id} == _EXPECTED_WAITS_ON
+    shown = json.loads(kt._handle_show({"task_id": ids["stop-rule"]}))["task"]
+    assert (shown["block_kind"], shown["waits_on"]) == ("stop-rule", "stop-rule")
