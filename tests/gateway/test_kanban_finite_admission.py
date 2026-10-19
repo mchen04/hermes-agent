@@ -299,3 +299,64 @@ def test_a_client_cannot_mint_the_kanban_card_marker(kanban_owner):
             await owner.close()
 
     asyncio.run(scenario())
+
+
+# LOCAL-PATCH kanban-worker-wake-delta: the owner submits a respawned card's wake delta as its text.
+def _respawn(params):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_connect import connect
+
+    with closing(connect(board=params["board"])) as conn:
+        kb.block_task(conn, params["task_id"], reason="May I merge PR #7?", kind="needs_input",
+                      expected_run_id=params["run_id"])
+        kb.add_comment(conn, params["task_id"], "default", "Michael (verbatim): yes merge it")
+        kb.unblock_task(conn, params["task_id"])
+        task = kb.claim_task(conn, params["task_id"])
+    return dict(params, run_id=task.current_run_id, claim_lock=task.claim_lock), params["run_id"]
+
+
+def test_respawned_card_turn_carries_the_wake_delta_and_a_retry_keeps_it(kanban_owner):
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_connect import connect
+    from gateway.session_kanban import run_task
+    from hermes_state_runtime import list_session_admissions
+
+    owner = kanban_owner(_CONFIG)
+    params, first_run = _respawn(owner.params)
+
+    async def scenario():
+        try:
+            first = await run_task(owner.connection, params)
+            [row] = list_session_admissions(owner.authority.db, session_id=first["session_id"], pending_only=False)
+            text = row["payload"]["text"]
+            assert text.startswith(f"work kanban task {params['task_id']}: Headless work\n")
+            assert f"Your previous run {first_run} ended blocked" in text
+            assert "Michael (verbatim): yes merge it" in text
+            assert "owner_admitted" not in text
+            with closing(connect(board=params["board"])) as conn:
+                kb.add_comment(conn, params["task_id"], "default", "a newer note")
+            retry = await run_task(owner.connection, params)
+            assert retry == first
+            [again] = list_session_admissions(owner.authority.db, session_id=first["session_id"], pending_only=False)
+            assert again["payload"]["text"] == text
+        finally:
+            await owner.close()
+
+    asyncio.run(scenario())
+
+
+def test_first_run_card_turn_keeps_the_plain_wake(kanban_owner):
+    from gateway.session_kanban import run_task
+    from hermes_state_runtime import list_session_admissions
+
+    owner = kanban_owner(_CONFIG)
+
+    async def scenario():
+        try:
+            first = await run_task(owner.connection, owner.params)
+            [row] = list_session_admissions(owner.authority.db, session_id=first["session_id"], pending_only=False)
+            assert row["payload"]["text"] == f"work kanban task {owner.params['task_id']}"
+        finally:
+            await owner.close()
+
+    asyncio.run(scenario())

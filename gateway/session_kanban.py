@@ -138,7 +138,13 @@ async def run_task(connection, params):
     from hermes_state_runtime import find_session_admission
     committed = None if not saved else await asyncio.to_thread(find_session_admission, authority.db,
         principal_id=connection.actor.subject, session_id=ref.session_id, request_id=request_id)
-    payload: dict = {'text': f'work kanban task {params["task_id"]}'}
+    # LOCAL-PATCH kanban-worker-wake-delta: a respawned card's first message says what changed since
+    # its previous run. A retry resubmits the committed text, so its digest still matches.
+    text = committed['payload'].get('text') if committed is not None else None
+    if not isinstance(text, str):
+        from hermes_cli.kanban_worker_wake import worker_wake_text
+        text = await asyncio.to_thread(worker_wake_text, context['db'], params['task_id'])
+    payload: dict = {'text': text}
     if committed is None or 'finite' in committed['payload']:
         payload['finite'] = True
     # The dispatcher's trusted producer marker (#134889 KB-8): nobody waits on a card attempt, so one
