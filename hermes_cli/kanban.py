@@ -1023,13 +1023,21 @@ def _cmd_unblock(args: argparse.Namespace) -> int:
     ids, rc = _require_ids(args)
     if rc:
         return rc
+    from hermes_cli import kanban_unblock_outcome as kuo
+
     reason = _stripped_or_none(getattr(args, "reason", None))
     author = _profile_author() if reason else None
     suffix = f": {reason}" if reason else ""
+    wait = getattr(args, "wait", None)
+    wait = kuo.unblock_wait_seconds() if wait is None else max(0.0, float(wait))
     with kbc.connect_closing() as conn:
         op = _commented(conn, reason, author, "UNBLOCK", lambda tid: kb.unblock_task(conn, tid))
-        return _bulk_apply(ids, op, lambda tid: f"Unblocked {tid}{suffix}",
-                           lambda tid: f"cannot unblock {tid} (not blocked/scheduled?)")
+
+        def ok_msg(tid: str) -> str:
+            outcome = kuo.unblock_outcome(conn, tid, since_event_id=kuo.last_event_id(conn, tid), wait_seconds=wait)
+            return f"Unblocked {tid}{suffix}\n  dispatcher: {kuo.describe(outcome)}"
+
+        return _bulk_apply(ids, op, ok_msg, lambda tid: f"cannot unblock {tid} (not blocked/scheduled?)")
 
 
 def _cmd_request_review(args: argparse.Namespace) -> int:

@@ -1259,9 +1259,14 @@ def _handle_unblock(args: dict, **kw) -> str:
     _check(tid, "task_id is required")
     tid = str(tid)
     _enforce_worker_task_ownership(tid)
+    from hermes_cli import kanban_unblock_outcome as kuo
+
     with _board(args.get("board")) as (kb, conn):
         _check(kb.unblock_task(conn, tid), f"could not unblock {tid} (not blocked or unknown)")
-        return _ok(task_id=tid, **_fields(kb.get_task(conn, tid), ("status",)))
+        dispatch = kuo.unblock_outcome(conn, tid, since_event_id=kuo.last_event_id(conn, tid),
+                                       wait_seconds=kuo.unblock_wait_seconds(), board=args.get("board"))
+        return _ok(task_id=tid, **_fields(kb.get_task(conn, tid), ("status",)),
+                   worker_spawned=dispatch["worker_spawned"], dispatch=dispatch, dispatch_text=kuo.describe(dispatch))
 
 
 @_kanban_handler("kanban_link")
