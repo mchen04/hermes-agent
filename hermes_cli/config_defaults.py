@@ -1971,6 +1971,7 @@ DEFAULT_CONFIG = {
         # The exit review runs when the session made at least this many tool calls besides
         # kanban_* board calls, or when the normal review nudge came due during the session.
         "worker_review_min_tool_calls": 3,
+        "unblock_wait_seconds": 0,
     },
     # Bot Mode cross-connection relay (tools/bot_relay.py): envelopes queued by message_agent for
     # agents on other connections wait in an on-disk outbox until the Desktop drains them.
