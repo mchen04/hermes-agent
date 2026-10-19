@@ -1972,6 +1972,13 @@ DEFAULT_CONFIG = {
         # kanban_* board calls, or when the normal review nudge came due during the session.
         "worker_review_min_tool_calls": 3,
         "unblock_wait_seconds": 0,
+        "worker_wake": {
+            "enabled": True,
+            "brief_chars": 6000,
+            "handoff_chars": 1500,
+            "item_chars": 400,
+            "max_items": 20,
+        },
         "wake": {
             "reason_chars": 300,
             "result_chars": 500,
