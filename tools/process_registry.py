@@ -39,6 +39,7 @@ from tools.process_registry_output_log import ProcessOutputLogMixin, open_output
 from tools.process_registry_termination import ProcessTerminationMixin
 from tools.process_registry_results import load_completed_results, save_completed_result
 from tools.process_registry_env_log import log_delta_command
+from tools.process_command_echo import command_echo_limit, compact_command
 from tools.process_registry_wsl import _is_wsl_launcher_command
 
 logger = logging.getLogger(__name__)
@@ -2733,19 +2734,20 @@ def _handle_process(args, **kw):
     action = args.get("action", "")
     # Coerce to string — some models send session_id as an integer
     session_id = str(args.get("session_id", "")) if args.get("session_id") is not None else ""
+    limit = command_echo_limit()
     if action == "list":
-        return json.dumps(_list_processes(kw.get("task_id")), ensure_ascii=False)
+        return json.dumps(compact_command(_list_processes(kw.get("task_id")), limit), ensure_ascii=False)
     if action == "handoff":
         if not session_id:
             return tool_error("session_id is required for handoff")
-        return json.dumps(_handoff_process(session_id, args, kw.get("task_id")), ensure_ascii=False)
+        return json.dumps(compact_command(_handoff_process(session_id, args, kw.get("task_id")), limit), ensure_ascii=False)
     if action in _SESSION_ACTIONS:
         if not session_id:
             return tool_error(f"session_id is required for {action}")
         handler, redact = _SESSION_ACTIONS[action]
         from tools.process_registry_wait_policy import apply_wait_poll_policy
         result = apply_wait_poll_policy(action, session_id, handler(session_id, args))
-        return json.dumps(_redact_process_result(result) if redact else result, ensure_ascii=False)
+        return json.dumps(compact_command(_redact_process_result(result) if redact else result, limit), ensure_ascii=False)
     return tool_error(f"Unknown process action: {action}. Use: list, poll, log, wait, kill, write, submit, close, handoff")
 
 
