@@ -3529,6 +3529,9 @@ def _finish_compaction_boundary(
     # Arm the effectiveness verdict only after a completed rewrite crosses the
     # boundary so later usage isn't charged to an attempt that changed nothing.
     if compression_made_progress:
+        with _swallow("retiring pre-compaction thinking failed: %s"):
+            from agent.anthropic_thinking_replay import retire_thinking_at_compaction
+            retire_thinking_at_compaction(agent, compressed)
         record_boundary = getattr(type(compressor), "record_completed_compaction", None)
         if callable(record_boundary):
             record_boundary(
