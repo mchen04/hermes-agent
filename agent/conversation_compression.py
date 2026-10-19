@@ -3466,6 +3466,9 @@ def _finish_compaction_boundary(
     # Arm the effectiveness verdict only after a completed rewrite crosses the
     # boundary so later usage isn't charged to an attempt that changed nothing.
     if compression_made_progress:
+        if callable(note_landing := getattr(compressor, "note_landing_messages", None)):
+            with _swallow("compaction landing note failed: %s"):
+                note_landing(compressed)
         record_boundary = getattr(type(compressor), "record_completed_compaction", None)
         if callable(record_boundary):
             record_boundary(
@@ -3825,6 +3828,9 @@ def _run_summary_phase(
                 # compression flush skips it; run_agent marker sync realigns _session_messages.
                 agent._persist_user_message_idx = len(messages)
         memory_context = _pre_compress_memory_context(agent, messages, checkpoint_required)
+        with _swallow("compaction landing estimate failed: %s"):
+            from agent.context_compressor_landing import prime_landing_estimate
+            prime_landing_estimate(agent, messages)
         compress_fn, compress_kwargs = _resolve_compress_call(
             agent, approx_tokens=approx_tokens, focus_topic=focus_topic, force=force, memory_context=memory_context,
             bypass_cooldown=bypass_cooldown,

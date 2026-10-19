@@ -613,6 +613,9 @@ DEFAULT_CONFIG = {
         # summary_language (LOCAL-PATCH compression-summary-facts): write compaction summaries in
         # this language (e.g. "English") whatever the turns use. "" = follow the user's language.
         "summary_language": "",
+        "post_compaction_target_tokens": 0,
+        "post_compaction_target_ratio": 0.5,
+        "summary_max_chars": 0,
         # tail_mode: "lean" = clamped 2.5%-of-window tail (10K floor / 25K cap) plus chunked
         # digests, anchor index, verbatim user messages and session_search pointers in the summary
         # (~3x fewer retained tokens; a few extra summarizer calls at the boundary). "legacy" =
