@@ -73,7 +73,9 @@ def _fmt_task_line(t: kb.Task) -> str:
     icon = _STATUS_ICONS.get(t.status, "?")
     assignee = t.assignee or "(unassigned)"
     tenant = f" [{t.tenant}]" if t.tenant else ""
-    return f"{icon} {t.id}  {t.status:8s}  {assignee:20s}{tenant}  {t.title}"
+    waits_on = kb.task_waits_on(t)
+    waits = f"  (waits on {waits_on})" if waits_on else ""
+    return f"{icon} {t.id}  {t.status:8s}  {assignee:20s}{tenant}  {t.title}{waits}"
 
 
 def _obj_dict(obj: Any, fields: tuple[str, ...]) -> dict[str, Any]:
@@ -83,4 +85,6 @@ def _obj_dict(obj: Any, fields: tuple[str, ...]) -> dict[str, Any]:
 def _task_to_dict(t: kb.Task) -> dict[str, Any]:
     d = _obj_dict(t, _TASK_DICT_FIELDS)
     d["skills"] = list(t.skills) if t.skills else []
+    d["block_kind"] = t.block_kind
+    d["waits_on"] = kb.task_waits_on(t)
     return d

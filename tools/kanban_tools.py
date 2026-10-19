@@ -435,13 +435,14 @@ def _task_summary_dict(kb, conn, task) -> dict[str, Any]:
     parents = kb.parent_ids(conn, task.id)
     children = kb.child_ids(conn, task.id)
     return {
-        **_fields(task, _TASK_SUMMARY_FIELDS), "parents": parents, "children": children,
+        **_fields(task, _TASK_SUMMARY_FIELDS), "block_kind": task.block_kind,
+        "waits_on": kb.task_waits_on(task), "parents": parents, "children": children,
         "parent_count": len(parents), "child_count": len(children)}
 
 
 # --- Goal-mode judge gate ---
 
-_GOAL_MODE_BLOCK_ALLOWED_KINDS = frozenset({"dependency", "needs_input"})
+_GOAL_MODE_BLOCK_ALLOWED_KINDS = frozenset({"dependency", "needs_input", "capacity", "stop-rule"})
 
 
 def _goal_judge_available() -> bool:

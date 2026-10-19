@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
+from hermes_cli.kanban_block_kinds import BLOCK_KINDS_WITHOUT_LOOP_COUNT, VALID_BLOCK_KINDS, task_waits_on
 from hermes_cli.kanban_workflow import DEFAULT_STATUSES as VALID_STATUSES
 from toolsets import get_toolset_names
 
@@ -105,9 +106,6 @@ def _git_out(cwd: Path, *args: str, timeout: int = 30) -> Optional[str]:
 # --- Constants ---
 
 VALID_INITIAL_STATUSES = {"running", "blocked"}
-
-# Typed block reasons (routing in ``_route_block``); ``None`` = legacy un-typed.
-VALID_BLOCK_KINDS = {"dependency", "needs_input", "capability", "transient"}
 
 # Same-reason block -> unblock -> re-block cycles before routing to ``triage``.
 # Counts unblock recurrences, NOT dispatcher failures (``DEFAULT_FAILURE_LIMIT``).
@@ -3189,7 +3187,7 @@ def block_task(
         new_status, event_kind, set_sql, params, payload = _route_block(
             kind, reason, source_status, prev_kind=_row_get(cur_row, "block_kind"),
             prev_recurrences=int(_row_get(cur_row, "block_recurrences") or 0),
-            waits_on_person=requested_kind == "needs_input",
+            waits_on_person=requested_kind in BLOCK_KINDS_WITHOUT_LOOP_COUNT,
         )
         if rekind_reason:
             payload["requested_kind"] = requested_kind

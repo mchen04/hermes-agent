@@ -55,7 +55,7 @@ def diagnostic_event(ev) -> bool:
     if ev.kind in {"crashed", "timed_out", "gave_up"}:
         return True
     if ev.kind in {"blocked", "block_loop_detected"}:
-        return (ev.payload or {}).get("kind") != "needs_input"
+        return (ev.payload or {}).get("kind") not in {"needs_input", "stop-rule"}
     return ev.kind == "status" and (ev.payload or {}).get("status") in {"blocked", "triage"}
 # Consecutive send failures (adapter raised OR reported SendResult(success=False))
 # before a sub is dropped as a dead chat. 12 ≈ 60s at the 5s cadence: a transient
