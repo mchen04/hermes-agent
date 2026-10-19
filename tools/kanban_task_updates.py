@@ -3,8 +3,8 @@
 _TASK_FIELDS = tuple(
     "id title body assignee status tenant priority workspace_kind workspace_path created_by "
     "created_at started_at completed_at result current_run_id model_override "
-    "provider_override completion_contract last_failure_error".split())
-_STATUS_FIELDS = tuple("id title assignee status current_run_id result last_failure_error".split())
+    "provider_override completion_contract last_failure_error block_kind".split())
+_STATUS_FIELDS = tuple("id title assignee status current_run_id result last_failure_error block_kind".split())
 _RUN_FIELDS = tuple("id profile status outcome summary error metadata started_at ended_at".split())
 _COMMENT_FIELDS = ("id", "author", "body", "created_at")
 _EVENT_FIELDS = ("id", "kind", "payload", "created_at", "run_id")
@@ -83,7 +83,8 @@ def build_task_read(kb, conn, task, *, cursor=None, include_worker_context=True)
     full_task = cursor is None or any(event.kind in {"edited", "specified"} for event in events)
     result = {
         "cursor": current,
-        "task": _fields(task, _TASK_FIELDS if full_task else _STATUS_FIELDS),
+        "task": {**_fields(task, _TASK_FIELDS if full_task else _STATUS_FIELDS),
+                 "waits_on": kb.task_waits_on(task)},
         "parents": kb.parent_ids(conn, task.id),
         "unsatisfied_parents": [{"id": tid, "status": status}
                                 for tid, status in kb.unsatisfied_parents(conn, task.id)],
