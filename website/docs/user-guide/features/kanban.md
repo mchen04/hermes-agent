@@ -361,6 +361,18 @@ hermes kanban stats
 
 When the dispatcher picks up `t_abcd` and spawns the `researcher` profile, the very first thing that worker's model does is call `kanban_show()` to read its task. It doesn't run `hermes kanban show t_abcd`.
 
+When the dispatcher respawns a card that already ran (an unblock, a crash retry, a re-queue), the worker's first message is not just `work kanban task t_abcd`: it carries the card title, the brief (the card body, when at most `kanban.worker_wake.brief_chars`), the previous run's outcome and handoff (`handoff_chars`), every comment and event since that run ended (newest `max_items`, each up to `item_chars`), and a `Cursor`. `kanban_show(cursor=...)` with that cursor returns only what happened after the message; `kanban_show()` without a cursor still returns the full card. Set `kanban.worker_wake.enabled: false` to send the plain message.
+
+```yaml
+kanban:
+  worker_wake:
+    enabled: true
+    brief_chars: 6000
+    handoff_chars: 1500
+    item_chars: 400
+    max_items: 20
+```
+
 ### Gateway-embedded dispatcher (default)
 
 The dispatcher runs inside the gateway process. Nothing to install, no
