@@ -1542,7 +1542,15 @@ def _parse_compression_config(agent, _agent_cfg) -> CompressionSettings:
     # Opt-in idle compaction: compact up front when a session resumes after this many
     # seconds idle (0 = disabled). Consumed by build_turn_context().
     idle_compact_after_seconds = max(0, int(cfg.get("idle_compact_after_seconds", 0)))
+    target_tokens = max(0, _parse_config_int(cfg.get("post_compaction_target_tokens", 0) or 0, 0))
+    try:
+        landing_ratio = float(cfg.get("post_compaction_target_ratio", 0.5) or 0)
+    except (TypeError, ValueError):
+        landing_ratio = 0.5
     return CompressionSettings(
+        post_compaction_target_tokens=target_tokens,
+        post_compaction_target_ratio=landing_ratio if 0 <= landing_ratio < 1 else 0.5,
+        summary_max_chars=max(0, _parse_config_int(cfg.get("summary_max_chars", 0) or 0, 0)),
         threshold=threshold,
         autoraise_notice_enabled=autoraise_notice_enabled,
         enabled=_cfg_flag(cfg, "enabled", True),
@@ -2022,6 +2030,9 @@ def _build_context_engine(agent, _agent_cfg, cs, _custom_providers, _effective_c
         ("_micro_compact_enabled", cs.micro_compact),
         ("_micro_compact_every_n_turns", cs.micro_compact_every_n_turns),
         ("_micro_compact_defrag_threshold_tokens", cs.micro_compact_defrag_tokens),
+        ("post_compaction_target_tokens", cs.post_compaction_target_tokens),
+        ("post_compaction_target_ratio", cs.post_compaction_target_ratio),
+        ("summary_max_chars", cs.summary_max_chars),
     ):
         if hasattr(_cc, _attr):
             setattr(_cc, _attr, _value)
