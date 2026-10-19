@@ -1980,6 +1980,13 @@ DEFAULT_CONFIG = {
         # activity for this many days so stale rows aren't scanned forever. 0 = off.
         "done_sub_retention_days": 30,
         "unblock_wait_seconds": 0,
+        "worker_wake": {
+            "enabled": True,
+            "brief_chars": 6000,
+            "handoff_chars": 1500,
+            "item_chars": 400,
+            "max_items": 20,
+        },
         "wake": {
             "reason_chars": 300,
             "result_chars": 500,
