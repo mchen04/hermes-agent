@@ -10,6 +10,8 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import re
+import sqlite3
+import time
 from functools import partial
 from pathlib import Path
 import weakref
@@ -17,6 +19,7 @@ from typing import Any, Callable, Optional
 
 from agent.i18n import t
 
+from gateway import kanban_wake_contract as wake_contract
 from gateway.kanban_watchers_common import _list_boards, _to_thread_process_service, logger
 from gateway.wake import session_owned_by_profile
 
@@ -73,6 +76,15 @@ def diagnostic_event(ev) -> bool:
 # every 5 seconds forever. A genuinely dead chat still drops, just ~60s later — a fine trade for an
 # unattended gate where a false drop means silent work pileup.
 MAX_SEND_FAILURES = 12
+
+def _wake_settings(runner: Any) -> dict:
+    settings = getattr(runner, "_kanban_wake_settings", None)
+    return settings if isinstance(settings, dict) else wake_contract.wake_settings()
+
+
+def _sub_key(sub: dict) -> tuple:
+    return (sub["task_id"], sub["platform"], sub["chat_id"], sub.get("thread_id") or "")
+
 
 _LOCAL_PATH_RE = re.compile(r"(?<![\w:/])(?:/(?:Users|home|private|tmp|var|etc|workspace)/[^\s,;]+|" r"[A-Za-z]:\\[^\s,;]+)")
 
@@ -299,8 +311,18 @@ class _Collector:
         except Exception as _gc_exc:
             logger.debug("kanban notifier: stale-sub GC failed for board %s: %s", slug, _gc_exc)
 
+    def _wake_held(self, sub: dict) -> bool:
+        if (sub.get("delivery_mode") or "notify") not in ("notify+wake", "wake"):
+            return False
+        window = float(_wake_settings(self.runner).get("merge_window_seconds") or 0)
+        last_wakes = getattr(self.runner, "_kanban_last_wake", None)
+        last = last_wakes.get(_sub_key(sub)) if isinstance(last_wakes, dict) else None
+        return bool(window and last is not None and time.monotonic() - last < window)
+
     def _claim_for_sub(self, conn: Any, slug: str, sub: dict) -> Optional[dict]:
         """Claim one subscription's unseen events; None when skipped or nothing new."""
+        if self._wake_held(sub):
+            return None
         owner_profile = sub.get("notifier_profile") or None
         platform = (sub.get("platform") or "").lower()
         if platform not in self.active_platforms:
@@ -320,7 +342,13 @@ class _Collector:
         task = self.kb.get_task(conn, sub["task_id"])
         logger.debug("kanban notifier: claimed %d event(s) for %s on board %s cursor %s→%s",
                      len(events), sub["task_id"], slug, old_cursor, cursor)
-        return {"sub": sub, "old_cursor": old_cursor, "cursor": cursor, "events": events, "task": task, "board": slug}
+        try:
+            context = wake_contract.collect_context(conn, sub["task_id"], old_cursor, cursor, events)
+        except (sqlite3.Error, KeyError, TypeError, ValueError):
+            logger.warning("kanban notifier: wake context for %s failed", sub["task_id"], exc_info=True)
+            context = {}
+        return {"sub": sub, "old_cursor": old_cursor, "cursor": cursor, "events": events, "task": task,
+                "board": slug, "context": context}
 
     def collect_board(self, slug: str) -> None:
         """Claim events on one board, appending delivery dicts to ``deliveries``."""
@@ -384,19 +412,11 @@ def _clip(ev: Any, key: str, msg_key: str, limit: int) -> str:
 _NL = "\n{}"
 
 
-def _first_line(text: str, limit: int) -> str:
-    lines = text.strip().splitlines()
-    return lines[0][:limit] if lines else text[:limit]
-
-
 def _fmt_completed(ev, n) -> tuple:
     # Prefer the run summary from the event payload; fall back to task.result for legacy rows.
-    wake_handoff = None
-    payload_summary = _payload(ev, "summary")
-    if payload_summary:
-        wake_handoff = _first_line(str(payload_summary), 200)
-    elif n.task and n.task.result:
-        wake_handoff = _first_line(n.task.result, 160)
+    wake_handoff = wake_contract.result_summary(ev, n.context, n.settings)
+    if wake_handoff is None and n.task and n.task.result:
+        wake_handoff = wake_contract.clip(n.task.result, int(n.settings.get("result_chars") or 500))
     handoff = f"\n{wake_handoff}" if wake_handoff is not None else ""
     return t("gateway.kanban.ping.completed", head=n.head, title=n.title, handoff=handoff), wake_handoff, None
 
@@ -404,13 +424,8 @@ def _fmt_completed(ev, n) -> tuple:
 def _fmt_review_requested(ev, n) -> tuple:
     # Implementation done; task moved to the review lane. Carry the handoff
     # into the wake turn like ``completed`` so the reviewer needn't re-read the board.
-    handoff = ""
-    wake_handoff = None
-    summary = _payload(ev, "summary")
-    if summary:
-        summary = str(summary)
-        handoff = f"\n{summary[:200]}"
-        wake_handoff = _first_line(summary, 200)
+    wake_handoff = wake_contract.result_summary(ev, n.context, n.settings)
+    handoff = f"\n{wake_handoff}" if wake_handoff else ""
     return t("gateway.kanban.ping.review_requested", head=n.head, title=n.title, handoff=handoff), wake_handoff, None
 
 
@@ -513,7 +528,9 @@ class _KanbanNotification:
         tag = t("gateway.kanban.ping.assignee_tag", assignee=task.assignee) if task and task.assignee else ""
         self.head = t("gateway.kanban.ping.head", board_tag=self.board_tag, assignee_tag=tag, task_id=self.task_id)
         # The wake self-post path needs the key even when every event was skipped.
-        self.sub_key = (sub["task_id"], sub["platform"], sub["chat_id"], sub.get("thread_id") or "")
+        self.sub_key = _sub_key(sub)
+        self.settings = _wake_settings(runner)
+        self.context = d.get("context") or {}
         mode = sub.get("delivery_mode") or "notify"
         self.wake_agent = mode in ("notify+wake", "wake")
         self.send_passive = mode != "wake"
@@ -599,7 +616,24 @@ class _KanbanNotification:
             synth += "\n" + t("gateway.kanban.wake.handoff", summary=self.wake_handoff)
         if self.wake_review_detail:
             synth += "\n" + t("gateway.kanban.wake.review_detail", reason=self.wake_review_detail)
+        woken = [ev for ev in self.d["events"] if ev.kind in self.wake_kinds]
+        synth += "".join("\n" + line for line in wake_contract.contract_lines(woken, self.context, settings=self.settings))
         self.synth = synth + "\n\n" + t("gateway.kanban.wake.guidance")
+
+    def wake_worthy(self, events: list) -> list:
+        """Events minus wakes the subscriber caused itself and crash replays delivered late."""
+        if not self.wake_agent:
+            return events
+        now, kept = time.time(), []
+        subscriber = wake_contract.subscriber_chat(self.sub)
+        for ev in events:
+            reason = wake_contract.drop_reason(ev, now=now, settings=self.settings,
+                                               subscriber=subscriber) if ev.kind in _WAKE_KINDS else None
+            if reason:
+                logger.info("kanban notifier: no wake for %s event %s on %s (%s)", ev.kind, ev.id, self.task_id, reason)
+            else:
+                kept.append(ev)
+        return kept
 
     def _log_woke(self) -> None:
         logger.info("kanban notifier: woke agent for %s on %s/%s profile=%s events=%s",
@@ -807,6 +841,7 @@ class _KanbanNotification:
             ])
             wake_payloads = []
             for events in wake_groups:
+                events = self.wake_worthy(events)
                 if not events:
                     continue
                 self.d = {**self.d, "events": events}
@@ -826,6 +861,7 @@ class _KanbanNotification:
                 for self.synth, self.wake_diagnostic, self.wake_kinds in wake_payloads:
                     await self.wake()
                 self.clear_failures()
+                self.runner.__dict__.setdefault("_kanban_last_wake", {})[self.sub_key] = time.monotonic()
             except WakeNotAccepted:
                 # Startup / full queue is not a dead destination. Keep the durable
                 # subscription alive regardless of how long admission takes.
