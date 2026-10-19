@@ -323,6 +323,7 @@ DEFAULT_CONFIG = {
         # disables.
         "oneshot_completion_wait_seconds": 600.0,
         "process_wait_auto_notify": True,  # 2 unchanged wait/poll -> notify_on_complete + stop; False = old polling
+        "process_result_command_chars": 200,
         # Env vars passed into sandboxed terminal/execute_code (plus skill-declared required_environment_variables).
         "env_passthrough": [],
         "client_env_passthrough": [],  # Extra non-secret toolchain names a CLI/TUI client sends for its tools
