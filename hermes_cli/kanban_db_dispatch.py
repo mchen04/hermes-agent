@@ -1776,7 +1776,7 @@ def dispatch_task(
     conn: sqlite3.Connection, task_id: str, *, spawn_fn=None, ttl_seconds: Optional[int] = None,
     max_spawn: Optional[int] = None, max_in_progress: Optional[int] = None,
     max_in_progress_per_profile: Optional[int] = None,
-    failure_limit: int = DEFAULT_FAILURE_LIMIT, board: Optional[str] = None,
+    failure_limit: int = DEFAULT_FAILURE_LIMIT, board: Optional[str] = None, dry_run: bool = False,
 ) -> DispatchResult:
     """Spawn exactly one named ready card through the normal dispatch path.
 
@@ -1814,12 +1814,14 @@ def dispatch_task(
         if budget is not None and budget <= 0:
             return result
         _dispatch_lane_task(
-            conn, row, row["assignee"], result, lane="ready", dry_run=False,
+            conn, row, row["assignee"], result, lane="ready", dry_run=dry_run,
             ttl_seconds=ttl_seconds, board=board, failure_limit=failure_limit, spawn_fn=spawn_fn,
             per_profile_cap=per_profile_cap, per_profile_running=running,
         )
         return result
 
+    if dry_run:
+        return _tick()
     with _kbc._dispatch_tick_lock(_kb.kanban_db_path(board=board)) as held:
         return _tick() if held else DispatchResult(skipped_locked=True)
 

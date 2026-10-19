@@ -554,7 +554,11 @@ KANBAN_UNBLOCK_SCHEMA = _schema(
     "kanban_unblock",
     (
         "Unblock a Kanban task. It moves to ready when all parents are done, "
-        "or todo while any parent remains open. Orchestrator-only — only "
+        "or todo while any parent remains open. The result's ``dispatch`` says "
+        "what the dispatcher does with it (spawned, respawn_guarded with the "
+        "reason, capped, waits_on_parents ...) and ``worker_spawned`` says "
+        "whether a worker actually started; a ready card is not running until "
+        "it does. Orchestrator-only — only "
         "profiles with the kanban toolset can unblock routed work; "
         "dispatcher-spawned task workers never see this tool."
     ),

@@ -332,8 +332,11 @@ _SPECS = [
     ], help="Park one or more tasks in Scheduled (waiting on time, not human input)"),
     _cmd("unblock", [
         _reason("Optional reason/note — recorded as a comment before unblocking. Quote multi-word reasons."),
+        _arg("--wait", type=float, default=None,
+             help="Seconds to wait for the dispatcher to spawn the worker (default kanban.unblock_wait_seconds)"),
         _TASK_IDS,
-    ], help="Return blocked/scheduled tasks to ready, or todo while parents remain open"),
+    ], help="Return blocked/scheduled tasks to ready, or todo while parents remain open; "
+            "prints what the dispatcher did"),
     _cmd("request-review", [
         _TASK_ID,
         _arg("--summary", help="What was implemented and how it was verified — shown to the reviewer."),
