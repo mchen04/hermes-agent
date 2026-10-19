@@ -30,6 +30,10 @@ from agent.auxiliary_client import (
     extract_content_or_reasoning,
 )
 from agent.context_engine import ContextEngine, sanitize_memory_context
+from agent.context_compressor_landing import (
+    ANCHOR_SHARE, LLM_BODY_SHARE, USER_WORDS_SHARE, LandingMixin, compact_template, compact_update_instruction,
+    human_user_words,
+)
 from agent.context_compressor_prellm import PreLlmSkipMixin
 from agent.context_compressor_window import CompactionWindowMixin
 from agent.context_compressor_skills import bound_skill_head_end, bound_skill_names
@@ -1003,7 +1007,7 @@ def _typed_user_text(content: str) -> str:
     return (describe_skill_invocation(content, separator=" ") or "") if skills_loaded_by_scaffold(content) else content
 
 
-def _build_verbatim_user_section(turns: list[dict[str, Any]]) -> str:
+def _build_verbatim_user_section(turns: list[dict[str, Any]], budget_chars: int = _LEAN_USER_MESSAGES_BUDGET_CHARS) -> str:
     """Compacted region's REAL user messages verbatim, newest-first under a char budget (straddler truncated); "" if none."""
     collected: list[str] = []
     used = 0
@@ -1013,10 +1017,13 @@ def _build_verbatim_user_section(turns: list[dict[str, Any]]) -> str:
         content = _typed_user_text(_content_text_for_contains(msg.get("content")))
         if _synthetic_user_row(content):
             continue
-        remaining = _LEAN_USER_MESSAGES_BUDGET_CHARS - used
+        words = human_user_words(msg, steer_kind=STEER_DISPLAY_KIND)
+        if words is None:
+            continue
+        remaining = budget_chars - used
         if remaining <= 0:
             break
-        text = content.strip()
+        text = words
         if len(text) > remaining and remaining <= ELISION_MARKER_MAX_LEN:
             break  # no room for marker + content: a marker-only quote would overshoot the budget
         text = elide(text, min(_LEAN_USER_MESSAGE_MAX_CHARS, remaining))
@@ -1092,7 +1099,7 @@ _ANCHOR_NOISE = frozenset({
 })
 
 
-def _build_anchor_index(turns: list[dict[str, Any]]) -> str:
+def _build_anchor_index(turns: list[dict[str, Any]], budget_chars: int = _LEAN_ANCHOR_BUDGET_CHARS) -> str:
     """Regex-harvest exact identifiers from the compacted region (LLM-free); per-category caps, most-frequent first."""
     contents = (_typed_user_text(m["content"]) if m.get("role") == "user" and isinstance(m.get("content"), str) else m.get("content") for m in turns)
     text = "\n".join(c for c in contents if isinstance(c, str) and c)
@@ -1113,7 +1120,7 @@ def _build_anchor_index(turns: list[dict[str, Any]]) -> str:
             continue
         ranked = sorted(counts, key=lambda v: (-counts[v], -last_seen[v]))[:cap]
         line = f"{label}: " + ", ".join(f"{v}(x{counts[v]})" if counts[v] > 1 else v for v in ranked)
-        if used + len(line) > _LEAN_ANCHOR_BUDGET_CHARS:
+        if used + len(line) > budget_chars:
             break
         sections.append(line)
         used += len(line)
@@ -2258,6 +2265,14 @@ def unanswered_user_turn_ids(messages: list[dict[str, Any]], is_synthetic) -> se
     return user_turn_reply_status(messages, messages, is_synthetic)[0]
 
 
+_CAPPED_SUMMARY_REQUIRED = (HISTORICAL_TASK_HEADING, _PRUNED_SKILLS_SECTION_HEADING, _LEAN_RECOVERY_HEADING)
+_CAPPED_SUMMARY_PRIORITY = (
+    "## Constraints & Preferences", "## Key Decisions", _LEAN_USER_MESSAGES_HEADING, "## Goal", "## Active State",
+    "## Blocked", "## Critical Context", _TOOL_FACTS_HEADING, "## Errors & Fixes", "## Resolved Questions",
+    "## Relevant Files", _LEAN_ANCHOR_HEADING, "## Last Dropped Turns", "## Previous Summary Snapshot",
+)
+_CAPPED_SUMMARY_DROPPED = ("## Completed Actions", _LEAN_SESSION_LOG_HEADING)
+
 _NO_REPLY_LABEL = "[USER — NO REPLY SENT YET]"
 _LATER_REPLY_LABEL = "[USER — ANSWERED IN THE RECENT MESSAGES KEPT AFTER THIS SUMMARY]"
 
@@ -2333,7 +2348,7 @@ Describe agent/tool work only as completed actions, state, or historical work.]"
 
 
 class ContextCompressor(
-    SummaryDispatchMixin, SummaryInputSamplingMixin, PreLlmSkipMixin, CompressionTelemetryMixin, MicroCompactionMixin,
+    LandingMixin, SummaryDispatchMixin, SummaryInputSamplingMixin, PreLlmSkipMixin, CompressionTelemetryMixin, MicroCompactionMixin,
     ProactivePruneMixin, CompactionWindowMixin, ContextEngine,
 ):
     """Default context engine: prune tool results, protect head/tail, summarize the middle
@@ -3094,6 +3109,13 @@ class ContextCompressor(
         self.last_prompt_tokens = usage.get("prompt_tokens", 0)
         self.last_completion_tokens = usage.get("completion_tokens", 0)
         self.last_total_tokens = usage.get("total_tokens", self.last_prompt_tokens + self.last_completion_tokens)
+        if self.awaiting_real_usage_after_compression and self.last_prompt_tokens > 0 and self._landing_messages_rough:
+            self._post_compaction_point = (self.last_prompt_tokens, self._landing_messages_rough)
+            self._landing_messages_rough = 0
+            logger.info(
+                "Compaction landed at %s real prompt tokens (projected ~%s, target ~%s)",
+                f"{self.last_prompt_tokens:,}", f"{self._last_landing_projection:,}", f"{self.landing_target_tokens:,}",
+            )
         self._apply_real_prompt_verdict()
         # Consume the flag once real usage arrives even without prompt_tokens, so it can't stay armed.
         self._verify_compaction_cleared_threshold = self.awaiting_real_usage_after_compression = False
@@ -3778,7 +3800,7 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         # Re-inject AFTER the size cap: markers live at the end, where truncation cuts.
         summary = _reinject_pruned_skill_markers(summary, _pruned_names)
         summary = with_tool_facts_section(summary, latest_tool_facts(turns_to_summarize))
-        return self._augment_summary_lean(summary, turns_to_summarize)
+        return self._fit_summary_cap(self._augment_summary_lean(summary, turns_to_summarize))
 
     def _demote_stale_tail_tools(self, messages: list[dict[str, Any]], tail_start: int) -> list[dict[str, Any]]:
         """Lean mode: demote stale tail tool results to recovery stubs (``demote_stale_tail_tools``)."""
@@ -3793,9 +3815,13 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         """Append deterministic lean-mode sections to a summary; no-op in legacy mode."""
         if getattr(self, "tail_mode", "lean") != "lean":
             return summary
+        cap = getattr(self, "summary_max_chars", 0) or 0
+        anchor_chars = int(cap * ANCHOR_SHARE) if cap > 0 else _LEAN_ANCHOR_BUDGET_CHARS
+        user_chars = int(cap * USER_WORDS_SHARE) if cap > 0 else _LEAN_USER_MESSAGES_BUDGET_CHARS
         for heading, build in (
-            (_LEAN_ANCHOR_HEADING, lambda: _redact_compaction_text(_build_anchor_index(turns_to_summarize))),
-            (_LEAN_USER_MESSAGES_HEADING, lambda: _redact_compaction_text(_build_verbatim_user_section(turns_to_summarize))),
+            (_LEAN_ANCHOR_HEADING, lambda: _redact_compaction_text(_build_anchor_index(turns_to_summarize, anchor_chars))),
+            (_LEAN_USER_MESSAGES_HEADING, lambda: _redact_compaction_text(
+                _build_verbatim_user_section(turns_to_summarize, user_chars))),
             (_LEAN_RECOVERY_HEADING, lambda: _build_recovery_footer(getattr(self, "_session_id", "") or "", len(turns_to_summarize))),
         ):
             if heading not in summary:
@@ -3981,6 +4007,7 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         if has_user_turn is None:
             has_user_turn = self._transcript_has_real_user_turn(turns_to_summarize)
         self._summary_tool_facts = latest_tool_facts(turns_to_summarize)
+        self._summary_typed_text = "\n".join(str(m.get("content") or "") for m in typed_turns)
         messages = self._build_summary_prompt(content_to_summarize, summary_budget, focus_topic, memory_context, has_user_turn)
         messages[1:1] = typed_turns
         try:
@@ -3994,7 +4021,7 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
             summary = _reinject_pruned_skill_markers(summary, _pruned_skill_names)
             summary = self._ground_historical_task_snapshot(summary, turns_to_summarize)
             summary = with_tool_facts_section(summary, self._summary_tool_facts)
-            summary = self._augment_summary_lean(summary, turns_to_summarize)
+            summary = self._fit_summary_cap(self._augment_summary_lean(summary, turns_to_summarize))
             self._validate_summary_user_provenance(summary, has_user_turn)
             # A detached stale attempt must not publish its late summary onto shared compressor state:
             # the fallback already advanced _previous_summary and owns the cooldown/error fields. The
@@ -4058,6 +4085,24 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
         # Lean mode folds the session log into this SAME single request (one aux call).
         _session_log_section = _LEAN_SESSION_LOG_SECTION if getattr(self, "tail_mode", "lean") == "lean" else ""
         _template_sections = self._summary_template_sections(_section, summary_budget, _session_log_section)
+        _cap = getattr(self, "summary_max_chars", 0) or 0
+        _update_instruction = (
+            'Update the summary using this exact structure. PRESERVE all existing information that is still relevant. '
+            'ADD new completed actions to the numbered list (continue numbering). Move items from "In Progress" to '
+            '"Completed Actions" when done. Move answered questions to "Resolved Questions". Update "Active State" to '
+            'reflect current state. Remove information only if it is clearly obsolete. CRITICAL: Update '
+            f'"{HISTORICAL_TASK_HEADING}" to reflect the user\'s most recent unfulfilled input — this includes any '
+            'question, decision request, or discussion turn that the assistant has not yet answered. Only write '
+            '"None" if the last exchange was fully resolved.'
+        )
+        if _cap > 0:
+            _body_chars = int(_cap * LLM_BODY_SHARE)
+            _template_sections = compact_template(
+                _section, HISTORICAL_TASK_HEADING, _body_chars,
+                f"\n[Do not copy [SKILL_PRUNED: ...] markers or a \"{_PRUNED_SKILLS_SECTION_HEADING}\" section; the "
+                "system appends the current list itself.]\n" + self._temporal_anchoring_rule(),
+            )
+            _update_instruction = compact_update_instruction(HISTORICAL_TASK_HEADING, _body_chars)
         if self._previous_summary:
             # Iterative update. Bound the previous summary too: a rehydrated handoff can be huge.
             _bounded_previous_summary = self._bound_summary_input(self._previous_summary)
@@ -4065,7 +4110,7 @@ Summary generation was unavailable, so this is a best-effort deterministic fallb
 
 You are updating a context compaction summary. A previous compaction produced the summary below. New conversation turns have occurred since then and need to be incorporated.
 
-Update the summary using this exact structure. PRESERVE all existing information that is still relevant. ADD new completed actions to the numbered list (continue numbering). Move items from "In Progress" to "Completed Actions" when done. Move answered questions to "Resolved Questions". Update "Active State" to reflect current state. Remove information only if it is clearly obsolete. CRITICAL: Update "{HISTORICAL_TASK_HEADING}" to reflect the user's most recent unfulfilled input — this includes any question, decision request, or discussion turn that the assistant has not yet answered. Only write "None" if the last exchange was fully resolved.
+{_update_instruction}
 
 {_template_sections}"""
             source_material = f"""PREVIOUS SUMMARY:
@@ -4086,18 +4131,19 @@ Use this exact structure:
 
         _facts = getattr(self, "_summary_tool_facts", None) or []
         if _facts:
-            prompt += (
+            instructions += (
                 "\n\nKEY FACTS FROM THE MOST RECENT TOOL RESULTS (verbatim; tool output above may be "
                 "truncated, these lines are not):\n" + "\n".join(_facts) + "\n"
                 "Never contradict them: a PR whose state is MERGED is merged, a nonzero exit code is a "
                 "failure, a test total is the result. Copy each into Critical Context unchanged.")
-        if _NO_REPLY_LABEL in content_to_summarize:
-            prompt += (
+        _labelled = content_to_summarize + getattr(self, "_summary_typed_text", "")
+        if _NO_REPLY_LABEL in _labelled:
+            instructions += (
                 f"\n\nTurns labelled {_NO_REPLY_LABEL} had no assistant reply anywhere in the conversation "
                 f"when this summary was made. Never list them under Resolved Questions; keep them in "
                 f"{HISTORICAL_TASK_HEADING}.")
-        if _LATER_REPLY_LABEL in content_to_summarize:
-            prompt += (
+        if _LATER_REPLY_LABEL in _labelled:
+            instructions += (
                 f"\n\nTurns labelled {_LATER_REPLY_LABEL} were answered in messages kept verbatim after "
                 "this summary. Never call them unanswered, open or pending.")
         # Focus guidance goes last so it takes precedence.
@@ -4464,13 +4510,16 @@ Write only the summary body. Do not include any preamble or prefix."""
         for msg in reversed(messages):
             if msg.get("role") != "user" or not _is_real_user_message(msg):
                 continue
-            text = _redact_compaction_text(_typed_user_text(_content_text_for_contains(msg.get("content"))).strip())
+            words = human_user_words(msg, steer_kind=STEER_DISPLAY_KIND)
+            if words is None:
+                continue
+            text = _redact_compaction_text(words)
             if not text:
                 continue
             if len(text) > _ACTIVE_TASK_MAX_CHARS:
                 # Past the cap, drop a gateway reply quote first so elision cannot keep the quote
                 # and cut the request.
-                text = _redact_compaction_text(_authored_request_text(msg.get("content"))) or text
+                text = _redact_compaction_text(_authored_request_text(words)) or text
             text = re.sub(r"\s+", " ", text)
             # Elide AFTER repr: repr would escape the marker's "Hermes's" and hide a copy from the
             # guard. Authored text within the cap stays whole; a longer request split out of an
@@ -5253,6 +5302,7 @@ Write only the summary body. Do not include any preamble or prefix."""
         blank = self._blank_echo_indices_after(messages, self._find_last_user_message_idx(messages, 0))
         return [m for idx, m in enumerate(messages) if idx not in blank] if blank else messages
 
+
     def _log_compression_start(
         self, display_tokens: int, compress_start: int, compress_end: int, n_turns: int, tail_msgs: int,
     ) -> None:
@@ -5540,9 +5590,6 @@ Write only the summary body. Do not include any preamble or prefix."""
         if prepared:
             compress_end = prepared.compress_end
         turns_to_summarize = messages[compress_start:compress_end]
-        # Lean mode demotes stale tail tool results before summary generation so stubs exist even if it aborts.
-        if getattr(self, "tail_mode", "lean") == "lean":
-            messages = self._demote_stale_tail_tools(messages, compress_end)
         self._live_skill_names = _collect_live_skill_names(
             messages[:compress_start] + messages[compress_end:], getattr(self, "_live_skill_source_text", ""),
         )
@@ -5595,6 +5642,12 @@ Write only the summary body. Do not include any preamble or prefix."""
             )
         # Phase 4: Assemble compressed message list
         compressed = self._assemble_compressed(messages, compress_start, compress_end, scan, summary)
+        if self.landing_target_tokens:
+            self._last_landing_projection = self._landing_tokens(self._messages_rough(compressed))
+            logger.info(
+                "Compaction landing: projected ~%s real tokens after compaction (target ~%s)",
+                f"{self._last_landing_projection:,}", f"{self.landing_target_tokens:,}",
+            )
         return self._finalize_compressed(compressed, canonical_messages, n_messages, spare_pending_images, pruned_count)
 
     def _assemble_compressed(

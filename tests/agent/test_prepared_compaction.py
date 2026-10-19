@@ -678,6 +678,7 @@ def test_turn_that_crosses_the_trigger_splices_the_summary_prepared_during_its_t
     cc = agent.context_compressor
     assert (cc.prepared_compaction is not None) is prepare_ahead
     cc.context_length, cc.threshold_tokens, cc.tail_token_budget = 40960, 20000, 2500
+    cc.post_compaction_target_ratio = 0
     band_floor = int(cc.threshold_tokens * (1 - pc.PREPARE_BAND_RATIO))
 
     summaries, tool_started = [], threading.Event()
