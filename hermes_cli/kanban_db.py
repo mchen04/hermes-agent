@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Iterable, Optional
 
 from hermes_cli.kanban_block_kinds import BLOCK_KINDS_WITHOUT_LOOP_COUNT, VALID_BLOCK_KINDS, task_waits_on
+from hermes_cli.kanban_event_origin import event_origin
 from hermes_cli.kanban_workflow import DEFAULT_STATUSES as VALID_STATUSES
 from toolsets import get_toolset_names
 
@@ -2755,7 +2756,7 @@ def complete_task(
             event_summary = _REVIEW_APPROVED_NOTE
         _append_event(
             conn, task_id, "completed",
-            _completed_event_payload(result, event_summary, verified_cards, metadata),
+            {**_completed_event_payload(result, event_summary, verified_cards, metadata), **event_origin(task_id)},
             run_id=run_id,
         )
     _flag_phantom_prose_refs(conn, task_id, run_id, summary, result, verified_cards)
@@ -3192,7 +3193,7 @@ def block_task(
             if classified != 1:
                 return False
             _append_event(conn, task_id, "blocked", {
-                "kind": kind, "reason": reason, "classified_in_place": True,
+                "kind": kind, "reason": reason, "classified_in_place": True, **event_origin(task_id),
             })
             return True
         source_status = _retry_status_for_run(conn, task_id) if cur_row["status"] == "running" else "ready"
@@ -3232,7 +3233,7 @@ def block_task(
         run_id = _end_or_synthesize_run(
             conn, task_id, outcome="blocked", status="blocked", summary=reason, synthesize=bool(reason),
         )
-        _append_event(conn, task_id, event_kind, payload, run_id=run_id)
+        _append_event(conn, task_id, event_kind, {**payload, **event_origin(task_id)}, run_id=run_id)
         blocked_task = get_task(conn, task_id)
         if kind == "dependency":
             # Historical ordering: the dependency lane fires inside the txn.
@@ -3413,7 +3414,7 @@ def request_review(
             staged = _cleaned_artifact_paths(metadata)
             if staged:
                 payload["artifacts"] = staged
-            _append_event(conn, task_id, "review_requested", payload, run_id=run_id)
+            _append_event(conn, task_id, "review_requested", {**payload, **event_origin(task_id)}, run_id=run_id)
     except Exception:
         if staged_copies:
             _discard_staged_copies(staged_copies, staged_copies[0].parent)
