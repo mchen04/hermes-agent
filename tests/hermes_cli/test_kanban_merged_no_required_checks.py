@@ -134,6 +134,35 @@ def test_other_owners_keep_required_checks_as_a_gate(github, repo, pr_state):
     assert receipt["ok"] is False and receipt["classification"] == "failure" and "detail" not in receipt
 
 
+@pytest.mark.parametrize("pr_state", ["MERGED", "OPEN"])
+def test_mchen04_required_check_on_another_head_stays_refused(mine, pr_state):
+    mine.update(pr_state=pr_state, runs=[{**_run("success"), "head_sha": "b" * 40}])
+    receipt = _mine()
+    assert receipt["ok"] is False and receipt["classification"] == "stale"
+    assert receipt["checks"][0]["classification"] == "stale" and receipt["checks"][0]["head_sha"] == "b" * 40
+    assert "advisory_owner" not in receipt and "another head" in receipt["detail"]
+
+
+def test_mchen04_wrong_head_evidence_wins_over_a_failure(mine):
+    mine.update(required=[*REQUIRED, {"context": "lint", "app": {"databaseId": 1}}],
+                runs=[_run("failure"), {**_run("success"), "id": 10, "name": "lint", "head_sha": "b" * 40}])
+    receipt = _mine()
+    assert receipt["ok"] is False and receipt["classification"] == "stale"
+
+
+def test_mchen04_required_skipped_keeps_its_raw_conclusion(mine):
+    mine["runs"] = [_run("skipped")]
+    receipt = _mine()
+    assert receipt["ok"] is True and receipt["classification"] == "advisory"
+    assert (receipt["checks"][0]["classification"], receipt["checks"][0]["conclusion"]) == ("infra", "skipped")
+
+
+def test_other_owner_wrong_head_required_check_is_unchanged(github):
+    github.update(required=REQUIRED, runs=[{**_run("success"), "head_sha": "b" * 40}])
+    receipt = acceptance.collect_acceptance("acme/repo", PR)
+    assert receipt["ok"] is False and receipt["classification"] == "stale" and "detail" not in receipt
+
+
 def test_completion_boundary_records_the_advisory_receipt(mine, tmp_path, monkeypatch):
     import json
 

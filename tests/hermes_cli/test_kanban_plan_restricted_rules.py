@@ -188,3 +188,29 @@ def test_other_owners_keep_the_gate_with_unchanged_reads(github, repo):
     assert receipt["ok"] is False and receipt["classification"] == "failure"
     assert receipt["detail"] == "PR merged, but a check on its head did not pass."
     assert not any("/pulls/" in r for r in github["reads"])
+
+
+def test_mchen04_check_run_on_another_head_stays_refused(mine):
+    mine["runs"] = [_run("failure"), {**_run("success", sha="b" * 40), "id": 2}]
+    receipt = _mine()
+    assert receipt["ok"] is False and receipt["classification"] == "stale"
+    assert [c["classification"] for c in receipt["checks"]] == ["failure", "stale"]
+    assert "advisory_owner" not in receipt and "another head" in receipt["detail"]
+
+
+def test_mchen04_receipt_keeps_raw_neutral_and_skipped_conclusions(mine):
+    mine["runs"] = [_run("neutral"), {**_run("skipped"), "id": 2}, {**_run("failure"), "id": 3, "name": "check"}]
+    receipt = _mine()
+    assert receipt["ok"] is True and receipt["classification"] == "advisory"
+    assert [(c["classification"], c["conclusion"]) for c in receipt["checks"]] == [
+        ("success", "neutral"), ("success", "skipped"), ("failure", "failure")]
+
+
+def test_other_owner_plan_path_receipts_are_unchanged(github):
+    github["runs"] = [_run("neutral"), {**_run("skipped"), "id": 2}]
+    receipt = acceptance.collect_acceptance("acme/repo", PR)
+    assert receipt["ok"] is True and receipt["classification"] == "success"
+    assert [(c["classification"], c["conclusion"]) for c in receipt["checks"]] == [
+        ("success", "success"), ("success", "success")]
+    github["runs"] = [{**_run("success", sha="b" * 40)}]
+    assert acceptance.collect_acceptance("acme/repo", PR)["classification"] == "stale"

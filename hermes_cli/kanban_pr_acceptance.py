@@ -355,16 +355,17 @@ def _accept_plan_restricted_merge(receipt: dict, repo: str, number: int, sha: st
         if status["context"] not in latest or status["id"] > latest[status["context"]]["id"]:
             latest[status["context"]] = {**status, "sha": sha}
     outcomes = []
+    raw_conclusions = _advisory_owner_claimed(repo)  # LOCAL-PATCH kanban-advisory-checks: as GitHub reported
     for check in [*runs, *latest.values()]:
         is_run = "conclusion" in check
-        outcome = check.get("conclusion") if is_run else check["state"]
+        outcome = raw = check.get("conclusion") if is_run else check["state"]
         if is_run and outcome in {"neutral", "skipped"}:
             outcome = "success"
         classification = _classify(check, sha, outcome, is_run)
         outcomes.append(classification)
         receipt["checks"].append({"name": check.get("name", check.get("context")), "id": check["id"],
             "head_sha": check.get("head_sha", check.get("sha")),
-            "classification": classification, "conclusion": outcome})
+            "classification": classification, "conclusion": raw if raw_conclusions else outcome})
     receipt["required"] = []
     bad = next((x for x in outcomes if x != "success"), None)
     if bad:
@@ -397,9 +398,16 @@ def _advisory_owner_claimed(repo: str) -> bool:
 
 
 def _accept_advisory(receipt: dict, repo: str, number: int, current: dict, *, merged: bool) -> bool:
-    """Accept ``receipt``'s non-passing checks as advisory when the re-read PR ``current`` proves
-    the base repository is exactly the advisory owner's ``repo`` and, for a merged PR, that it
-    merged. Otherwise the receipt is left as the gate decided."""
+    """Accept ``receipt``'s non-passing checks as advisory when every check was read on the PR's
+    head and the re-read PR ``current`` proves the base repository is exactly the advisory
+    owner's ``repo`` and, for a merged PR, that it merged. Evidence from another head refuses as
+    ``stale``; any other mismatch leaves the receipt as the gate decided."""
+    wrong_head = [c["name"] for c in receipt["checks"] if c.get("head_sha") != receipt["head_sha"]]
+    if wrong_head:
+        receipt.update(classification="stale", detail=(
+            f"{receipt.get('detail', '')} Checks stayed a gate: {', '.join(wrong_head[:5])} reported another head "
+            f"than the PR's {receipt['head_sha']}; retry.").strip())
+        return False
     base = (current.get("base") or {}).get("repo") or {}
     full_name = base.get("full_name")
     if ((base.get("owner") or {}).get("login") != _ADVISORY_CHECK_OWNER or not isinstance(full_name, str)
