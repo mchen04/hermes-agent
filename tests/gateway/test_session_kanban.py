@@ -73,6 +73,7 @@ def test_real_dispatcher_lifecycle(tmp_path, mode):
         return
     assert receipt['task_status'] == 'done' and receipt['source'] == 'kanban'
     assert receipt['tools'] and receipt['task_context'] and receipt['skill_context'] and receipt['hook_effect']
+    assert receipt['terminal_identity']  # the bound worker's own terminal carries its card and run, no claim lock
     assert receipt['admissions'] == 1 and receipt['retry_same_session']
     assert receipt['goal_continuation'] and receipt['stable_prefix']
     print(json.dumps(receipt))

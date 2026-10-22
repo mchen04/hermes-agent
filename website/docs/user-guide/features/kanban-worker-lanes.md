@@ -59,6 +59,14 @@ The fence is scoped to the lineage's board root (the marker's value is that root
 dispatcher-pinned `HERMES_KANBAN_DB`): a descendant that works against a different Kanban
 home — a test or reproduction under a scratch `HERMES_HOME` — gets a normal read-write board.
 
+A managed worker's own terminal commands (foreground and background) and `execute_code`
+cells, and the programs they start, still carry its `HERMES_KANBAN_TASK` and
+`HERMES_KANBAN_RUN_ID` as a label, so a worker script can name its own card
+(`wt/$HERMES_KANBAN_TASK`, a supervisor's own-card check). The label comes from the
+interpreter's verified claim binding, never from an environment variable, and only while that
+claim is live. It is not ownership: the claim lock never travels and the fence stays set.
+Delegate children, cron runs and unbound (front-door) sessions get no label.
+
 The dispatcher explicitly grants a newly assigned worker its own scope. The managed
 Hermes-tools MCP endpoint can likewise act for its supervising worker, while the
 executor's ordinary shell children remain fenced. Workers may only perform lifecycle

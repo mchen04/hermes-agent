@@ -10,7 +10,7 @@ from __future__ import annotations
 import os
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
-from typing import Iterator, Mapping, MutableMapping, overload
+from typing import Callable, Iterator, Mapping, MutableMapping, overload
 
 _DELEGATED_CHILD_CONTEXT: ContextVar[bool] = ContextVar("hermes_delegated_child_context", default=False)
 # Any in-process execution that is NOT the dispatcher-owned worker (cron jobs). Kept separate
@@ -23,6 +23,11 @@ KANBAN_ENV_KEYS: tuple[str, ...] = (
     "HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID", "HERMES_KANBAN_CLAIM_LOCK",
     "HERMES_KANBAN_GOAL_MODE", "HERMES_KANBAN_GOAL_MAX_TURNS",
 )
+
+# LOCAL-PATCH kanban-worker-tool-identity: the card this interpreter was verifiably bound to, and a
+# re-proof of its claim. A managed worker interpreter runs one frame; only
+# ``gateway.session_kanban.bind_worker_context`` sets it, after its claim check. Never read from env.
+_BOUND_WORKER: tuple[dict[str, str], Callable[[], bool]] | None = None
 
 
 @contextmanager
@@ -182,3 +187,36 @@ def delegated_child_subprocess_env(
             or (env and (env.get("HERMES_KANBAN_TASK") or env.get(DELEGATED_CHILD_ENV_MARKER)))):
         return None if env is None else dict(env)
     return scrub_kanban_env(os.environ if env is None else env)
+
+
+def bind_worker_identity(identity: Mapping[str, str], live: Callable[[], bool]) -> None:
+    """Record this interpreter's verified Kanban card (LOCAL-PATCH kanban-worker-tool-identity)."""
+    global _BOUND_WORKER
+    _BOUND_WORKER = (dict(identity), live)
+
+
+def worker_tool_label() -> dict[str, str]:
+    """The card label the dispatcher-owned worker's own tool children carry, or ``{}``.
+
+    Set only while this interpreter is bound (``bind_worker_identity``), the code runs as that worker
+    (not a delegate child, cron run or fenced descendant) and the bound claim is still live. Read from
+    the verified binding, never from the environment, so the front door and every unbound process get
+    nothing whatever their environment says.
+    """
+    bound = _BOUND_WORKER
+    if bound is None or not is_dispatcher_owned_worker_context() or not bound[1]():
+        return {}
+    return dict(bound[0])
+
+
+def worker_tool_env(env: Mapping[str, str]) -> dict[str, str]:
+    """*env* for a child of the worker's own terminal or execute_code transport.
+
+    The worker's children carry its card and run (:func:`worker_tool_label`), so its shell and the
+    programs it starts know which card they serve (the worker guidance's ``$HERMES_KANBAN_TASK``, a
+    supervisor script's own-card check). This is a label, not ownership: the claim lock never travels
+    and the descendant fence stays set. The call sites pass an already-scrubbed *env*; the scrub is
+    re-applied here so a labeled env is fenced whatever its caller did.
+    """
+    label = worker_tool_label()
+    return {**scrub_kanban_env(env), **label} if label else dict(env)
