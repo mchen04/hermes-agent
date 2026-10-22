@@ -275,7 +275,7 @@ def collect_acceptance(contract: str, published_pr: str | None,
                          paginate=True, profile_home=profile_home)
         except _PlanRestricted:
             if pr["state"] == "MERGED" and not required:
-                return _accept_plan_restricted_merge(receipt, repo, sha, profile_home)
+                return _accept_plan_restricted_merge(receipt, repo, number, sha, branch, profile_home)
             rules = []
         for page in rules:
             for rule in page:
@@ -326,6 +326,8 @@ def collect_acceptance(contract: str, published_pr: str | None,
             return receipt
         receipt["classification"] = next((x for x in outcomes if x != "success"), "missing" if not outcomes else "success")
         receipt["ok"] = receipt["classification"] == "success"
+        if not receipt["ok"] and _advisory_owner_claimed(repo):
+            _accept_advisory(receipt, repo, number, current, merged=pr["state"] == "MERGED")
         return receipt
     except _GateAuthError as exc:
         login = f"assignee profile {assignee!r}'s gh login" if assignee else "the ambient gh login"
@@ -339,7 +341,8 @@ def collect_acceptance(contract: str, published_pr: str | None,
         return receipt
 
 
-def _accept_plan_restricted_merge(receipt: dict, repo: str, sha: str, profile_home: str | None) -> dict:
+def _accept_plan_restricted_merge(receipt: dict, repo: str, number: int, sha: str, branch: str,
+                                  profile_home: str | None) -> dict:
     """LOCAL-PATCH kanban-plan-restricted-rules: a merged PR on a plan without branch rules
     is accepted when no check on its head failed or is still running."""
     pages = _api(f"repos/{repo}/commits/{sha}/check-runs?per_page=100&filter=latest",
@@ -352,25 +355,75 @@ def _accept_plan_restricted_merge(receipt: dict, repo: str, sha: str, profile_ho
         if status["context"] not in latest or status["id"] > latest[status["context"]]["id"]:
             latest[status["context"]] = {**status, "sha": sha}
     outcomes = []
+    raw_conclusions = _advisory_owner_claimed(repo)  # LOCAL-PATCH kanban-advisory-checks: as GitHub reported
     for check in [*runs, *latest.values()]:
         is_run = "conclusion" in check
-        outcome = check.get("conclusion") if is_run else check["state"]
+        outcome = raw = check.get("conclusion") if is_run else check["state"]
         if is_run and outcome in {"neutral", "skipped"}:
             outcome = "success"
         classification = _classify(check, sha, outcome, is_run)
         outcomes.append(classification)
         receipt["checks"].append({"name": check.get("name", check.get("context")), "id": check["id"],
             "head_sha": check.get("head_sha", check.get("sha")),
-            "classification": classification, "conclusion": outcome})
+            "classification": classification, "conclusion": raw if raw_conclusions else outcome})
     receipt["required"] = []
     bad = next((x for x in outcomes if x != "success"), None)
     if bad:
         receipt.update(classification=bad, detail="PR merged, but a check on its head did not pass.")
+        if _advisory_owner_claimed(repo):
+            current = _api(f"repos/{repo}/pulls/{number}", profile_home=profile_home)
+            if current["head"]["sha"] != sha or current["base"]["ref"] != branch:
+                receipt.update(classification="stale", detail="PR head/base changed while collecting evidence; retry.")
+            else:
+                _accept_advisory(receipt, repo, number, current, merged=True)
         return receipt
     receipt.update(ok=True, classification="success",
                    detail=f"PR merged; GitHub's plan has no branch rules on this private repo; "
                           f"{len(outcomes)} head checks passed.")
     return receipt
+
+
+# LOCAL-PATCH kanban-advisory-checks: on Michael's personal GitHub account every check (GitHub
+# check runs and commit statuses, required or optional) is advisory. The receipt keeps each
+# observed outcome, but a failed, pending or missing check no longer refuses completion. Only
+# GitHub's own PR read grants it: base repository exactly this owner and name, the same PR
+# number, and the head/base the checks were read for. Every other owner keeps the gate; auth,
+# infra, identity and stale-head failures still refuse, and an open PR on a repository that
+# requires no checks still has nothing to accept.
+_ADVISORY_CHECK_OWNER = "mchen04"
+
+
+def _advisory_owner_claimed(repo: str) -> bool:
+    return repo.split("/")[0].lower() == _ADVISORY_CHECK_OWNER
+
+
+def _accept_advisory(receipt: dict, repo: str, number: int, current: dict, *, merged: bool) -> bool:
+    """Accept ``receipt``'s non-passing checks as advisory when every check was read on the PR's
+    head and the re-read PR ``current`` proves the base repository is exactly the advisory
+    owner's ``repo`` and, for a merged PR, that it merged. Evidence from another head refuses as
+    ``stale``; any other mismatch leaves the receipt as the gate decided."""
+    wrong_head = [c["name"] for c in receipt["checks"] if c.get("head_sha") != receipt["head_sha"]]
+    if wrong_head:
+        receipt.update(classification="stale", detail=(
+            f"{receipt.get('detail', '')} Checks stayed a gate: {', '.join(wrong_head[:5])} reported another head "
+            f"than the PR's {receipt['head_sha']}; retry.").strip())
+        return False
+    base = (current.get("base") or {}).get("repo") or {}
+    full_name = base.get("full_name")
+    if ((base.get("owner") or {}).get("login") != _ADVISORY_CHECK_OWNER or not isinstance(full_name, str)
+            or full_name.lower() != repo.lower() or current.get("number") != number
+            or (merged and current.get("merged") is not True)):
+        receipt["detail"] = (f"{receipt.get('detail', '')} Checks stayed a gate: GitHub did not confirm "
+                             f"{'merged ' if merged else ''}PR #{number} in {_ADVISORY_CHECK_OWNER}'s repository {repo}.").strip()
+        return False
+    not_passed = [f"{c['name']} {c['classification']}" for c in receipt["checks"]
+                  if c["classification"] != "success"]
+    listed = "; ".join(not_passed[:5]) + (f"; {len(not_passed) - 5} more" if len(not_passed) > 5 else "")
+    state = "merged" if current.get("merged") is True else "open"
+    receipt.update(ok=True, classification="advisory", advisory_owner=_ADVISORY_CHECK_OWNER,
+                   detail=f"PR {state} at head {receipt['head_sha']}; checks on {_ADVISORY_CHECK_OWNER} repositories "
+                          f"are advisory and did not gate completion. Not passed ({len(not_passed)}): {listed}.")
+    return True
 
 
 def _classify(check: dict, sha: str, outcome: str | None, is_run: bool) -> str:
