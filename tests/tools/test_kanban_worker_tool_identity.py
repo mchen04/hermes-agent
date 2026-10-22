@@ -117,9 +117,10 @@ def test_concurrent_bound_workers_children_carry_only_their_own_card(board, tmp_
 def test_no_label_without_a_live_binding_of_this_interpreter(board, tmp_path):
     """Refusals: the unbound front door naming a real card in its env and caller env; a bind with a
     forged claim lock; a bound worker's delegate children and cron runs; and the worker itself once
-    its claim is reclaimed, lapses, or it completed the card — including a terminal session snapshot
-    and an execute_code kernel that were spawned while the label was live."""
-    owned, completing, lapsing, forged_target = board("owned"), board("completing"), board("lapsing"), board("forged")
+    its claim is reclaimed or it completed the card — including a terminal session snapshot and an
+    execute_code kernel that were spawned while the label was live. (A lapsed lease fails the same
+    ``_bound_claim_is_live`` check, pinned in ``tests/agent/test_kanban_turn_recovery.py``.)"""
+    owned, completing, forged_target = board("owned"), board("completing"), board("forged")
     front_door = [_probe("terminal"), _probe("background"), _probe("kernel"),
                   _probe("spawn_env", env={"HERMES_KANBAN_TASK": owned["task_id"],
                                            "HERMES_KANBAN_RUN_ID": str(owned["run_id"])})]
@@ -133,12 +134,8 @@ def test_no_label_without_a_live_binding_of_this_interpreter(board, tmp_path):
                  _probe("terminal"), _probe("kernel"), _probe("background")]
     completed = [{"op": "bind", "context": completing}, _probe("terminal"), {"op": "complete"},
                  _probe("terminal"), _probe("kernel")]
-    lapsed = [{"op": "bind", "context": lapsing}, _probe("terminal"),
-              {"op": "expire", "db": lapsing["db"], "task_id": lapsing["task_id"], "run_id": lapsing["run_id"]},
-              _probe("terminal")]
     procs = {name: _start(tmp_path, name, ops, _spoof(owned)) for name, ops in (
-        ("front", front_door), ("forged", forged), ("reclaimed", reclaimed), ("completed", completed),
-        ("lapsed", lapsed))}
+        ("front", front_door), ("forged", forged), ("reclaimed", reclaimed), ("completed", completed))}
     results = {name: _finish(proc) for name, proc in procs.items()}
 
     def none_labeled(*probes):
@@ -159,7 +156,3 @@ def test_no_label_without_a_live_binding_of_this_interpreter(board, tmp_path):
     bound, live, done, *after = results["completed"]
     assert bound == {"ok": True} and done.get("ok") is True, results["completed"]
     assert all(_labeled(row, completing) for row in live) and none_labeled(*after), results["completed"]
-
-    bound, live, expired, after = results["lapsed"]
-    assert bound == {"ok": True} and expired is True, results["lapsed"]
-    assert all(_labeled(row, lapsing) for row in live) and none_labeled(after), results["lapsed"]
