@@ -204,6 +204,12 @@ def bind_worker_context(frame):
     if isinstance(expires, int) and claimed[1]:
         env['HERMES_KANBAN_CLAIM_TTL_SECONDS'] = str(max(1, expires - int(claimed[1])))
     _watch_submitter(Path(context['db']), context['run_id'])
+    # LOCAL-PATCH kanban-worker-tool-identity: the descendant scrub strips this card from the worker's
+    # own terminal and execute_code children; they get it back from this verified binding instead
+    # (never from the environment), only while the claim stays live and this interpreter is bound.
+    from agent.delegation_context import bind_worker_identity
+    bind_worker_identity({'HERMES_KANBAN_TASK': context['task_id'], 'HERMES_KANBAN_RUN_ID': str(context['run_id'])},
+                         lambda: _bound_claim_is_live(context))
     os.environ.update(env)
     os.chdir(context['workspace'])
 

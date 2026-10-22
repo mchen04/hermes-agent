@@ -44,6 +44,9 @@ class Model(BaseHTTPRequestHandler):
             continuation = has_result
             message = {'role': 'assistant', 'content': None, 'tool_calls': [{'index': 0, 'id': 'owned-complete',
                 'type': 'function', 'function': {'name': 'kanban_complete' if continuation else 'kanban_comment', 'arguments': json.dumps({'summary': 'Owned probe complete'} if continuation else {'body': 'Owned first turn'})}}]}
+            if not continuation and getattr(self.server, 'identity', False):  # LOCAL-PATCH kanban-worker-tool-identity
+                message['tool_calls'].append({'index': 1, 'id': 'owned-identity', 'type': 'function', 'function': {
+                    'name': 'terminal', 'arguments': json.dumps({'command': 'echo "IDENTITY=$HERMES_KANBAN_TASK:$HERMES_KANBAN_RUN_ID:${HERMES_KANBAN_CLAIM_LOCK:-none}"'})}})
             finish = 'tool_calls'
         payload = json.dumps({'id': 'owned', 'choices': [{'index': 0, 'message': message, 'finish_reason': finish}],
             'usage': {'prompt_tokens': 10, 'completion_tokens': 5, 'total_tokens': 15}}).encode()
@@ -68,6 +71,7 @@ def main():
     peer.requests = []
     peer.mode = os.environ.get('KANBAN_PROBE_MODE', 'complete')
     peer.blocked, peer.release = threading.Event(), threading.Event()
+    peer.identity = True  # the worker's own shell also echoes its card label
     threading.Thread(target=peer.serve_forever, daemon=True).start()
     url = f'http://127.0.0.1:{peer.server_port}/v1'
     os.environ.update(OPENAI_API_KEY='loopback-only', OPENAI_BASE_URL=url)
@@ -188,6 +192,10 @@ def main():
             wire = json.dumps(peer.requests)
             turns = [r for r in peer.requests if r.get('tools')]
             prefixes = [json.dumps([m for m in r['messages'] if m['role'] in {'system', 'developer'}]) for r in turns]
+            identity = [m.get('content') or '' for r in peer.requests for m in r['messages']
+                        if m['role'] == 'tool' and m.get('tool_call_id') == 'owned-identity']
+            receipt.update(identity_output=identity[-1][:400] if identity else None,
+                           terminal_identity=f'IDENTITY={tid}:{params["run_id"]}:none' in (identity[-1] if identity else ''))
             receipt.update(goal_continuation=len(turns) >= 4, stable_prefix=len(set(prefixes)) == 1,
                 retry_same_session=same, tools='kanban_complete' in wire,
                 task_context='KANBAN_TASK_SENTINEL' in wire, skill_context='KANBAN_SKILL_SENTINEL' in wire,

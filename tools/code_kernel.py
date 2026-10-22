@@ -853,9 +853,12 @@ def execute_in_session_kernel(
 ) -> str:
     """Run one cell in the (owner, mode, python, cwd, tools) session kernel. The owner is the
     session key (``_resolve_owner``), not the per-turn task id, so state survives across turns."""
-    key = (_resolve_owner(task_id) or "", mode, child_python, child_cwd, tuple(sorted(sandbox_tools)))
+    # LOCAL-PATCH kanban-worker-tool-identity: the kernel's env is frozen at spawn, so the worker's card
+    # label is part of its key; once the claim goes stale the next cell gets a fresh, unlabeled kernel.
+    from agent.delegation_context import is_delegated_child_context, worker_tool_label
+    key = (_resolve_owner(task_id) or "", mode, child_python, child_cwd, tuple(sorted(sandbox_tools)),
+           tuple(sorted(worker_tool_label().items())))
     exec_start = time.monotonic()
-    from agent.delegation_context import is_delegated_child_context
     kernel, state_reset = _acquire_kernel(key, reset, pinned=is_delegated_child_context())
     try:
         return _run_cell(kernel, key, code, task_id=task_id, child_python=child_python, child_cwd=child_cwd,
