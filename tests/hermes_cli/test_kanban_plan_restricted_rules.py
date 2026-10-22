@@ -15,11 +15,13 @@ PLAN = ("gh: Upgrade to GitHub Pro or make this repository public to enable this
 
 @pytest.fixture
 def github(monkeypatch):
-    state = {"pr_state": "MERGED", "runs": [], "statuses": [], "rules_error": "plan"}
+    state = {"pr_state": "MERGED", "runs": [], "statuses": [], "rules_error": "plan",
+             "repo": "acme/repo", "number": 7, "pull": {}, "reads": []}
 
     def fake_api(endpoint, *, query=None, paginate=False, profile_home=None, repo=None):
+        state["reads"].append(endpoint)
         if endpoint == "graphql":
-            assert repo == "acme/repo"  # GraphQL acceptance names its repository explicitly
+            assert repo == state["repo"]  # GraphQL acceptance names its repository explicitly
             return {"data": {"repository": {"pullRequest": {
                 "headRefOid": "a" * 40, "baseRefName": "main", "state": state["pr_state"],
                 "baseRef": {"branchProtectionRule": None}}}}}
@@ -34,7 +36,12 @@ def github(monkeypatch):
         if "/statuses" in endpoint:
             return [state["statuses"]]
         if "/pulls/" in endpoint:
-            return {"head": {"sha": "a" * 40}, "base": {"ref": "main"}, "state": "closed", "merged": True}
+            if isinstance(state["pull"], Exception):
+                raise state["pull"]
+            owner = state["repo"].split("/")[0]
+            return {"number": state["number"], "head": {"sha": "a" * 40}, "state": "closed", "merged": True,
+                    "base": {"ref": "main", "repo": {"full_name": state["repo"], "owner": {"login": owner}}},
+                    **state["pull"]}
         raise AssertionError(f"unexpected GitHub read {endpoint}")
 
     monkeypatch.setattr(acceptance, "_api", fake_api)
@@ -95,3 +102,115 @@ def test_api_tells_plan_restriction_from_auth(monkeypatch, stderr, expected):
     monkeypatch.setattr(acceptance.subprocess, "run", fail)
     with pytest.raises(getattr(acceptance, expected)):
         acceptance._api("repos/acme/repo/rules/branches/main")
+
+
+# LOCAL-PATCH kanban-advisory-checks: on mchen04's repositories head checks are advisory.
+MINE = "https://github.com/mchen04/my-ai-skills/pull/164"
+
+
+@pytest.fixture
+def mine(github):
+    github.update(repo="mchen04/my-ai-skills", number=164)
+    return github
+
+
+def _mine():
+    return acceptance.collect_acceptance("mchen04/my-ai-skills", MINE)
+
+
+def test_mchen04_merged_pr_with_a_failed_check_is_accepted_and_keeps_the_failure(mine):
+    mine["runs"] = [_run("success"), {**_run("failure"), "id": 2, "name": "check"}]
+    receipt = _mine()
+    assert receipt["ok"] is True and receipt["classification"] == "advisory"
+    assert receipt["advisory_owner"] == "mchen04" and receipt["required"] == []
+    assert [(c["name"], c["classification"], c["conclusion"]) for c in receipt["checks"]] == [
+        ("ci", "success", "success"), ("check", "failure", "failure")]
+    assert "PR merged at head " + "a" * 40 in receipt["detail"] and "check failure" in receipt["detail"]
+
+
+def test_mchen04_merged_pr_with_a_running_check_or_failed_status_is_accepted(mine):
+    mine["runs"] = [_run(None, status="in_progress")]
+    mine["statuses"] = [{"id": 5, "context": "local", "state": "failure", "sha": "a" * 40}]
+    receipt = _mine()
+    assert receipt["ok"] is True and receipt["classification"] == "advisory"
+    assert [c["classification"] for c in receipt["checks"]] == ["pending", "failure"]
+
+
+def test_mchen04_passing_checks_read_as_before(mine):
+    mine["runs"] = [_run("success")]
+    receipt = _mine()
+    assert receipt["ok"] is True and receipt["classification"] == "success"
+    assert not any("/pulls/" in r for r in mine["reads"])
+
+
+def test_mchen04_open_pr_is_still_refused(mine):
+    mine["pr_state"] = "OPEN"
+    mine["runs"] = [_run("failure")]
+    receipt = _mine()
+    assert receipt["ok"] is False and "No repository-required checks" in receipt["detail"]
+
+
+def test_mchen04_head_moved_during_collection_is_stale(mine):
+    mine["runs"] = [_run("failure")]
+    mine["pull"] = {"head": {"sha": "b" * 40}}
+    receipt = _mine()
+    assert receipt["ok"] is False and receipt["classification"] == "stale"
+
+
+@pytest.mark.parametrize("pull", [
+    {"base": {"ref": "main", "repo": {"full_name": "Epoch-ML/my-ai-skills", "owner": {"login": "Epoch-ML"}}}},
+    {"base": {"ref": "main", "repo": {"full_name": "mchen04x/my-ai-skills", "owner": {"login": "mchen04x"}}}},
+    {"base": {"ref": "main", "repo": {"full_name": "mchen04/other", "owner": {"login": "mchen04"}}}},
+    {"base": {"ref": "main"}},
+    {"number": 165},
+    {"merged": False},
+], ids=["transferred", "lookalike-owner", "other-repo", "no-repo", "other-number", "not-merged"])
+def test_mchen04_claim_github_does_not_confirm_keeps_the_gate(mine, pull):
+    mine["runs"] = [_run("failure")]
+    mine["pull"] = pull
+    receipt = _mine()
+    assert receipt["ok"] is False and receipt["classification"] == "failure"
+    assert "Checks stayed a gate" in receipt["detail"] and "advisory_owner" not in receipt
+
+
+def test_mchen04_reread_refused_is_auth(mine):
+    mine["runs"] = [_run("failure")]
+    mine["pull"] = acceptance._GateAuthError("HTTP 404 on repos/mchen04/my-ai-skills/pulls/164")
+    receipt = _mine()
+    assert receipt["ok"] is False and receipt["classification"] == "auth"
+
+
+@pytest.mark.parametrize("repo", ["Epoch-ML/zerg", "mchen04x/repo", "xmchen04/repo", "mchen/repo"])
+def test_other_owners_keep_the_gate_with_unchanged_reads(github, repo):
+    github.update(repo=repo, number=7)
+    github["runs"] = [_run("failure")]
+    receipt = acceptance.collect_acceptance(repo, f"https://github.com/{repo}/pull/7")
+    assert receipt["ok"] is False and receipt["classification"] == "failure"
+    assert receipt["detail"] == "PR merged, but a check on its head did not pass."
+    assert not any("/pulls/" in r for r in github["reads"])
+
+
+def test_mchen04_check_run_on_another_head_stays_refused(mine):
+    mine["runs"] = [_run("failure"), {**_run("success", sha="b" * 40), "id": 2}]
+    receipt = _mine()
+    assert receipt["ok"] is False and receipt["classification"] == "stale"
+    assert [c["classification"] for c in receipt["checks"]] == ["failure", "stale"]
+    assert "advisory_owner" not in receipt and "another head" in receipt["detail"]
+
+
+def test_mchen04_receipt_keeps_raw_neutral_and_skipped_conclusions(mine):
+    mine["runs"] = [_run("neutral"), {**_run("skipped"), "id": 2}, {**_run("failure"), "id": 3, "name": "check"}]
+    receipt = _mine()
+    assert receipt["ok"] is True and receipt["classification"] == "advisory"
+    assert [(c["classification"], c["conclusion"]) for c in receipt["checks"]] == [
+        ("success", "neutral"), ("success", "skipped"), ("failure", "failure")]
+
+
+def test_other_owner_plan_path_receipts_are_unchanged(github):
+    github["runs"] = [_run("neutral"), {**_run("skipped"), "id": 2}]
+    receipt = acceptance.collect_acceptance("acme/repo", PR)
+    assert receipt["ok"] is True and receipt["classification"] == "success"
+    assert [(c["classification"], c["conclusion"]) for c in receipt["checks"]] == [
+        ("success", "success"), ("success", "success")]
+    github["runs"] = [{**_run("success", sha="b" * 40)}]
+    assert acceptance.collect_acceptance("acme/repo", PR)["classification"] == "stale"
