@@ -1272,6 +1272,15 @@ def _handle_link(args: dict, **kw) -> str:
                    **({"gated_by": parent_id} if gated else {}))
 
 
+def _failure_limit() -> int:
+    """``kanban.failure_limit`` exactly as the gateway dispatcher reads it."""
+    from hermes_cli import kanban_db as kb
+    try:
+        return int(cfg_get(load_config(), "kanban", "failure_limit", default=kb.DEFAULT_FAILURE_LIMIT))
+    except (TypeError, ValueError):
+        return kb.DEFAULT_FAILURE_LIMIT
+
+
 # --- Registration (order preserved: it is the order tools appear in the schema) ---
 
 # kanban_list / kanban_unblock route the board and are hidden from task workers.

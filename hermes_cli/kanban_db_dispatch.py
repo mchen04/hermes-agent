@@ -8,6 +8,7 @@ late-bound via ``_kb`` (import-cycle breaking) so monkeypatching
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import re
 import signal
@@ -1571,8 +1572,8 @@ def check_respawn_guard(
     a re-queue event arrived after it — a deliberate re-run) and ``"active_pr"``
     (PR URL in a recent comment; re-spawning risks a duplicate PR — unless a
     handoff event followed the comment: the named profile must work on that
-    PR). The review lane skips the last two: they are the *inputs* to a review
-    handoff. Stale / dead claim locks are NOT a guard reason — the reclaim
+    PR). The review lane skips the last two:
+    they are the *inputs* to a review handoff. Stale / dead claim locks are NOT a guard reason — the reclaim
     passes own those.
     """
     row = conn.execute(
@@ -1644,13 +1645,11 @@ def check_respawn_guard(
     #    now work on THAT PR — a closer or the implementer finishing it, not a
     #    duplicate implementation (#111910). A crash/reclaim is not a handoff,
     #    so the worker that opened the PR is still not re-spawned against it.
-    pr_times = [t for t, c in _rows_since(conn, "task_comments", task_id, now - _RESPAWN_GUARD_PR_WINDOW,
-                                          cols=", body", unreadable=now)  # duplicate-PR risk: fail closed
-                if _RESPAWN_GUARD_PR_URL_RE.search(_kb._lossy_text(c["body"]) or "")]
-    if pr_times:
-        # Strictly after: a same-second tie stays guarded (fail closed).
+    pr_comments = _guarded_pr_comments(conn, task_id, now)
+    if pr_comments:
+        # Strictly after the newest PR comment: a same-second tie stays guarded (fail closed).
         if any(_is_handoff_event(e["kind"], e["payload"]) for _, e in _rows_since(
-                conn, "task_events", task_id, max(pr_times),
+                conn, "task_events", task_id, pr_comments[0]["created_at"],
                 "AND kind IN ('assigned', 'changes_requested', 'review_reopened')", cols=", kind, payload", strict=True)):
             return None
         return "active_pr"
@@ -1674,6 +1673,75 @@ def _rows_since(conn: sqlite3.Connection, table: str, task_id: str, since: int, 
         t = unreadable if t is None else t
         if t is not None and (t > since if strict else t >= since):
             yield t, row
+
+
+def _guarded_pr_comments(conn: sqlite3.Connection, task_id: str, now: int) -> list[dict]:
+    """Comments inside the ``active_pr`` window that carry a GitHub PR URL,
+    newest first: ``{id, created_at, sha256, urls}``. The body hash binds a
+    PR-resume authorization to the exact text it was granted against."""
+    out = []
+    # Text stamps are decided on their parsed epoch; an unreadable one counts as now (duplicate-PR risk: fail closed).
+    for t, c in _rows_since(conn, "task_comments", task_id, now - _RESPAWN_GUARD_PR_WINDOW,
+                            cols=", id, body", unreadable=now):
+        body = _kb._lossy_text(c["body"])
+        urls = sorted({m.group(0) for m in _RESPAWN_GUARD_PR_URL_RE.finditer(body or "")})
+        if urls:
+            out.append({"id": int(c["id"]), "created_at": t,
+                        "sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(), "urls": urls})
+    out.sort(key=lambda c: (c["created_at"], c["id"]), reverse=True)
+    return out
+
+
+def dispatch_task(
+    conn: sqlite3.Connection, task_id: str, *, spawn_fn=None, ttl_seconds: Optional[int] = None,
+    max_spawn: Optional[int] = None, max_in_progress: Optional[int] = None,
+    max_in_progress_per_profile: Optional[int] = None,
+    failure_limit: int = DEFAULT_FAILURE_LIMIT, board: Optional[str] = None,
+) -> DispatchResult:
+    """Spawn exactly one named ready card through the normal dispatch path.
+
+    Same board lock, global/host/memory caps, review-lane reservation,
+    per-profile cap, profile gate, respawn guards and claim CAS as
+    :func:`dispatch_once`, but touches no other card: no reclaim, promotion or
+    default-assignee pass. An unassigned, claimed or non-ready card spawns
+    nothing. Lets a fresh process start a card the long-lived gateway
+    dispatcher (older code) still holds back."""
+    def _tick() -> DispatchResult:
+        result = DispatchResult()
+        may_spawn, budget = _tick_spawn_budget(
+            conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress, board=board,
+        )
+        row = next((r for r in _lane_rows(conn, "ready") if r["id"] == task_id), None)
+        if not may_spawn or row is None:
+            return result
+        if not row["assignee"]:
+            result.skipped_unassigned.append(task_id)
+            return result
+        per_profile_cap = max_in_progress_per_profile if (
+            isinstance(max_in_progress_per_profile, int) and max_in_progress_per_profile > 0) else None
+        running: dict[str, int] = {}
+        if per_profile_cap is not None:
+            for prow in conn.execute(
+                "SELECT assignee, COUNT(*) AS n FROM tasks "
+                "WHERE status = 'running' AND assignee IS NOT NULL GROUP BY assignee"
+            ):
+                running[prow["assignee"]] = int(prow["n"])
+        review_rows = _lane_rows(conn, "review") if review_dispatch_enabled() else []
+        if budget is not None and budget > 0 and _any_spawnable_review(
+            conn, review_rows, per_profile_cap=per_profile_cap, per_profile_running=running,
+        ):
+            budget -= 1
+        if budget is not None and budget <= 0:
+            return result
+        _dispatch_lane_task(
+            conn, row, row["assignee"], result, lane="ready", dry_run=False,
+            ttl_seconds=ttl_seconds, board=board, failure_limit=failure_limit, spawn_fn=spawn_fn,
+            per_profile_cap=per_profile_cap, per_profile_running=running,
+        )
+        return result
+
+    with _kbc._dispatch_tick_lock(_kb.kanban_db_path(board=board)) as held:
+        return _tick() if held else DispatchResult(skipped_locked=True)
 
 
 def _is_handoff_event(kind: str, payload: Optional[str]) -> bool:
@@ -2752,6 +2820,14 @@ def _restart_safe_worker_argv(task: Task, command: list[str]) -> list[str]:
     ).argv
 
 
+# Per-task identity a worker carries; never inherited by a worker it spawns.
+_WORKER_SCOPED_ENV = (
+    "HERMES_KANBAN_TASK", "HERMES_KANBAN_WORKSPACE", "HERMES_KANBAN_BRANCH", "HERMES_KANBAN_RUN_ID",
+    "HERMES_KANBAN_CLAIM_LOCK", "HERMES_KANBAN_GOAL_MODE", "HERMES_KANBAN_GOAL_MAX_TURNS",
+    "HERMES_TENANT", "HERMES_SESSION_ID",
+)
+
+
 def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -> Optional[int]:
     """Fire-and-forget ``hermes -p <profile> chat -q ...`` subprocess.
 
@@ -2807,6 +2883,10 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
         # A multiplexer dispatching for another profile must not hand it the launch
         # profile's .env settings / TERMINAL_* policy — a standalone dispatcher never would.
         strip_launch_profile_env(env, profile_home)
+    # A spawn from inside another worker (a Kanban tool that starts one card)
+    # would otherwise hand that worker's task identity to this one.
+    for key in _WORKER_SCOPED_ENV:
+        env.pop(key, None)
     if task.tenant:
         env["HERMES_TENANT"] = task.tenant
     env["HERMES_KANBAN_TASK"] = task.id
