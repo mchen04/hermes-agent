@@ -88,17 +88,11 @@ def _mutate(work):
     return {"labels": _rows(output, "LABELS="), "mutate": _rows(output, "MUTATE=")}
 
 
-def _board_op(op):
+def _reclaim(op):  # the operator/parent reclaims the card under the bound worker
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_db_connect import connect_closing
     with connect_closing(Path(op["db"])) as conn:
-        if op["op"] == "reclaim":
-            return kb.reclaim_task(conn, op["task_id"], reason="identity test")
-        with kb.write_txn(conn):  # expire: status/run/lock still match, only the lease lapses
-            past = int(time.time()) - 60
-            conn.execute("UPDATE tasks SET claim_expires = ? WHERE id = ?", (past, op["task_id"]))
-            conn.execute("UPDATE task_runs SET claim_expires = ? WHERE id = ?", (past, op["run_id"]))
-        return True
+        return kb.reclaim_task(conn, op["task_id"], reason="identity test")
 
 
 def _run(op, work):
@@ -127,7 +121,7 @@ def _run(op, work):
             assert time.monotonic() < deadline, "barrier timed out"
             time.sleep(0.05)
         return True
-    return _board_op(op)
+    return _reclaim(op)
 
 
 def main():
