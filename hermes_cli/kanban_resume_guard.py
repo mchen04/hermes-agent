@@ -30,12 +30,14 @@ def _dispatcher_owned_run() -> bool:
     """This process holds a dispatcher-granted Kanban task (``HERMES_KANBAN_TASK``, exactly
     what ``_default_spawn`` injects into worker children). That is the grant boundary: only a
     run the dispatcher owns — task, run id, claim, heartbeat — may continue a worker
-    transcript, so it is exempt from the guard."""
+    transcript, so it is exempt from the guard. A fenced descendant carrying its worker's card
+    label (LOCAL-PATCH kanban-worker-tool-identity) owns no run and gets no exemption."""
+    from agent.delegation_context import is_dispatcher_owned_worker_context
     try:
         from gateway.session_context import get_session_env
     except ImportError:  # no gateway context (plain CLI child) — read the process env
         get_session_env = os.environ.get
-    return bool(str(get_session_env("HERMES_KANBAN_TASK", "") or "").strip())
+    return is_dispatcher_owned_worker_context() and bool(str(get_session_env("HERMES_KANBAN_TASK", "") or "").strip())
 
 
 def kanban_resume_refusal(db, session_id: str):

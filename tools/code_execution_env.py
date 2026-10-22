@@ -123,10 +123,11 @@ def _build_child_env(*, rpc_endpoint: str, rpc_token: str, tmpdir: str,
                      child_python: str) -> dict[str, str]:
     """Build the scrubbed child environment both execution paths share."""
     from hermes_constants import apply_scratch_tmp_env, apply_subprocess_home_env, get_hermes_home_override
+    from agent.delegation_context import worker_tool_env
     from agent.session_client_env import tool_env, toolchain_environ
     # A local session's client toolchain replaces the daemon's PATH / venv, then the whole scrub (secret
     # names, delegated-child restrictions) runs over the merged environment.
-    child_env = _scrub_child_env(toolchain_environ(), toolchain=frozenset(tool_env()))
+    child_env = worker_tool_env(_scrub_child_env(toolchain_environ(), toolchain=frozenset(tool_env())))
     child_env["HERMES_RPC_SOCKET"] = rpc_endpoint
     child_env["HERMES_RPC_TOKEN"] = rpc_token
     child_env["PYTHONDONTWRITEBYTECODE"] = "1"

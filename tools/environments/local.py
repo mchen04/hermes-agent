@@ -773,12 +773,13 @@ def _make_run_env(env: dict) -> dict:
     and the served profile's declared passthrough names are what the child sees. A local session's
     client toolchain (PATH, venv, nvm/pyenv/conda: ``agent.session_client_env``) replaces the daemon's
     beneath the backend's own ``env``."""
+    from agent.delegation_context import worker_tool_env
     from agent.session_client_env import toolchain_environ
-    run_env = _scrubbed_env(
+    run_env = worker_tool_env(_scrubbed_env(
         [(dict(toolchain_environ(strip_launch_profile_env(os.environ.copy())) | env), True)],
         frozenset(),
         lambda p: _user_tools_first(_append_missing_sane_path_entries(p)),
-    )
+    ))
     # While this profile's Bot Desktop is running, its DISPLAY/XAUTHORITY/DBUS ride along so GUI
     # apps the agent launches from the terminal open on the Bot Screen the user is watching, not
     # on the user's own seat (#125830). published_env() is the pure read (no activity stamp — a

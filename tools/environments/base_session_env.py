@@ -77,6 +77,10 @@ def _export_dump_excluding_session_vars(tmp_path: str, excluded_names: Iterable[
         # env; a snapshot taken inside that window would re-assert them on every
         # later ``source`` and fence the PARENT session's kanban CLI (#90782).
         "HERMES_DELEGATED_CHILD_CONTEXT HERMES_CRON_SESSION "
+        # LOCAL-PATCH kanban-worker-tool-identity: each spawn's env decides the worker's card label
+        # from its verified binding; an exported value persisted here would override it on every
+        # later ``source`` (a foreign card id, or the old card after its claim went stale).
+        "HERMES_KANBAN_TASK HERMES_KANBAN_RUN_ID "
         # Remote code-execution channel vars (RPC token, kernel/rpc dirs): a
         # leaked token in the snapshot would re-export into every later command
         # on the backend and outlive the private dir it protects.
