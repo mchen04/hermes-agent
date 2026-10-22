@@ -57,10 +57,12 @@ def _cmd_tail(args: argparse.Namespace) -> int:
     return _poll_loop(args.interval, tick)
 
 
-def _cmd_dispatch(args: argparse.Namespace) -> int:
-    # Honour kanban.default_assignee, kanban.max_in_progress,
-    # kanban.max_in_progress_per_profile and kanban.max_spawn with the same
-    # semantics as the gateway dispatch path.
+def _dispatch_settings(args: argparse.Namespace) -> tuple:
+    """``(default_assignee, max_in_progress_per_profile, max_in_progress, max_spawn)``.
+
+    Honour kanban.default_assignee, kanban.max_in_progress,
+    kanban.max_in_progress_per_profile and kanban.max_spawn with the same
+    semantics as the gateway dispatch path."""
     try:
         from hermes_cli.config import load_config
         _cfg = load_config()
@@ -81,6 +83,11 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
     except Exception:
         default_assignee = max_in_progress_per_profile = max_in_progress = None
         max_spawn = getattr(args, "max", None)
+    return default_assignee, max_in_progress_per_profile, max_in_progress, max_spawn
+
+
+def _cmd_dispatch(args: argparse.Namespace) -> int:
+    default_assignee, max_in_progress_per_profile, max_in_progress, max_spawn = _dispatch_settings(args)
     with kbc.connect_closing() as conn:
         res = kbd.dispatch_once(
             conn,
