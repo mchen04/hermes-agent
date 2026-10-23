@@ -137,6 +137,8 @@ def subscriber_chat(sub: dict) -> str:
 
 
 def drop_reason(ev: Any, *, now: float, settings: dict, subscriber: str) -> Optional[str]:
+    if ev.kind in (settings.get("drop_kinds") or ()):
+        return "configured quiet kind"
     replay_age = float(settings.get("replay_max_age_seconds") or 0)
     if ev.kind in _REPLAY_DROP_KINDS and replay_age and now - ev.created_at > replay_age:
         return "crash replay"
