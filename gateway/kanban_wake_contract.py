@@ -197,6 +197,11 @@ def _event_line(ev: Any, context: dict, *, now: float, settings: dict) -> list[s
                   "needs_human: no"]
     elif ev.kind in _DISPATCHER_KINDS:
         lines.append("needs_human: no")
+    elif ev.kind == "stalled":
+        lines += [f"stall: {payload.get('stall') or 'unknown'} — "
+                  f"{clip(payload.get('reason') or 'no reason given', reason_chars)}", "needs_human: no"]
+        if payload.get("next"):
+            lines.append(f"next: {clip(payload['next'], reason_chars)}")
     return lines
 
 
