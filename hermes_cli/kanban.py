@@ -29,6 +29,7 @@ from hermes_cli.kanban_output import (
     _task_to_dict,
 )
 from hermes_cli.kanban_boards import _dispatch_boards
+from hermes_cli.kanban_contract_edit import change_completion_contract
 from hermes_cli.kanban_ops import (
     _cmd_daemon, _kanban_config, _cmd_dispatch, _cmd_gc, _cmd_repair, _cmd_tail, _cmd_watch,
 )
@@ -494,7 +495,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
     if want_json:
         _print_json({
             "task": _task_to_dict(task), "latest_summary": latest_summary, "parents": parents, "children": children,
-            "comments": [_obj_dict(c, ("author", "body", "created_at")) for c in comments],
+            "comments": [_obj_dict(c, ("id", "author", "body", "created_at")) for c in comments],
             "events": [_obj_dict(e, ("kind", "payload", "created_at", "run_id")) for e in events],
             "runs": [_obj_dict(r, _SHOW_RUN_FIELDS) for r in runs],
         })
@@ -951,14 +952,28 @@ def _cmd_edit(args: argparse.Namespace) -> int:
     title = getattr(args, "title", None)
     body = getattr(args, "body", None)
     priority = getattr(args, "priority", None)
+    contract = getattr(args, "completion_contract", None)
+    contract_reason = getattr(args, "reason", None)
+    authorization = getattr(args, "authorization_comment", None)
     if result is None and (summary is not None or raw_metadata is not None):
         return _err("kanban edit: --summary and --metadata require --result", 2)
-    if all(value is None for value in (title, body, priority, result)):
-        return _err("kanban edit: provide --title, --body, --priority, or --result", 2)
+    if contract is None and (contract_reason is not None or authorization is not None):
+        return _err("kanban edit: --reason and --authorization-comment require --completion-contract", 2)
+    fields = (title, body, priority, result)
+    if all(value is None for value in (*fields, contract)):
+        return _err("kanban edit: provide --title, --body, --priority, --result, or --completion-contract", 2)
     metadata, rc = _parse_metadata_flag(raw_metadata)
     if rc:
         return rc
     with kbc.connect_closing() as conn:
+        if contract is not None:
+            changed = change_completion_contract(
+                conn, args.task_id, contract, reason=contract_reason,
+                authorization_comment_id=authorization,
+            )
+            print(f"{'Edited' if changed else 'Unchanged'} {args.task_id}: completion contract {contract}")
+            if all(value is None for value in fields):
+                return 0
         ok = kb.edit_task(
             conn, args.task_id, title=title, body=body, priority=priority,
             result=result, summary=summary, metadata=metadata,
