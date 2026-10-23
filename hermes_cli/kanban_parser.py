@@ -311,6 +311,13 @@ _SPECS = [
         _arg("--priority", type=int, help="Replace the task priority"),
         _arg("--result", help="Backfilled task result text for a done task"),
         *_STEP_HANDOFF,
+        _arg("--completion-contract", metavar="CONTRACT",
+             help="Change the completion contract: local-only, OWNER/REPO, or exact GitHub PR URL. "
+                  "Needs --authorization-comment and --reason. Kanban workers are refused."),
+        _arg("--authorization-comment", type=int, metavar="COMMENT_ID",
+             help="Operator comment on this card that authorizes the contract change "
+                  "(same rules as kanban_resume_authorized_pr)"),
+        _arg("--reason", help="Why the completion contract changes (recorded on the edited event)"),
     ], help="Edit task fields or recovery fields on an already-completed task"),
     _cmd("block", [
         _TASK_ID,

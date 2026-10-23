@@ -56,6 +56,16 @@ After publishing, pass `metadata.published_pr` to completion. The first matching
 URL binds the card permanently; retries cannot substitute a green sibling PR.
 CLI `show --json` and `kanban_show` expose the persisted contract.
 
+An operator changes a card's contract with `hermes kanban edit <id>
+--completion-contract <contract> --authorization-comment <comment id> --reason <why>`.
+The comment follows the same rules as an authorized PR resume: a non-empty
+operator comment on that card, never a worker's. `show --json` lists each
+comment's `id`. Kanban workers and their
+descendants are refused, for their own card and every other card. The change
+records an `edited` event with the old and new contract, the reason, the
+authorization comment ID and hash, and who made it. It also invalidates any
+`authorized_pr_resume` receipt recorded against the old contract.
+
 The shared `complete_task` boundary covers worker tools, CLI, review approval and
 dashboard completion. It reads classic branch protection and active ruleset
 required contexts, paginates exact-head check runs and legacy statuses, then
@@ -1530,7 +1540,7 @@ Every transition appends a row to `task_events`. Each row carries an optional `r
 | Kind | Payload | When |
 |---|---|---|
 | `assigned` | `{assignee}` | Assignee changed (including unassignment). |
-| `edited` | `{fields}` | Title or body updated. |
+| `edited` | `{fields}`; a contract change adds `{from, to, reason, authorization, origin, actor, actor_chat?}` | Title, body or completion contract updated. |
 | `reprioritized` | `{priority}` | Priority changed. |
 | `status` | `{status}` | Dashboard drag-drop wrote a status directly (e.g. `todo → ready`). Carries the `run_id` of the run that was reclaimed when dragging off `running`; otherwise `run_id` is NULL. |
 
