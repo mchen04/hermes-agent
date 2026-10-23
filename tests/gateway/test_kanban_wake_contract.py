@@ -164,6 +164,26 @@ def test_late_crash_replays_are_dropped_and_a_late_gave_up_still_wakes(board, mo
     assert "event: crashed" not in wakes[0]
 
 
+def test_configured_drop_kinds_skip_retried_crashes_and_a_gave_up_still_wakes(board, monkeypatch):
+    now = int(time.time())
+    with kbc.connect_closing() as conn:
+        retried, parked = _card(conn, "retried"), _card(conn, "parked")
+        for tid, kinds in ((retried, ("crashed",)), (parked, ("crashed", "gave_up"))):
+            for kind in kinds:
+                conn.execute("INSERT INTO task_events (task_id, kind, payload, created_at) VALUES (?, ?, ?, ?)",
+                             (tid, kind, json.dumps({"error": "pid 1 exited with code 1"}), now))
+        conn.commit()
+    adapter = RecordingAdapter()
+    runner = _runner(adapter)
+    monkeypatch.setattr("hermes_cli.config.load_config", lambda: {"kanban": {"wake": {"drop_kinds": ["crashed"]}}})
+
+    wakes = _wakes(monkeypatch, runner, adapter)
+
+    assert len(wakes) == 1 and parked in wakes[0] and retried not in wakes[0]
+    assert "event: crashed" not in wakes[0]
+    assert "event: gave_up" in wakes[0]
+
+
 def test_repeat_wakes_on_one_card_merge_inside_the_window(board, monkeypatch):
     with kbc.connect_closing() as conn:
         tid = _card(conn)
