@@ -43,6 +43,12 @@ def test_claim_freezes_task_policy_and_rejects_forgery(tmp_path, monkeypatch):
     assert context['board'] == 'owned' and context['claim_lock'] == task.claim_lock
     assert context['skills'] == ['owned-skill'] and context['goal_mode'] and context['goal_max_turns'] == 3
     assert context['accept_hooks'] is True and 'Goal criteria' in context['goal_text']
+    assert 'discord' not in policy.toolsets
+    chat = dict(config, platform_toolsets={'cli': ['terminal', 'file'], 'discord': ['terminal', 'discord']})
+    assert 'discord' in build_kanban_policy(connection, params, chat)[0].toolsets
+    assert 'discord_admin' not in build_kanban_policy(connection, params, chat)[0].toolsets
+    off = dict(chat, agent={'coding_context': 'focus', 'disabled_toolsets': ['discord']})
+    assert 'discord' not in build_kanban_policy(connection, params, off)[0].toolsets
     for changed in ({'run_id': task.current_run_id + 1}, {'board': 'foreign'}, {'claim_lock': 'forged'}, {'cwd': '/tmp'}):
         with pytest.raises(RuntimeStoreError):
             build_kanban_policy(connection, params | changed, config)
