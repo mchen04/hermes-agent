@@ -66,8 +66,17 @@ def build_kanban_policy(connection, params, config):
     context['db'] = str(path)
     request = json.loads(policy.request_json)
     request.update(source='kanban', board=board, task_id=task.id, run_id=task.current_run_id)
-    return replace(policy, source='kanban', platform='cli', toolsets=tuple(sorted(set(policy.toolsets) | {'kanban'})),
+    toolsets = set(policy.toolsets) | {'kanban'} | _chat_platform_toolsets(config)
+    return replace(policy, source='kanban', platform='cli', toolsets=tuple(sorted(toolsets)),
                    request_json=json.dumps(request, sort_keys=True), kanban_json=json.dumps(context)), private
+
+
+def _chat_platform_toolsets(config):
+    from hermes_cli.tools_config import _get_platform_tools
+    from hermes_cli.toolset_scope import _TOOLSET_PLATFORM_RESTRICTIONS
+    return {name for name, platforms in _TOOLSET_PLATFORM_RESTRICTIONS.items()
+            if any(name in _get_platform_tools(config, platform, include_default_mcp_servers=False)
+                   for platform in platforms)}
 
 
 async def run_task(connection, params):
