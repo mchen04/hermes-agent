@@ -1993,6 +1993,7 @@ DEFAULT_CONFIG = {
             "replay_max_age_seconds": 120,
             "merge_window_seconds": 120,
             "drop_self_caused": True,
+            "drop_kinds": [],
             "evidence_suffixes": [
                 ".zip", ".json", ".jsonl", ".ndjson", ".gz", ".tgz", ".tar", ".log", ".whl",
                 ".diff", ".patch", ".sqlite", ".db",
