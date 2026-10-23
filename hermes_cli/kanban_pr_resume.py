@@ -212,7 +212,10 @@ def recover_authorized_pr_resume(conn, task_id: str, authorization_comment_id: i
             return refuse("authorization_not_later", "Authorization must follow every guarding PR comment; same-second ties refuse")
         contract = scope["completion_contract"]
         if not (acceptance._REPO.fullmatch(contract or "") or acceptance._PR.fullmatch(contract or "")):
-            return refuse("invalid_contract", "Target must declare a repository or exact PR completion contract")
+            return refuse("invalid_contract", (
+                "Target must declare a repository or exact PR completion contract. An operator changes it with "
+                f"`hermes kanban edit {task_id} --completion-contract OWNER/REPO "
+                "--authorization-comment <operator comment id> --reason <why>`, then retries this resume"))
     result.authorization, result.scope, result.comments = auth, scope, snapshot
     for url in sorted({url for comment in snapshot for url in comment["urls"]}):
         try:
