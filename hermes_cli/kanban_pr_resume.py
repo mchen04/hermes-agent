@@ -174,6 +174,18 @@ def _github_pr_evidence(url: str) -> dict:
             "draft": data["draft"], "merged_at": data.get("merged_at"), "closed_at": data.get("closed_at")}
 
 
+def _resume_request_error(task_id, authorization_comment_id, actor, reason, caller_task_id):
+    if not isinstance(task_id, str) or not task_id.strip():
+        return ("unknown_task", "An exact target task ID is required")
+    if task_id == caller_task_id or task_id == os.environ.get("HERMES_KANBAN_TASK"):
+        return ("own_task", "Name a different target card explicitly")
+    if type(authorization_comment_id) is not int or authorization_comment_id <= 0:
+        return ("invalid_authorization", "A positive authorization comment ID is required")
+    if not isinstance(reason, str) or not reason.strip() or not isinstance(actor, str) or not actor.strip():
+        return ("invalid_reason", "A non-empty operator reason and actor are required")
+    return None
+
+
 def recover_authorized_pr_resume(conn, task_id: str, authorization_comment_id: int, *,
                                  actor: str, reason: str, dry_run: bool = False,
                                  caller_task_id: str | None = None) -> AuthorizedPrResume:
@@ -188,14 +200,9 @@ def recover_authorized_pr_resume(conn, task_id: str, authorization_comment_id: i
         result.status, result.detail = status, detail
         return result
 
-    if not isinstance(task_id, str) or not task_id.strip():
-        return refuse("unknown_task", "An exact target task ID is required")
-    if task_id == caller_task_id or task_id == os.environ.get("HERMES_KANBAN_TASK"):
-        return refuse("own_task", "Name a different target card explicitly")
-    if type(authorization_comment_id) is not int or authorization_comment_id <= 0:
-        return refuse("invalid_authorization", "A positive authorization comment ID is required")
-    if not isinstance(reason, str) or not reason.strip() or not isinstance(actor, str) or not actor.strip():
-        return refuse("invalid_reason", "A non-empty operator reason and actor are required")
+    invalid = _resume_request_error(task_id, authorization_comment_id, actor, reason, caller_task_id)
+    if invalid is not None:
+        return refuse(*invalid)
     with kb.write_txn(conn):
         scope = _scope(conn, task_id)
         if scope is None:
@@ -220,7 +227,7 @@ def recover_authorized_pr_resume(conn, task_id: str, authorization_comment_id: i
     for url in sorted({url for comment in snapshot for url in comment["urls"]}):
         try:
             result.prs.append(_github_pr_evidence(url))
-        except Exception as exc:
+        except Exception as exc:  # health: allow BLE001 -- external errors can contain credentials
             # External errors can contain tokens or command stderr. Do not persist them.
             return refuse("pr_lookup_failed", f"GitHub evidence unavailable for {url} ({type(exc).__name__})")
     opened = [pr for pr in result.prs if pr["state"] == "open"]

@@ -13,6 +13,7 @@ from unittest.mock import patch
 import pytest
 
 import agent.context_compressor as cc
+import agent.context_compressor_facts as facts
 from agent.context_compressor import ContextCompressor
 
 
@@ -80,7 +81,7 @@ def test_a_later_compaction_replaces_the_facts_section():
 
 def test_plain_prose_is_not_a_fact():
     turns = [_call("c1", "read_file"), _tool("c1", {"content": "I closed the door and merged lanes."})]
-    assert cc.latest_tool_facts(turns) == []
+    assert facts.latest_tool_facts(turns) == []
 
 
 def test_configured_language_replaces_the_follow_the_user_rule(compressor, monkeypatch):
@@ -102,11 +103,11 @@ def test_unanswered_question_is_labelled_and_answered_one_is_not(compressor, mon
         {"role": "assistant", "content": "Yes, merged at 10:52."},
         asked, _call("c1"), _tool("c1", _TESTS),
     ]
-    ids = cc.unanswered_user_turn_ids(messages, compressor._is_synthetic_compression_user_turn)
+    ids = facts.unanswered_user_turn_ids(messages, compressor._is_synthetic_compression_user_turn)
     assert ids == {id(asked)}
     # A reply that lands later (in the protected tail) answers it.
     tail_reply = messages + [{"role": "assistant", "content": "It waits on Michael's approval."}]
-    assert cc.unanswered_user_turn_ids(tail_reply, compressor._is_synthetic_compression_user_turn) == set()
+    assert facts.unanswered_user_turn_ids(tail_reply, compressor._is_synthetic_compression_user_turn) == set()
 
     seen = {}
     monkeypatch.setattr(compressor, "_call_summary_llm",
@@ -141,13 +142,13 @@ def test_facts_survive_the_pre_compression_prune():
     content = json.dumps({"output": "noise\n" * 50 + '{"state": "MERGED"}', "exit_code": 0})
     stub = cc._summarize_tool_result("terminal", json.dumps({"command": "gh pr view 21"}), content)
     turns = [_call("c1"), {"role": "tool", "tool_call_id": "c1", "content": stub}]
-    (line,) = cc.latest_tool_facts(turns)
+    (line,) = facts.latest_tool_facts(turns)
     assert '"state": "MERGED"' in line and "-> exit 0" in line
 
 
 def test_clarify_answers_are_never_lifted_as_facts():
     turns = [_call("c1", "clarify"), _tool("c1", {"responses": [{"question": "Q?", "status": "answered"}]})]
-    assert cc.latest_tool_facts(turns) == []
+    assert facts.latest_tool_facts(turns) == []
 
 
 def test_a_question_answered_in_the_kept_tail_is_labelled_answered(compressor, monkeypatch):

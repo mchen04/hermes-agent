@@ -769,8 +769,8 @@ class _KanbanNotification:
                 self.runner._kanban_sub_op, self.board_slug, "record_notify_ping", self.sub,
                 event_id=ev.id,
             ))
-        except Exception as art_exc:
-            logger.debug("kanban notifier: wake-only artifact delivery for %s failed: %s", self.task_id, art_exc)
+        except Exception as art_exc:  # health: allow BLE001 -- the imported shared logger records the traceback
+            logger.debug("kanban notifier: wake-only artifact delivery for %s failed: %s", self.task_id, art_exc, exc_info=True)
 
     async def _send_pings(self) -> bool:
         """Send every text ping; False when a send failed (claim already rewound/dropped)."""
