@@ -88,4 +88,9 @@ def track(target, future) -> None:
         if confirmed:
             _seed_live_delivery_sessions(target, message_id)
 
-    future.add_done_callback(lambda completed: scope.run(receive, completed))
+    def dispatch(completed):
+        from agent.memory_provider import spawn_context_thread
+
+        scope.run(spawn_context_thread, receive, name="cron-delivery-receipt", args=(completed,)).start()
+
+    future.add_done_callback(dispatch)
