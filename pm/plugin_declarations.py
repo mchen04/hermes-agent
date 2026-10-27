@@ -78,6 +78,10 @@ class PythonDeclaration:
         a member's whole tree (each enable or update would build a generation for nothing)."""
         return not self.external and (bool(self.install_requirements) or self.pyproject_installs)
 
+    @property
+    def is_member(self) -> bool:
+        return self.installs_packages
+
     def python_error(self, version: str) -> str | None:
         """Why this member cannot join a workspace built for *version*; uv intersects every
         member's requires-python, so one excluding member fails the whole lock."""
