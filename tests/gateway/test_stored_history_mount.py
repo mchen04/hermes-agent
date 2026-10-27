@@ -150,7 +150,7 @@ async def test_the_reads_a_viewer_sends_for_an_open_chat_answer_on_a_mount(tmp_p
     from gateway.run import GatewayRunner
     runner = conn.authority.runner
     for name in ('_voice_key_for_source', '_voice_key', '_resolve_session_service_tier', '_resolve_session_key_or_none',
-                 '_peek_session_state', '_load_service_tier'):
+                 '_peek_session_state', '_load_service_tier', '_channel_service_tier'):
         setattr(runner, name, getattr(GatewayRunner, name).__get__(runner))
     runner._adapter_profile_for_source = lambda source: None  # no adapters here
     # Desktop's automatic voice read on open, and the TUI's /fast status read.
