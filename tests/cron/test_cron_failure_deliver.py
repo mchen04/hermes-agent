@@ -112,7 +112,7 @@ def run_env(monkeypatch, tmp_path):
     from cron import executions
     monkeypatch.setattr(
         executions, "settle_delivery_outcome",
-        lambda execution_id, outcome: state["finished"].append(
+        lambda execution_id, outcome, **kwargs: state["finished"].append(
             ((execution_id,), {"delivery_outcome": outcome})) or True,
     )
     # No durable incident store in play: never acked, no id.
