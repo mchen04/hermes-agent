@@ -10,11 +10,12 @@ from gateway.platforms.base import SendResult
 from tests.waiting import wait_until
 
 
+@pytest.mark.parametrize("run_success", [True, False])
 @pytest.mark.parametrize("no_agent", [False, True])
 @pytest.mark.parametrize("via_queue", [False, True])
 @pytest.mark.parametrize("success", [True, False])
 @pytest.mark.parametrize("receipt_before_bookkeeping", [True, False])
-def test_timeout_stays_unknown_until_the_adapter_receipt(success, receipt_before_bookkeeping, via_queue, no_agent, monkeypatch, caplog):
+def test_timeout_stays_unknown_until_the_adapter_receipt(success, receipt_before_bookkeeping, via_queue, no_agent, run_success, monkeypatch, caplog):
     from cron.jobs import create_job
     from cron.scheduler_bookkeeping import finish_completed_run
 
@@ -61,15 +62,16 @@ def test_timeout_stays_unknown_until_the_adapter_receipt(success, receipt_before
             if via_queue:
                 from cron import delivery_queue
 
-                delivery_queue.enqueue(execution["id"], job, "Brief text")
+                delivery_queue.enqueue(execution["id"], job, "Brief text", for_failure=not run_success)
                 assert delivery_queue.drain(lambda queued, content, failure: scheduler._deliver_result(
-                    queued, content, adapters={Platform.DISCORD: adapter}, loop=loop,
+                    queued, content, adapters={Platform.DISCORD: adapter}, loop=loop, for_failure=failure,
                 )) == 1
                 assert delivery_queue.get_status(execution["id"])["status"] == "unknown"
                 job["_live_delivery_unknown"] = True
                 error = None
             else:
-                error = scheduler._deliver_result(job, "Brief text", adapters={Platform.DISCORD: adapter}, loop=loop)
+                error = scheduler._deliver_result(job, "Brief text", adapters={Platform.DISCORD: adapter}, loop=loop,
+                                                      for_failure=not run_success)
             assert error is None
             assert "delivered to" not in caplog.text
             assert "message_id=-" not in caplog.text
@@ -78,7 +80,8 @@ def test_timeout_stays_unknown_until_the_adapter_receipt(success, receipt_before
                 loop.call_soon_threadsafe(release.set)
                 wait_until(lambda: "adapter receipt confirmed" in caplog.text or "adapter receipt failed" in caplog.text,
                            what="adapter receipt")
-            delivery = scheduler._RunDelivery(job=job, success=True, error=None, should_deliver=True, delivery_error=error)
+            delivery = scheduler._RunDelivery(job=job, success=run_success, error=None if run_success else "script failed",
+                                               should_deliver=True, delivery_error=error)
             finish_completed_run(delivery, None, execution["id"])
             if not receipt_before_bookkeeping:
                 pending = executions.get_execution(execution["id"])
@@ -89,8 +92,9 @@ def test_timeout_stays_unknown_until_the_adapter_receipt(success, receipt_before
             wait_until(lambda: executions.get_execution(execution["id"])["delivery_outcome"] == expected,
                        what="durable adapter receipt")
             final = executions.get_execution(execution["id"])
-            assert final["status"] == ("completed" if success else "failed")
-            wait_until(lambda: get_job(job["id"])["last_status"] == ("ok" if success else "delivery_failed"),
+            assert final["status"] == ("completed" if success and run_success else "failed")
+            expected_status = "error" if not run_success else "ok" if success else "delivery_failed"
+            wait_until(lambda: get_job(job["id"])["last_status"] == expected_status,
                        what="job delivery receipt")
             assert get_job(job["id"])["repeat"]["completed"] == 1
             if success:
