@@ -131,15 +131,14 @@ def _read_route(repo: str, profile_home: str | None) -> dict | None:
     that cannot be read or parsed, a table that is not a mapping, or a matching but malformed
     route cannot prove the route absent, so the read fails closed."""
     from hermes_constants import get_default_hermes_root
-    from utils import fast_safe_load
+    from hermes_cli.config_backend import read_config_doc_readonly
 
     path = Path(profile_home or get_default_hermes_root()) / "config.yaml"
     try:
-        with open(path, encoding="utf-8-sig") as f:
-            config = fast_safe_load(f) or {}
+        config = read_config_doc_readonly(path) or {}
     except FileNotFoundError:
         return None
-    except Exception:
+    except Exception:  # health: allow BLE001 -- parser errors can contain private config values
         raise _GateAuthError("config.yaml unreadable; GitHub read route unknown") from None
     kanban = config.get("kanban") if isinstance(config, dict) else None
     table = kanban.get("github_read_transport") if isinstance(kanban, dict) else None

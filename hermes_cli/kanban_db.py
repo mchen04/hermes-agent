@@ -14,6 +14,7 @@ locks). Schema: tasks, task_links, task_comments, task_events, task_runs, attach
 
 from __future__ import annotations
 
+from hermes_cli.kanban_task_skills import _normalize_task_skills
 import contextlib
 import json
 import os
@@ -494,8 +495,6 @@ def board_exists(board: Optional[str] = None) -> bool:
     if slug == DEFAULT_BOARD:
         return True
     return _dir_holds_board(board_dir(slug))
-
-
 
 
 def _explicit_board_slug(board: Optional[str]) -> Optional[str]:
@@ -1110,46 +1109,6 @@ def _project_from_source_task(
         id=project_id, slug=project_slug, name=project_slug, created_at=0, primary_path=project_repo,
     )
     return project_obj, project_repo
-
-
-def _normalize_task_skills(skills: Optional[Iterable[str]]) -> Optional[list[str]]:
-    """Strip/dedupe a skills list. Commas are refused (a comma-joined string must
-    not land in one argv slot); toolset names are rejected all at once because
-    agents that confuse the two usually pass several."""
-    if skills is None:
-        return None
-    cleaned: list[str] = []
-    seen: set[str] = set()
-    toolset_typos: list[str] = []
-    for s in skills:
-        if not s:
-            continue
-        name = str(s).strip()
-        if not name:
-            continue
-        if "," in name:
-            raise ValueError(
-                f"skill name cannot contain comma: {name!r} "
-                f"(pass a list of separate names instead of a comma-joined string)"
-            )
-        if name.casefold() in KNOWN_TOOLSET_NAMES:
-            toolset_typos.append(name)
-            continue
-        if name in seen:
-            continue
-        seen.add(name)
-        cleaned.append(name)
-    if toolset_typos:
-        quoted = ", ".join(repr(n) for n in toolset_typos)
-        noun = "is a toolset name" if len(toolset_typos) == 1 else "are toolset names"
-        raise ValueError(
-            f"{quoted} {noun}, not skill name(s). "
-            "Put toolsets in the assignee profile's `toolsets:` config "
-            "instead of per-task skills. Skills are named skill bundles "
-            "(e.g. `blogwatcher`, `github-code-review`); toolsets are runtime "
-            "capabilities (e.g. `web`, `browser`, `terminal`)."
-        )
-    return cleaned
 
 
 def create_task(

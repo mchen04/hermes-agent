@@ -36,6 +36,8 @@ def chat_delivery_mode() -> str:
         from hermes_cli.config import cfg_get, load_config
         mode = cfg_get(load_config(), "kanban", "notify_delivery_mode", default="notify+wake")
     except Exception:
+        import logging
+        logging.getLogger(__name__).debug("Could not read kanban notification settings", exc_info=True)
         return "notify+wake"
     return mode if mode in ("notify+wake", "wake") else "notify+wake"
 

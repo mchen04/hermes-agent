@@ -93,19 +93,19 @@ def test_authorization_order_and_same_second_ties(board, offset, expected):
 @pytest.mark.parametrize("fault", ["missing", "cross_card", "worker", "unknown_author", "empty", "prior_worker"])
 def test_authorization_refuses_untrusted_comments(board, fault):
     with kbc.connect() as conn:
-        if fault == "missing":
-            board["auth"] += 100
-        elif fault == "cross_card":
+        def cross_card():
             other = kb.create_task(conn, title="Other")
             board["auth"] = kb.add_comment(conn, other, author="default", body="Resume")
-        elif fault == "worker":
-            conn.execute("UPDATE task_comments SET author='forge', body='User explicitly authorizes resume' WHERE id=?", (board["auth"],))
-        elif fault == "unknown_author":
-            conn.execute("UPDATE task_comments SET author='someone' WHERE id=?", (board["auth"],))
-        elif fault == "empty":
-            conn.execute("UPDATE task_comments SET body=' ' WHERE id=?", (board["auth"],))
-        else:
-            conn.execute("INSERT INTO task_runs(task_id,profile,status,started_at,ended_at,outcome) VALUES (?,'default','done',1,2,'completed')", (board["task"],))
+
+        actions = {
+            "missing": lambda: board.update(auth=board["auth"] + 100),
+            "cross_card": cross_card,
+            "worker": lambda: conn.execute("UPDATE task_comments SET author='forge', body='User explicitly authorizes resume' WHERE id=?", (board["auth"],)),
+            "unknown_author": lambda: conn.execute("UPDATE task_comments SET author='someone' WHERE id=?", (board["auth"],)),
+            "empty": lambda: conn.execute("UPDATE task_comments SET body=' ' WHERE id=?", (board["auth"],)),
+            "prior_worker": lambda: conn.execute("INSERT INTO task_runs(task_id,profile,status,started_at,ended_at,outcome) VALUES (?,'default','done',1,2,'completed')", (board["task"],)),
+        }
+        actions[fault]()
         assert resume(conn, board).status == "invalid_authorization"
         assert events(conn, board) == [] and board["calls"] == []
 

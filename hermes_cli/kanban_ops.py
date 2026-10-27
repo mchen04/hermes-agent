@@ -81,6 +81,8 @@ def _dispatch_settings(args: argparse.Namespace) -> tuple:
             cli_max if cli_max is not None else kbd._positive_int(_kanban_cfg.get("max_spawn"), None)
         )
     except Exception:
+        import logging
+        logging.getLogger(__name__).debug("Could not read kanban dispatch settings", exc_info=True)
         default_assignee = max_in_progress_per_profile = max_in_progress = None
         max_spawn = getattr(args, "max", None)
     return default_assignee, max_in_progress_per_profile, max_in_progress, max_spawn

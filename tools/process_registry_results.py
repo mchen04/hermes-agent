@@ -117,3 +117,30 @@ def load_completed_results(prefix: str = "") -> dict:
         except (OSError, ValueError, KeyError, TypeError, sqlite3.Error):
             logger.debug("Skipping unreadable process result %s", path.name, exc_info=True)
     return results
+
+def _redact_process_result(result: dict) -> dict:
+    """Transform, then redact secrets from background-process output before it reaches the
+    model, session.db and CLI, mirroring the foreground ``terminal`` pipeline (hook first,
+    redaction after) so the two surfaces can't diverge. Respects ``security.redact_secrets``;
+    ``redact_terminal_output`` picks ``code_file`` from the recorded command.
+
+    The command string itself is also redacted in case it carried an inline credential. See #43025.
+    """
+    from tools.process_registry import (process_registry, transform_process_output)
+
+    if not isinstance(result, dict):
+        return result
+    from agent.redact import redact_sensitive_text, redact_terminal_output
+
+    command = result.get("command") or ""
+    # The hook's task_id is the process OWNER's (poll/log/wait results carry only session_id).
+    task_id = str(result.get("task_id") or "")
+    if not task_id and (session := process_registry.get(str(result.get("session_id") or ""))) is not None:
+        task_id = str(getattr(session, "task_id", "") or "")
+    for key in ("output", "output_preview"):
+        if isinstance(value := result.get(key), str) and value:
+            value = transform_process_output(value, command=command, returncode=result.get("exit_code"), task_id=task_id)
+            result[key] = redact_terminal_output(value, command)
+    if isinstance(command, str) and command:
+        result["command"] = redact_sensitive_text(command, code_file=True)
+    return result

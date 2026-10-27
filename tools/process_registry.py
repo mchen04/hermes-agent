@@ -4,6 +4,7 @@ checkpoint for crash recovery, session-scoped tracking for gateway reset protect
 Nothing runs on the host unless TERMINAL_ENV=local; other backends run in their sandbox.
 """
 
+from tools.process_registry_results import _redact_process_result
 import codecs
 from contextlib import suppress
 import json
@@ -2565,8 +2566,6 @@ class ProcessRegistry(ProcessTerminationMixin, ProcessCheckpointMixin, ProcessOu
         self._poll_observed &= tracked
 
 
-
-
 process_registry = ProcessRegistry()
 
 
@@ -2634,32 +2633,6 @@ def transform_process_output(output: str, *, command: str, returncode: Optional[
     ``env_type`` is not recorded per process, so it is passed empty."""
     from tools.terminal_tool_result import _apply_output_transform_hook
     return _apply_output_transform_hook(command, output, returncode, task_id or "", "")
-
-
-def _redact_process_result(result: dict) -> dict:
-    """Transform, then redact secrets from background-process output before it reaches the
-    model, session.db and CLI, mirroring the foreground ``terminal`` pipeline (hook first,
-    redaction after) so the two surfaces can't diverge. Respects ``security.redact_secrets``;
-    ``redact_terminal_output`` picks ``code_file`` from the recorded command.
-
-    The command string itself is also redacted in case it carried an inline credential. See #43025.
-    """
-    if not isinstance(result, dict):
-        return result
-    from agent.redact import redact_sensitive_text, redact_terminal_output
-
-    command = result.get("command") or ""
-    # The hook's task_id is the process OWNER's (poll/log/wait results carry only session_id).
-    task_id = str(result.get("task_id") or "")
-    if not task_id and (session := process_registry.get(str(result.get("session_id") or ""))) is not None:
-        task_id = str(getattr(session, "task_id", "") or "")
-    for key in ("output", "output_preview"):
-        if isinstance(value := result.get(key), str) and value:
-            value = transform_process_output(value, command=command, returncode=result.get("exit_code"), task_id=task_id)
-            result[key] = redact_terminal_output(value, command)
-    if isinstance(command, str) and command:
-        result["command"] = redact_sensitive_text(command, code_file=True)
-    return result
 
 
 def _list_processes(task_id) -> dict:
