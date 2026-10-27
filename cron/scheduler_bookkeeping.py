@@ -30,10 +30,12 @@ def finish_interrupted_run(job, execution_id, delivery_error):
 def _classify_delivery_outcome(
     *, delivery_error, should_deliver: bool, unresolved_origin: bool,
     normalized_deliver: str, incident_acked: bool, success: bool,
-    delivery_queued=None, notification_suppressed: bool = False,
+    delivery_queued=None, notification_suppressed: bool = False, delivery_unknown: bool = False,
 ) -> str:
     if delivery_error:
         return "failed"
+    if should_deliver and delivery_unknown:
+        return "unknown"
     if should_deliver and delivery_queued:
         return "queued"
     if notification_suppressed:
@@ -56,6 +58,11 @@ def finish_completed_run(d, fire_owner: Optional[str], execution_id: str, *, rec
     ``cron.scheduler`` facade, which is where tests and the receipt-recovery path patch them."""
     from cron import scheduler
     job = d.job
+    from cron import live_delivery_receipts
+
+    d.delivery_error = d.delivery_error or live_delivery_receipts.error(job)
+    receipt_outcome = live_delivery_receipts.outcome(job)
+    delivery_unknown = receipt_outcome == "unknown"
     if not d.should_deliver and job.get("last_delivery_queued"):
         from cron.jobs import update_job
         update_job(job["id"], {"last_delivery_queued": None})
@@ -80,6 +87,8 @@ def finish_completed_run(d, fire_owner: Optional[str], execution_id: str, *, rec
         mark_kwargs["recover_consumed_fire"] = bool(job.get("_scheduled_instant"))
     if d.success and not d.delivery_error and d.should_deliver and job.get("last_delivery_queued"):
         mark_kwargs["status"] = "delivery_queued"
+    if delivery_unknown:
+        mark_kwargs["status"] = "delivery_unknown"
     if fire_owner is not None:
         mark_kwargs["expected_fire_owner"] = fire_owner
     if d.blocked_config:
@@ -94,6 +103,7 @@ def finish_completed_run(d, fire_owner: Optional[str], execution_id: str, *, rec
         return True
     delivery_outcome = _classify_delivery_outcome(
         delivery_error=d.delivery_error,
+        delivery_unknown=delivery_unknown,
         delivery_queued=job.get("last_delivery_queued"),
         notification_suppressed=bool(job.get("_notification_all_targets_suppressed")),
         should_deliver=d.should_deliver,
@@ -115,13 +125,15 @@ def finish_completed_run(d, fire_owner: Optional[str], execution_id: str, *, rec
     from cron.executions import get_execution, recover_receipted_execution
     finish = partial(recover_receipted_execution, job_id=job['id']) if recovered else scheduler.finish_execution
     finished = finish(
-        execution_id, success=d.success, error=d.error, delivery_outcome=delivery_outcome)
+        execution_id, success=d.success and receipt_outcome != "failed", error=d.error or d.delivery_error,
+        delivery_outcome=delivery_outcome)
     if recovered and finished is None:
         current = get_execution(execution_id)
         # A live foreign firer still owns this row. Keep its only recovery link until settlement.
         # Legacy direct calls may have no execution row; an already-finished row is also safe.
         if current is not None and current['status'] not in {'completed', 'failed'}:
             return False
+    live_delivery_receipts.settle(job)
     if job.get("last_delivery_queued"):
         # A drain that settled before this run's own bookkeeping landed found nothing to fence on.
         settle_quietly(job["id"], execution_id)

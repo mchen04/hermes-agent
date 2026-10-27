@@ -319,7 +319,7 @@ def finish_execution(
     settles through ``recover_receipted_execution``.
     """
     now = _hermes_now().isoformat()
-    status = "completed" if success else "failed"
+    status = "unknown" if delivery_outcome == "unknown" else "completed" if success else "failed"
     detail = None if success else (str(error) if error else "unknown failure")
     with _transaction() as conn:
         owner = (_PROCESS_ID, os.getpid())
@@ -386,18 +386,19 @@ def execution_owner_live(execution_id: str, job_id: str) -> bool:
     return row is not None and _row_owner_live(row)
 
 
-def settle_delivery_outcome(execution_id: str, outcome: str) -> bool:
-    """Replace a terminal attempt's ``queued`` delivery outcome with the drain's real one.
-
-    The only post-terminal rewrite the ledger allows: the attempt's status is untouched and
-    only a ``queued`` handoff can settle, so a replay or a late caller is a no-op.
-    """
+def settle_delivery_outcome(execution_id: str, outcome: str, *, error: Optional[str] = None) -> bool:
     with _transaction() as conn:
         cur = conn.execute(
-            """UPDATE executions SET delivery_outcome=?
-               WHERE id=? AND delivery_outcome='queued'
+            """UPDATE executions SET delivery_outcome=?,
+               status=CASE WHEN ?='unknown' THEN 'unknown'
+                 WHEN status='unknown' AND delivery_outcome='unknown'
+                 THEN CASE WHEN ?='failed' OR error IS NOT NULL THEN 'failed' ELSE 'completed' END
+                 ELSE status END,
+               error=CASE WHEN status='unknown' AND delivery_outcome='unknown' AND ?='failed'
+                 THEN COALESCE(error, ?) ELSE error END
+               WHERE id=? AND delivery_outcome IN ('queued','unknown')
                  AND status IN ('completed','failed','unknown')""",
-            (outcome, execution_id),
+            (outcome, outcome, outcome, outcome, error, execution_id),
         )
     return cur.rowcount == 1
 

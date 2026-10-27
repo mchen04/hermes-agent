@@ -22,11 +22,13 @@ logger = logging.getLogger(__name__)
 # Queue terminal status -> ledger delivery_outcome. ``unknown`` (owner died mid-send, never
 # retried) is surfaced as a failure: the user cannot be told the result arrived.
 _LEDGER_OUTCOME = {
-    "delivered": "delivered", "suppressed": "suppressed", "failed": "failed", "unknown": "failed",
+    "delivered": "delivered", "suppressed": "suppressed", "failed": "failed", "unknown": "unknown",
 }
 
 
-def _settle_job_record(job_id: str, execution_id: str, delivery_error: Optional[str]) -> bool:
+def _settle_job_record(
+    job_id: str, execution_id: str, delivery_error: Optional[str], *, outcome: Optional[str] = None,
+) -> bool:
     """Stamp the outcome onto the job only while *execution_id* is still its current run:
     the ledger's latest attempt for the job AND the job's latest recorded completion."""
     from cron.executions import latest_execution
@@ -38,11 +40,12 @@ def _settle_job_record(job_id: str, execution_id: str, delivery_error: Optional[
 
     def apply(jobs, _i, job):
         completions = job.get("canonical_completions") or []
-        if not completions or completions[-1] != execution_id:
-            return False
         status = job.get("last_status")
-        if status == "delivery_queued":
-            status = "delivery_failed" if delivery_error else "ok"
+        if not completions or completions[-1] != execution_id:
+            if not job.get("no_agent") or status not in ("delivery_queued", "delivery_unknown"):
+                return False
+        if status in ("delivery_queued", "delivery_unknown"):
+            status = "delivery_unknown" if outcome == "unknown" else "delivery_failed" if delivery_error else "ok"
         if (status, delivery_error) == (job.get("last_status"), job.get("last_delivery_error")):
             return True
         job["last_status"] = status
@@ -81,8 +84,8 @@ def settle_queued_delivery(job_id: Optional[str], execution_id: Optional[str]) -
         return False
     from cron.executions import settle_delivery_outcome
 
-    settle_delivery_outcome(str(execution_id), terminal[0])
-    _settle_job_record(str(job_id), str(execution_id), terminal[1])
+    settle_delivery_outcome(str(execution_id), terminal[0], error=terminal[1])
+    _settle_job_record(str(job_id), str(execution_id), terminal[1], outcome=terminal[0])
     return True
 
 

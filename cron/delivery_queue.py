@@ -254,8 +254,10 @@ def claim_next() -> Optional[dict]:
     return result
 
 
-def _finish(execution_id: str, *, error: Optional[str], suppressed: bool = False) -> bool:
-    status = "failed" if error else "suppressed" if suppressed else "delivered"
+def _finish(
+    execution_id: str, *, error: Optional[str], suppressed: bool = False, unknown: bool = False,
+) -> bool:
+    status = "unknown" if unknown else "failed" if error else "suppressed" if suppressed else "delivered"
     safe_error = (
         redact_sensitive_text(str(error), force=True, redact_url_credentials=True)
         if error
@@ -274,6 +276,18 @@ def _finish(execution_id: str, *, error: Optional[str], suppressed: bool = False
                 _PROCESS_ID,
                 os.getpid(),
             ),
+        )
+        _prune_terminal_unlocked(conn)
+    return cur.rowcount == 1
+
+
+def resolve_live_receipt(execution_id: str, outcome: str, error: Optional[str]) -> bool:
+    with _transaction() as conn:
+        cur = conn.execute(
+            """UPDATE deliveries SET status=?, error=?, finished_at=?
+               WHERE execution_id=? AND status IN ('unknown','delivering')
+                 AND owner_process_id=? AND owner_pid=?""",
+            (outcome, error, _hermes_now().isoformat(), execution_id, _PROCESS_ID, os.getpid()),
         )
         _prune_terminal_unlocked(conn)
     return cur.rowcount == 1
@@ -344,7 +358,10 @@ def drain(
                 )
             except BaseException as exc:
                 error = f"{type(exc).__name__}: {exc}"
-            if _finish(row["execution_id"], error=error,
+            from cron.live_delivery_receipts import error as receipt_error, outcome
+
+            error = error or receipt_error(row["job"])
+            if _finish(row["execution_id"], error=error, unknown=outcome(row["job"]) == "unknown",
                        suppressed=bool(row["job"].get("_notification_all_targets_suppressed"))):
                 from cron.delivery_outcome import settle_quietly
 
