@@ -136,3 +136,35 @@ def test_late_receipt_keeps_the_owning_profile_scope(tmp_path, monkeypatch):
     future.set_result(SendResult(success=True, message_id="receipt-123"))
     wait_until(finished.is_set, what="profile-bound receipt")
     assert seen == [owner]
+
+
+def test_a_cancelled_confirmation_is_still_unknown(monkeypatch):
+    from concurrent.futures import Future
+    from dataclasses import dataclass
+
+    from agent import memory_provider
+    from cron import live_delivery_receipts
+
+    @dataclass
+    class Target:
+        job: dict
+        where: str
+
+    workers = []
+    spawn = memory_provider.spawn_context_thread
+
+    def record_worker(*args, **kwargs):
+        worker = spawn(*args, **kwargs)
+        workers.append(worker)
+        return worker
+
+    monkeypatch.setattr(memory_provider, "spawn_context_thread", record_worker)
+    job = {"id": "cancelled"}
+    future = Future()
+    live_delivery_receipts.track(Target(job, "discord:123"), future)
+    assert future.cancel()
+    for worker in workers:
+        worker.join(5)
+        assert not worker.is_alive()
+    assert live_delivery_receipts.outcome(job) == "unknown"
+    assert job["_live_delivery_receipts"][0]["status"] == "unknown"

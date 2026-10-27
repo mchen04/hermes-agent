@@ -4,6 +4,7 @@ import contextvars
 import logging
 import threading
 from dataclasses import replace
+from concurrent.futures import CancelledError
 
 logger = logging.getLogger("cron.scheduler")
 _lock = threading.RLock()
@@ -72,6 +73,9 @@ def track(target, future) -> None:
             result = completed.result()
             if not _confirm_adapter_delivery(result, job["id"]):
                 raise RuntimeError(_result_field(result, "error") or "adapter returned an unconfirmed receipt")
+        except CancelledError:
+            logger.warning("Job '%s': adapter confirmation cancelled for %s; delivery remains unknown",
+                           job["id"], target.where)
         except Exception as exc:
             detail = str(exc) or type(exc).__name__
             with _lock:
