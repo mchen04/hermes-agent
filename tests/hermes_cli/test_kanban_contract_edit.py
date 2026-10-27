@@ -148,22 +148,25 @@ def test_worker_cli_edit_of_its_own_contract_is_refused(board, monkeypatch):
                                    "prior_worker"])
 def test_authorization_must_be_an_operator_comment_on_the_card(board, monkeypatch, fault):
     with kbc.connect() as conn:
-        if fault == "missing":
-            board["auth"] += 100
-        elif fault == "cross_card":
+        def cross_card():
             other = kb.create_task(conn, title="Other card")
             board["auth"] = kb.add_comment(conn, other, author="default", body=AUTH_TEXT)
-        elif fault == "worker_origin":
+
+        def worker_origin():
             monkeypatch.setenv("HERMES_KANBAN_TASK", board["task"])
             board["auth"] = kb.add_comment(conn, board["task"], author="default", body=AUTH_TEXT)
             monkeypatch.delenv("HERMES_KANBAN_TASK")
-        elif fault == "assignee":
-            conn.execute("UPDATE task_comments SET author='forge' WHERE id=?", (board["auth"],))
-        elif fault == "unknown_author":
-            conn.execute("UPDATE task_comments SET author='someone' WHERE id=?", (board["auth"],))
-        else:
-            conn.execute("INSERT INTO task_runs(task_id,profile,status,started_at,ended_at,outcome) "
-                         "VALUES (?,'default','done',1,2,'completed')", (board["task"],))
+
+        actions = {
+            "missing": lambda: board.update(auth=board["auth"] + 100),
+            "cross_card": cross_card,
+            "worker_origin": worker_origin,
+            "assignee": lambda: conn.execute("UPDATE task_comments SET author='forge' WHERE id=?", (board["auth"],)),
+            "unknown_author": lambda: conn.execute("UPDATE task_comments SET author='someone' WHERE id=?", (board["auth"],)),
+            "prior_worker": lambda: conn.execute("INSERT INTO task_runs(task_id,profile,status,started_at,ended_at,outcome) "
+                                             "VALUES (?,'default','done',1,2,'completed')", (board["task"],)),
+        }
+        actions[fault]()
         with pytest.raises(PermissionError):
             change(conn, board, "example/repo")
         assert stored(conn, board["task"]) == "local-only"
