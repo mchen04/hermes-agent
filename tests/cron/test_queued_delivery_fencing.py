@@ -42,8 +42,8 @@ def test_dead_drain_owner_settles_the_run_it_fenced_unknown(tmp_path, monkeypatc
     delivery_queue.drain(lambda *args: sent.append(args))
     saved = jobs.get_job(job["id"])
     assert sent == [], "an uncertain send is never retried"
-    assert saved["last_status"] == "delivery_failed" and "unknown" in saved["last_delivery_error"]
-    assert executions.get_execution(execution["id"])["delivery_outcome"] == "failed"
+    assert saved["last_status"] == "delivery_unknown" and "unknown" in saved["last_delivery_error"]
+    assert executions.get_execution(execution["id"])["delivery_outcome"] == "unknown"
 
 
 def test_origin_with_no_resolvable_target_is_not_configured_never_delivered(tmp_path, monkeypatch):

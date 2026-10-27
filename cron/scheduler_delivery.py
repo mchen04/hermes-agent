@@ -1292,9 +1292,12 @@ def _live_send_text(
         logger.warning(
             "Job '%s': live adapter send to %s:%s timed out "
             "after 60s; already dispatched (in flight), "
-            "assuming delivered (skipping standalone fallback "
-            "to avoid duplicate)",
+            "delivery unknown until the adapter receipt arrives "
+            "(skipping standalone fallback to avoid duplicate)",
             job["id"], t.platform_name, t.chat_id)
+        from cron.live_delivery_receipts import track
+
+        track(t, future)
         return True, True, None
     except PartialDeliveryError as ex:
         # The head of a split send is already on screen: a standalone resend would duplicate it.
@@ -1494,6 +1497,8 @@ def _deliver_via_live_adapter(
             _note_target_error(job, f"{len(media_files)} media attachment(s) not delivered to {t.where} "
                                "(live adapter confirmation timed out)", delivery_errors)
 
+        if timed_out:
+            return True
         if adapter_ok:
             logger.info(
                 # Log WHERE it went: a wrong-lane ghost delivery looks like a real one without it (#77763).
@@ -1724,6 +1729,8 @@ def _deliver_result(
     running) the live adapter is tried first (E2EE rooms can't use the standalone HTTP path), then
     standalone fallback. ``for_failure=True`` routes failure-category notices through the job's
     ``failure_deliver`` override when present (NS-788). Returns None on success, else an error."""
+    job.pop("_live_delivery_receipts", None)
+    job.pop("_live_delivery_unknown", None)
     job.pop("_bot_chat_delivery_receipts", None)
     job.pop("_notification_all_targets_suppressed", None)
     targets = _resolve_delivery_targets(job, for_failure=for_failure)
@@ -1749,6 +1756,9 @@ def _deliver_result(
         delivery_status = get_status(external_execution)
         if delivery_status and delivery_status["status"] == "suppressed":
             job["_notification_all_targets_suppressed"] = True
+        if delivery_status and delivery_status["status"] == "unknown":
+            job["_live_delivery_unknown"] = True
+            error = None
         from cron.jobs import get_job
         refreshed = get_job(job["id"]) or {}
         job["last_delivery_queued"] = refreshed.get("last_delivery_queued")
