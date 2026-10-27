@@ -34,6 +34,7 @@ def test_timeout_stays_unknown_until_the_adapter_receipt(success, receipt_before
     thread.start()
     release = asyncio.Event()
     finished = threading.Event()
+    seed_threads = []
     adapter = MagicMock()
 
     async def send(*args, **kwargs):
@@ -45,7 +46,11 @@ def test_timeout_stays_unknown_until_the_adapter_receipt(success, receipt_before
     config.get_home_channel.return_value = None
     standalone = AsyncMock()
     monkeypatch.setattr(scheduler_delivery, "_LIVE_SEND_CONFIRM_TIMEOUT_SECS", 0.01)
-    monkeypatch.setattr(scheduler_delivery, "_seed_live_delivery_sessions", lambda *args: finished.set())
+    def seed(*args):
+        seed_threads.append(threading.current_thread())
+        finished.set()
+
+    monkeypatch.setattr(scheduler_delivery, "_seed_live_delivery_sessions", seed)
     try:
         with (
             caplog.at_level("INFO"),
@@ -90,6 +95,7 @@ def test_timeout_stays_unknown_until_the_adapter_receipt(success, receipt_before
             assert get_job(job["id"])["repeat"]["completed"] == 1
             if success:
                 wait_until(finished.is_set, what="confirmed delivery session seed")
+                assert seed_threads[0] is not thread
                 assert "receipt-123" in caplog.text
             assert "message_id=-" not in caplog.text
     finally:
@@ -98,3 +104,35 @@ def test_timeout_stays_unknown_until_the_adapter_receipt(success, receipt_before
         loop.call_soon_threadsafe(loop.stop)
         thread.join(5)
         loop.close()
+
+
+def test_late_receipt_keeps_the_owning_profile_scope(tmp_path, monkeypatch):
+    from concurrent.futures import Future
+    from dataclasses import dataclass
+
+    from cron.live_delivery_receipts import track
+    from hermes_constants import get_hermes_home, reset_hermes_home_override, set_hermes_home_override
+
+    @dataclass
+    class Target:
+        job: dict
+        where: str
+
+    seen = []
+    finished = threading.Event()
+
+    def seed(*args):
+        seen.append(get_hermes_home())
+        finished.set()
+
+    monkeypatch.setattr(scheduler_delivery, "_seed_live_delivery_sessions", seed)
+    owner = tmp_path / "owner"
+    future = Future()
+    token = set_hermes_home_override(owner)
+    try:
+        track(Target({"id": "receipt"}, "discord:123"), future)
+    finally:
+        reset_hermes_home_override(token)
+    future.set_result(SendResult(success=True, message_id="receipt-123"))
+    wait_until(finished.is_set, what="profile-bound receipt")
+    assert seen == [owner]
