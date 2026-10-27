@@ -17,7 +17,7 @@ def bound_skill_rows(messages: list[dict[str, Any]]) -> list[tuple[int, list[str
 
 
 def bound_skill_names(messages: list[dict[str, Any]]) -> set[str]:
-    return {name.strip().lower() for _, names in bound_skill_rows(messages) for name in names}
+    return {_skill_key(name) for _, names in bound_skill_rows(messages) for name in names}
 
 
 def bound_skill_head_end(messages: list[dict[str, Any]]) -> int:

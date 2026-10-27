@@ -76,7 +76,7 @@ def demote_stale_tail_tools(
     Phase-1 stub does, so the model does not act on instructions it no longer has (#32106). Returns a new list
     (untouched rows shared, demoted copied) and the number of rows demoted."""
     from agent.context_compressor import (
-        SKILL_PRUNED_MARKER_PREFIX, _is_summary_stub, _result_failure_suffix, _rewritten, _skill_pruned_marker,
+        SKILL_PRUNED_MARKER_PREFIX, _is_summary_stub, _result_failure_suffix, _rewritten, _skill_key, _skill_pruned_marker,
     )
 
     rounds_seen = 0
@@ -101,7 +101,7 @@ def demote_stale_tail_tools(
         stub = _lean_recovery_stub(msg.get("tool_name") or "", len(content), session_id)
         skills = skill_view_names_by_call_id(messages) if skills is None else skills
         skill = skills.get(str(msg.get("tool_call_id") or ""))
-        if skill and skill.lower() in (protected_skills or ()):
+        if skill and _skill_key(skill) in (protected_skills or ()):
             continue
         if skill and not _result_failure_suffix(content):
             stub += " " + _skill_pruned_marker(skill)

@@ -3190,7 +3190,7 @@ class ContextCompressor(
         """Pass 1: keep the newest copy of identical tool results, back-reference older ones."""
         pruned = 0
         bound = bound_skill_names(result)
-        bound_calls = {call_id for call_id, name in skill_view_names_by_call_id(result).items() if name.lower() in bound}
+        bound_calls = {call_id for call_id, name in skill_view_names_by_call_id(result).items() if _skill_key(name) in bound}
         content_hashes: set = set()
         for i in range(len(result) - 1, -1, -1):
             msg = result[i]
@@ -3233,7 +3233,7 @@ class ContextCompressor(
         tool_name, tool_args = call_id_to_tool.get(msg.get("tool_call_id", ""), ("unknown", ""))
         if protected_skills and tool_name == "skill_view":
             _skill = _json_dict(tool_args).get("name", "")
-            if isinstance(_skill, str) and _skill.lower() in protected_skills:
+            if isinstance(_skill, str) and (_skill.lower() in protected_skills or _skill_key(_skill) in protected_skills):
                 return False
         result[idx] = {**msg, "content": _summarize_tool_result(tool_name, tool_args, content)}
         return True
