@@ -52,17 +52,21 @@ class ToolSearchConfig:
     listing_max_tokens: int = 4000  # budget = min(this, threshold_pct% of context)
     # None = curated default; an explicit list replaces it wholesale ([] = defer no core tools).
     defer_tools: Optional[frozenset] = None
+    always_full_schema: frozenset[str] = frozenset()
 
     @property
     def effective_defer_tools(self) -> frozenset:
         return _DEFAULT_DEFERRED_TOOLS if self.defer_tools is None else self.defer_tools
 
     @classmethod
-    def from_raw(cls, raw: Any) -> ToolSearchConfig:
+    def from_raw(cls, raw: Any, *, always_full_schema: Any = None) -> ToolSearchConfig:
         """Build from a raw dict / legacy bool / None; every field is clamped and unknown
         values fall back to safe defaults — a config typo must not break the agent."""
         if not isinstance(raw, dict):  # legacy bool / None
             raw = {"enabled": "off" if raw is False else "auto"}
+        if always_full_schema is not None and not isinstance(always_full_schema, (list, tuple, set, frozenset)):
+            logger.warning("tools.always_full_schema must be a list of tool names; ignoring invalid value")
+            always_full_schema = None
         max_search_limit = _clamped_int(raw.get("max_search_limit"), 25, 1, 50)
         defer_raw = raw.get("defer")
         if defer_raw is not None and not isinstance(defer_raw, (list, tuple, set)):
@@ -74,6 +78,7 @@ class ToolSearchConfig:
                 "using the curated default set.", defer_raw)
             defer_raw = None
         return cls(
+            always_full_schema=frozenset(n.strip() for n in (always_full_schema or ()) if isinstance(n, str) and n.strip()),
             enabled=_tri_state(raw.get("enabled", "auto")),
             threshold_pct=max(0.0, min(100.0, _safe_float(raw.get("threshold_pct"), 5.0))),
             search_default_limit=_clamped_int(
@@ -116,7 +121,9 @@ def _config_from_loader(loader_name: str) -> ToolSearchConfig:
         import hermes_cli.config as _cfg_mod
         tools_cfg = (getattr(_cfg_mod, loader_name)() or {}).get("tools")
         tools_cfg = tools_cfg if isinstance(tools_cfg, dict) else {}
-        return ToolSearchConfig.from_raw(tools_cfg.get("tool_search"))
+        return ToolSearchConfig.from_raw(
+            tools_cfg.get("tool_search"), always_full_schema=tools_cfg.get("always_full_schema"),
+        )
     except Exception as e:
         logger.debug("Failed to load tool-search config: %s", e)
         return ToolSearchConfig.from_raw(None)
@@ -147,11 +154,15 @@ _DIRECT_SURFACE_TOOLSETS = CLIENT_SURFACE_TOOLSETS | TOOLSET_SESSION_PLATFORMS.k
 _DEFAULT_DEFERRED_TOOLS = frozenset(DEFAULT_CONFIG["tools"]["tool_search"]["defer"])
 
 
-def is_deferrable_tool_name(name: str, defer_tools: Optional[frozenset] = None) -> bool:
+def is_deferrable_tool_name(
+    name: str, defer_tools: Optional[frozenset] = None, always_full_schema: Optional[frozenset] = None,
+) -> bool:
     """True if a tool is *eligible* for deferral: named in ``defer_tools`` (curated set or
     user override), OR an MCP tool, OR neither core nor a session-gated GUI surface (i.e. a
     plugin tool). Bridge names never defer."""
-    if name in BRIDGE_TOOL_NAMES:
+    if always_full_schema is None:
+        always_full_schema = load_config_readonly().always_full_schema
+    if name in BRIDGE_TOOL_NAMES or name in always_full_schema:
         return False
     if defer_tools is not None and name in defer_tools:
         return True
@@ -175,14 +186,16 @@ def session_tool_names(tool_defs: Iterable[dict[str, Any]]) -> frozenset[str]:
 
 
 def classify_tools(tool_defs: list[dict[str, Any]], defer_tools: Optional[frozenset] = None,
-                   ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+                   always_full_schema: Optional[frozenset] = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Split a tool-defs list into (visible, deferrable); bridge tools are dropped (re-added
     after classification)."""
+    if always_full_schema is None:
+        always_full_schema = load_config_readonly().always_full_schema
     visible: list[dict[str, Any]] = []
     deferrable: list[dict[str, Any]] = []
     for td, name in zip(tool_defs, _tool_def_names(tool_defs)):
         if name not in BRIDGE_TOOL_NAMES:
-            (deferrable if is_deferrable_tool_name(name, defer_tools) else visible).append(td)
+            (deferrable if is_deferrable_tool_name(name, defer_tools, always_full_schema) else visible).append(td)
     return visible, deferrable
 
 
@@ -348,7 +361,7 @@ def assemble_tool_defs(tool_defs: list[dict[str, Any]], *, context_length: Optio
     config = config or load_config()
     incoming = [td for td, name in zip(tool_defs, _tool_def_names(tool_defs))
                 if name not in BRIDGE_TOOL_NAMES]
-    visible, deferrable = classify_tools(incoming, config.effective_defer_tools)
+    visible, deferrable = classify_tools(incoming, config.effective_defer_tools, config.always_full_schema)
     connections_granted = connections_in_scope(incoming)
     if not deferrable:
         if should_activate(config, 0, context_length, connections_granted=connections_granted):
