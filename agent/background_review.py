@@ -23,6 +23,8 @@ from agent.thread_scoped_output import thread_scoped_silence
 logger = logging.getLogger(__name__)
 
 _BACKGROUND_REVIEW_CANCEL_TIMEOUT_SECONDS = 2.0
+_ignored_reasoning_effort_warning_lock = threading.Lock()
+_warned_ignored_reasoning_effort = False
 
 
 class _BackgroundReviewRun:
@@ -854,16 +856,14 @@ def _same_model_parity_kwargs(agent: Any) -> dict[str, Any]:
 
 
 def _warn_ignored_reasoning_effort(agent: Any, task_cfg: Optional[dict[str, Any]] = None) -> None:
-    """One-shot user-visible notice: ``auxiliary.background_review.reasoning_effort`` is IGNORED on
-    the same-model path (#104116). The fork inherits the parent's ``reasoning_config`` verbatim so
-    its request bytes keep the parent's prompt-cache prefix (#30532: a diverged ``thinking`` field
-    on the fork-birth request re-created a large share of the cache); the no-op used to be silent,
-    so a user who set the key saw no feedback at all. Gated on the parent so a nudge-per-turn
-    session warns once, not per fork."""
+    global _warned_ignored_reasoning_effort
     effort = str(_background_review_task_config(task_cfg).get("reasoning_effort") or "").strip()
-    if not effort or getattr(agent, "_warned_bg_review_reasoning_effort", False):
+    if not effort:
         return
-    agent._warned_bg_review_reasoning_effort = True
+    with _ignored_reasoning_effort_warning_lock:
+        if _warned_ignored_reasoning_effort:
+            return
+        _warned_ignored_reasoning_effort = True
     message = t("display.review.reasoning_effort_warning", effort=effort)
     emit = getattr(agent, "_emit_warning", None)
     if callable(emit):
