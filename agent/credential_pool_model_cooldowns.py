@@ -41,8 +41,12 @@ def model_cooldown_until(entry: PooledCredential, model: Optional[str]) -> Optio
     cooldown blocks them, so an unscoped route cannot reuse the credential.
     """
     cooldowns = entry.model_cooldowns or {}
-    values = cooldowns.values() if not model else (cooldowns.get(model),)
     now = time.time()
+    # An entitlement bench is one model the plan lacks, not a limit on the credential.
+    values = (
+        (cooldowns.get(model),) if model
+        else [u for u in cooldowns.values() if isinstance(u, (int, float)) and u - now < MODEL_ENTITLEMENT_BENCH_SECONDS / 2]
+    )
     active = [float(until) for until in values if isinstance(until, (int, float)) and until > now]
     return max(active) if active else None
 
