@@ -191,6 +191,29 @@ def _get_extract_backend() -> str:
     return "firecrawl" if pin == NOUS_MANAGED_PROVIDER else pin or _get_backend()
 
 
+async def _extract_with_fallback(provider, safe_urls: list[str], format: Optional[str]) -> list[dict]:
+    """Fetch through *provider*, then send failed URLs to web.extract_fallback_backend when set."""
+    fallback_name = _configured_backend("extract_fallback_backend")
+    try:
+        results = await _extract_safe_urls(provider, safe_urls, format)
+    except Exception as exc:
+        if not fallback_name:
+            raise
+        results = [_result_entry(url, str(exc)) for url in safe_urls]
+    failed = [i for i, result in enumerate(results) if result.get("error")]
+    if not fallback_name or fallback_name == provider.name or not failed or len(results) != len(safe_urls):
+        return results
+    fallback, error_json = _resolve_extract_provider(fallback_name)
+    if error_json is not None:
+        return results
+    logger.info("web_extract: %d URL(s) failed on %s, trying %s", len(failed), provider.name, fallback_name)
+    rescued = await _extract_safe_urls(fallback, [safe_urls[i] for i in failed], format)
+    for index, result in zip(failed, rescued):
+        if not result.get("error"):
+            results[index] = result
+    return results
+
+
 def _ddgs_package_importable() -> bool:
     """ddgs is the only backend gated on package presence; single symbol so tests can patch it."""
     try:
@@ -425,7 +448,7 @@ async def web_extract_tool(urls: list[Any], format: str | None = None, char_limi
             provider, error_json = _resolve_extract_provider(backend)
             if error_json is not None:
                 return error_json
-            results = await _extract_safe_urls(provider, safe_urls, format)
+            results = await _extract_with_fallback(provider, safe_urls, format)
         # Reconstruct input order across invalid, blocked, and provider entries (providers preserve
         # the order of the safe URL list they receive).
         if invalid_urls or ssrf_blocked:

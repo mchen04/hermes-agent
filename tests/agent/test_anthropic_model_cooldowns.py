@@ -68,3 +68,15 @@ def test_auth_and_billing_failures_stay_credential_wide(pool, status_code, failu
     assert pool.entries()[0].last_status == STATUS_EXHAUSTED
     assert not pool.entries()[0].model_cooldowns
     assert pool.select(model=MODEL_B) is None
+
+
+def test_a_model_entitlement_bench_does_not_block_a_caller_that_names_no_model(pool, monkeypatch):
+    from agent.credential_pool_model_cooldowns import MODEL_ENTITLEMENT_BENCH_SECONDS, model_cooldown_until
+    import time
+
+    entry = pool.entries()[0]
+    entry.model_cooldowns = {"fake-model": time.time() + MODEL_ENTITLEMENT_BENCH_SECONDS}
+    assert model_cooldown_until(entry, None) is None
+    assert model_cooldown_until(entry, "fake-model") is not None
+    entry.model_cooldowns = {"fake-model": time.time() + 3600}
+    assert model_cooldown_until(entry, None) is not None
