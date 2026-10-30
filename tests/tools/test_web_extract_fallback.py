@@ -46,7 +46,7 @@ def test_no_fallback_configured_keeps_the_vendor_error(monkeypatch):
 def test_a_raising_primary_still_reaches_the_fallback(monkeypatch):
     def boom(urls):
         raise RuntimeError("402")
-    results, calls = run(monkeypatch, "exa", boom)
+    results, _ = run(monkeypatch, "exa", boom)
     assert [r["content"] for r in results] == ["from exa", "from exa"]
 
 
