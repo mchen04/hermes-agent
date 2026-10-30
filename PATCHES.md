@@ -1002,3 +1002,9 @@ Errors:
 - `tests/hermes_cli/test_doctor_pm_store_probe.py::test_sealed_store_extension_matches_launched_tool[stale]`
 - `tests/hermes_cli/test_vault_key_cli.py`
 - `tests/tools/test_fal_sdk.py`
+
+## Added 2026-10-30
+
+- **pool-bench-unscoped**: `model_cooldown_until(entry, None)` ignores entitlement benches, so one refused model cannot block every unscoped pool pick. Test: `tests/agent/test_anthropic_model_cooldowns.py`.
+- **web-extract-fallback**: `web.extract_fallback_backend` sends failed URLs to a second backend. Test: `tests/tools/test_web_extract_fallback.py`.
+- **spawn-refusal-linux-only**: `test_infrastructure_spawn_refusal_never_charges_the_card` runs on Linux only.
