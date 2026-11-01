@@ -1008,3 +1008,7 @@ Errors:
 - **pool-bench-unscoped**: `model_cooldown_until(entry, None)` ignores entitlement benches, so one refused model cannot block every unscoped pool pick. Test: `tests/agent/test_anthropic_model_cooldowns.py`.
 - **web-extract-fallback**: `web.extract_fallback_backend` sends failed URLs to a second backend. Test: `tests/tools/test_web_extract_fallback.py`.
 - **spawn-refusal-linux-only**: `test_infrastructure_spawn_refusal_never_charges_the_card` runs on Linux only.
+
+## Added 2026-10-31
+
+- **kanban-lifecycle-edit**: `hermes kanban edit <id> --goal-mode on|off --clear-stale-block --authorization-comment <id> --reason <why>` changes goal mode and clears a block record the card no longer waits on, with operator authorization (workers refused) and one audited `edited` event; `show --json` adds `goal_mode` and `block_recurrences`. Files: `hermes_cli/kanban_lifecycle_edit.py`, `hermes_cli/kanban.py`, `hermes_cli/kanban_parser.py`, `hermes_cli/kanban_output.py`, `website/docs/user-guide/features/kanban.md`. Test: `tests/hermes_cli/test_kanban_lifecycle_edit.py`.
