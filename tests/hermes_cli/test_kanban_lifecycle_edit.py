@@ -15,7 +15,6 @@ REASON = "Michael approved ordinary event-aware waiting and stale-capacity clear
 
 @pytest.fixture
 def board(tmp_path, monkeypatch):
-    """A goal-mode card that blocked as ``capacity`` and was unblocked: running, block record kept."""
     home = tmp_path / ".hermes"
     home.mkdir()
     monkeypatch.setenv("HERMES_HOME", str(home))
@@ -103,7 +102,7 @@ def test_a_block_the_card_still_waits_on_is_refused_and_nothing_changes(board, h
         if held == "dependency":
             board["task"] = kb.create_task(conn, title="Child", assignee="forge", goal_mode=True)
             kb.link_tasks(conn, parent_id=kb.create_task(conn, title="Open parent"), child_id=board["task"])
-            with kb.write_txn(conn):  # the reopened-parent shape: an open parent while the child runs
+            with kb.write_txn(conn):
                 conn.execute("UPDATE tasks SET status='running' WHERE id=?", (board["task"],))
             board["auth"] = kb.add_comment(conn, board["task"], author="default", body=AUTH_TEXT)
         assert kb.block_task(conn, board["task"], reason="wait", kind=held)
