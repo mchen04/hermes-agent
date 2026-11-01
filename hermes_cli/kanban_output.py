@@ -86,5 +86,7 @@ def _task_to_dict(t: kb.Task) -> dict[str, Any]:
     d = _obj_dict(t, _TASK_DICT_FIELDS)
     d["skills"] = list(t.skills) if t.skills else []
     d["block_kind"] = t.block_kind
+    d["block_recurrences"] = t.block_recurrences
+    d["goal_mode"] = t.goal_mode
     d["waits_on"] = kb.task_waits_on(t)
     return d

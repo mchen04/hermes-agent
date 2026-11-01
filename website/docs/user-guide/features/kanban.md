@@ -806,6 +806,20 @@ hermes kanban create "Translate the docs site to French" \
     --goal-max-turns 15      # optional; default 20
 ```
 
+An operator turns the loop off or on for an existing card with `hermes kanban edit <id>
+--goal-mode off|on --authorization-comment <comment id> --reason <why>`, under the same
+authorization and worker refusal as a contract change. With the loop off, the card's worker can
+wait with `kanban_schedule` again (a goal-mode worker is refused it). A worker already running keeps
+its spawn-time loop until the card leaves `running`.
+
+A block record outlives its block: `block_kind` and `block_recurrences` survive `unblock` so a
+same-cause re-block reads as a loop. When an automatic or deliberate unblock has already resolved
+the block, `--clear-stale-block` (same flags, combinable with `--goal-mode`) clears that record. It
+is refused while the card still waits on the block (`waits_on` is set: `blocked`, `triage`, or a
+`todo` dependency wait). Both changes record one `edited` event with the old goal mode, the
+cleared kind and count, the block event they came from, the reason and the authorization comment;
+the original block events stay. `show --json` reports `goal_mode` and `block_recurrences`.
+
 Use it for open-ended, multi-step, or "keep going until X is true" cards. Skip it for cheap one-shot work — the per-turn judge overhead isn't worth it, and the dispatcher's existing retry/circuit-breaker already handles transient worker failures. The judge is only as good as your goal text, so write the body as **explicit acceptance criteria**.
 
 The judge gate on `kanban complete` / `kanban request-review` (and the matching `kanban_complete` / `kanban_request_review` tools) only rejects on a **real verdict**. If the judge call itself fails — relay error, auth, timeout — the handoff is allowed and a `goal judge unreachable … allowing lifecycle handoff` warning lands in the log, so an unreachable judge never blocks a human approval. The headless CLI gate sends the same per-task relay-affinity key (`kanban:<task-id>`) as `specify`/`decompose`, so relays that require a session key accept the judge request.
@@ -1040,6 +1054,8 @@ hermes kanban assign <id> <profile>                    # or 'none' to unassign
 hermes kanban reassign <id>... <profile>               # bulk re-assign tasks to a profile
 hermes kanban edit <id> [--title ...] [--body ...]     # edit task title / body / priority in place
         [--priority N]
+        [--completion-contract C] [--goal-mode on|off] [--clear-stale-block]
+        [--authorization-comment ID --reason WHY]      # operator-authorized; workers refused
 hermes kanban promote <id>...                          # move todo/blocked tasks to ready (recovery)
 hermes kanban schedule <id> --at <ISO8601>             # set/clear a task's scheduled_at start time
 hermes kanban diagnostics [--json]                     # board health snapshot (alias: diag)
