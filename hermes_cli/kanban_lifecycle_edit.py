@@ -1,4 +1,3 @@
-"""Operator-authorized lifecycle edits: a card's goal mode and its stale block record."""
 from __future__ import annotations
 
 import os
@@ -16,14 +15,6 @@ def change_lifecycle(
     clear_stale_block: bool = False, reason: str, authorization_comment_id: int,
     board: Optional[str] = None,
 ) -> list[str]:
-    """Set ``goal_mode`` and/or clear a block record no longer in force; returns the changed fields.
-
-    Goal mode is the completion-judge gate (``kanban_schedule`` is refused under it), so no
-    Kanban worker may lift or impose it on any card. ``block_kind``/``block_recurrences``
-    deliberately survive an unblock as loop evidence; clearing them is refused while the card
-    still waits on that block (``task_waits_on``), and the cleared values plus the block event
-    they came from stay in the ``edited`` audit event.
-    """
     if (os.environ.get("HERMES_KANBAN_TASK") or "").strip() or is_delegated_child_process_context():
         raise PermissionError("Kanban workers cannot change a card's goal mode or block record; "
                               "the operator changes it")
