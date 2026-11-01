@@ -314,10 +314,16 @@ _SPECS = [
         _arg("--completion-contract", metavar="CONTRACT",
              help="Change the completion contract: local-only, OWNER/REPO, or exact GitHub PR URL. "
                   "Needs --authorization-comment and --reason. Kanban workers are refused."),
+        _arg("--goal-mode", choices=("on", "off"),
+             help="Turn the goal loop on or off (off lets the worker wait with kanban_schedule). "
+                  "Needs --authorization-comment and --reason. Kanban workers are refused."),
+        _arg("--clear-stale-block", action="store_true",
+             help="Clear block_kind/block_recurrences left from a block the card no longer waits on. "
+                  "Needs --authorization-comment and --reason. Kanban workers are refused."),
         _arg("--authorization-comment", type=int, metavar="COMMENT_ID",
-             help="Operator comment on this card that authorizes the contract change "
+             help="Operator comment on this card that authorizes the contract, goal-mode or block change "
                   "(same rules as kanban_resume_authorized_pr)"),
-        _arg("--reason", help="Why the completion contract changes (recorded on the edited event)"),
+        _arg("--reason", help="Why the contract, goal mode or block record changes (recorded on the edited event)"),
     ], help="Edit task fields or recovery fields on an already-completed task"),
     _cmd("block", [
         _TASK_ID,
