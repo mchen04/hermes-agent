@@ -3,7 +3,7 @@
 Upstream base: `9935fc27a8a7665257b7aae4e68099fa919d6ac0`.
 Live predecessor: `ae1dad38596ab65737bcc99e07596b0a7368936e` (tag `pre-update-20261103`).
 Delivery branch: `update-candidate-20261103`, replayed on 2026-11-03 from the 2026-10-27 rebuild (base `085f562af5`).
-Kept topics: **25**, from **26** source commits in first-parent order, plus the requested additions and the 2026-10-30/31 patches.
+Kept topics: **26**, from **27** source commits in first-parent order, plus the requested additions and the 2026-10-30/31 patches.
 Use this manifest instead of searching historical `LOCAL-PATCH` subjects.
 Every replayed commit keeps the original author metadata and gains a `(cherry picked from ...)` footer naming its live-branch source.
 The swap merge makes upstream and the live predecessor both ancestors.
@@ -687,6 +687,26 @@ Proof:
 - `tests/gateway/test_kanban_stall_wake.py::test_a_stall_is_a_wake_kind_and_never_a_muted_diagnostic`
 - `tests/gateway/test_kanban_stall_wake.py::test_a_stalled_card_is_claimed_once`
 - `tests/gateway/test_kanban_stall_wake.py::test_a_stalled_card_wakes_the_chat_that_follows_it_with_the_stall_and_its_next_step`
+
+## 30. env-scrub-secret-suffixes
+
+Commits: `85d2d6a5f5ddb72351a45966afeee7822151954e`.
+
+Scrub any secret-shaped env name (`*_PASSWORD`, `*_SECRET`, `*_API_KEY`, `*_TOKEN`, `*_PRIVATE_KEY`, `*SECRET*`, `*PASSWORD*`) from terminal and non-inheriting children, with CLAUDE_CODE_OAUTH_TOKEN, the AWS chain and `HERMES_*` allowed and passthrough still able to admit a name.
+
+Files:
+
+- `tools/environments/local.py`
+- `tools/environments/local_env_policy.py`
+- `tests/tools/test_env_scrub_suffixes.py`
+- `tests/tools/test_local_env_blocklist.py`
+
+Proof:
+
+- `tests/tools/test_env_scrub_suffixes.py::test_children_never_see_secret_shaped_names`
+- `tests/tools/test_env_scrub_suffixes.py::test_terminal_child_observes_secret_shape_policy`
+- `tests/tools/test_env_scrub_suffixes.py::test_passthrough_registration_still_admits_operator_secret`
+- `tests/tools/test_env_scrub_suffixes.py::test_inheriting_child_keeps_secret_shaped_names`
 
 ## Dropped 2026-11-03
 
