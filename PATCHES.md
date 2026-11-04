@@ -1,15 +1,12 @@
 # Hermes local patch manifest
 
-Upstream base: `085f562af53a6fedadac3681e2c498fc71316132`.
-Live predecessor: `7fd9283476d363cb63b4b22f4cfb754614594dcc`.
-Delivery commit: `8e3a45d7e7edd29d76a24664efb0cddfc25e428e`.
-Verified content tree: `70384efbb7e857328fd718339775ae24c2ce9938`.
-Kept topics: **29**, from **31** source commits in first-parent order.
+Upstream base: `9935fc27a8a7665257b7aae4e68099fa919d6ac0`.
+Live predecessor: `ae1dad38596ab65737bcc99e07596b0a7368936e` (tag `pre-update-20261103`).
+Delivery branch: `update-candidate-20261103`, replayed on 2026-11-03 from the 2026-10-27 rebuild (base `085f562af5`).
+Kept topics: **25**, from **26** source commits in first-parent order, plus the requested additions and the 2026-10-30/31 patches.
 Use this manifest instead of searching historical `LOCAL-PATCH` subjects.
-All 199 audited added test entries remain present. All 24 required runtime-check paths exist.
-All 31 replayed commits preserve the original author metadata and source-commit footer.
-The final merge keeps the verified content tree. Upstream and the live predecessor are both ancestors.
-The identity cleanup adds and removes `WORKLOG.md`. The final tree has no worklog.
+Every replayed commit keeps the original author metadata and gains a `(cherry picked from ...)` footer naming its live-branch source.
+The swap merge makes upstream and the live predecessor both ancestors.
 
 The shared compatibility commit is `c569d345e5a7ef5170cdf727b9aeb22a570b97f7`.
 It moves code into topic modules and uses the upstream config reader.
@@ -93,24 +90,6 @@ Proof:
 - `tests/hermes_cli/test_kanban_dispatch_task.py::test_dispatch_task_respects_dependencies`
 - `tests/hermes_cli/test_kanban_dispatch_task.py::test_dispatch_task_spawns_exactly_the_named_card_once`
 - `tests/hermes_cli/test_kanban_dispatch_task.py::test_spawn_from_inside_a_worker_does_not_leak_its_identity`
-
-## 5. search-rg-pgid
-
-Commits: `67c2296b3eaf4dd00340f7e9c9a5357cafb1d1c8`.
-
-Record rg process identity before it can exit.
-
-Files:
-
-- `tests/tools/test_search_rg_pgid.py`
-- `tools/environments/local.py`
-- `tools/file_operations_search.py`
-
-Proof:
-
-- `tests/tools/test_search_rg_pgid.py::test_kill_helper_tolerates_an_exited_unreaped_child_without_a_recorded_pgid`
-- `tests/tools/test_search_rg_pgid.py::test_native_rg_runner_survives_rg_exiting_after_poll`
-- `tests/tools/test_search_rg_pgid.py::test_spawn_records_the_group_and_its_start_fingerprint`
 
 ## 6. kanban-authorized-pr-resume
 
@@ -563,26 +542,6 @@ Proof:
 - `tests/hermes_cli/test_kanban_worker_wake.py::test_a_respawned_worker_is_told_what_changed_since_its_last_run`
 - `tests/hermes_cli/test_kanban_worker_wake.py::test_the_wake_cursor_reads_only_what_came_after_and_the_full_read_still_works`
 
-## 23. process-command-hash
-
-Commits: `d7297c127acefef835154554ae2b6c12ebd627d4`, `c569d345e5a7ef5170cdf727b9aeb22a570b97f7`.
-
-Shorten echoed process commands and keep a hash.
-
-Files:
-
-- `hermes_cli/config_defaults.py`
-- `tests/tools/test_process_command_echo.py`
-- `tools/process_command_echo.py`
-- `tools/process_registry.py`
-- `tools/process_registry_results.py`
-- `website/docs/user-guide/configuration.md`
-
-Proof:
-
-- `tests/tools/test_process_command_echo.py::test_short_commands_and_the_list_view`
-- `tests/tools/test_process_command_echo.py::test_status_and_wait_results_return_a_hash_instead_of_the_instruction`
-
 ## 24. compaction-landing
 
 Commits: `2a63a9ce7eb3aec014cc212f176cddd62716dd04`, `c569d345e5a7ef5170cdf727b9aeb22a570b97f7`.
@@ -667,33 +626,6 @@ Proof:
 - `tests/hermes_cli/test_kanban_plan_restricted_rules.py::test_other_owner_plan_path_receipts_are_unchanged`
 - `tests/hermes_cli/test_kanban_plan_restricted_rules.py::test_other_owners_keep_the_gate_with_unchanged_reads`
 
-## 26. kanban-worker-tool-identity
-
-Commits: `dcb43c2f7c2b722fbdd8a39d778d7a9323eaf94c`, `e4600fa820f86c61954e9b38397baf83f688c12f`, `c569d345e5a7ef5170cdf727b9aeb22a570b97f7`.
-
-Label a verified worker's own tool children with its card and run.
-
-Files:
-
-- `agent/delegation_context.py`
-- `gateway/session_kanban.py`
-- `hermes_cli/kanban_resume_guard.py`
-- `tests/gateway/fixtures/kanban_owner_probe.py`
-- `tests/gateway/test_session_kanban.py`
-- `tests/tools/_kanban_identity_harness.py`
-- `tests/tools/test_kanban_worker_tool_identity.py`
-- `tools/code_execution_env.py`
-- `tools/code_kernel.py`
-- `tools/environments/base_session_env.py`
-- `tools/environments/local.py`
-- `tools/process_registry.py`
-- `website/docs/user-guide/features/kanban-worker-lanes.md`
-
-Proof:
-
-- `tests/tools/test_kanban_worker_tool_identity.py::test_concurrent_bound_workers_children_carry_only_their_own_card`
-- `tests/tools/test_kanban_worker_tool_identity.py::test_no_label_without_a_live_binding_of_this_interpreter`
-
 ## 27. kanban-contract-edit
 
 Commits: `58f6191f45f51da4f80e990b92d63e9eb65d8b12`, `c569d345e5a7ef5170cdf727b9aeb22a570b97f7`.
@@ -719,24 +651,6 @@ Proof:
 - `tests/hermes_cli/test_kanban_contract_edit.py::test_operator_cli_edit_lets_an_authorized_resume_proceed`
 - `tests/hermes_cli/test_kanban_contract_edit.py::test_worker_cli_edit_of_its_own_contract_is_refused`
 - `tests/hermes_cli/test_kanban_contract_edit.py::test_workers_cannot_change_any_cards_contract`
-
-## 28. card-channel-read
-
-Commits: `ed1932161ace2fd2b0f175362852d2e8898979d9`.
-
-Give card turns the profile's platform-only chat tools.
-
-Files:
-
-- `gateway/session_kanban.py`
-- `tests/gateway/test_session_kanban.py`
-
-Proof:
-
-- `tests/gateway/test_session_kanban.py::test_claim_freezes_task_policy_and_rejects_forgery`
-- `tests/gateway/test_session_kanban.py::test_claim_reclaimed_before_admission_marker_is_refused`
-- `tests/gateway/test_session_kanban.py::test_late_launcher_cannot_stamp_replacement_claim`
-- `tests/gateway/test_session_kanban.py::test_real_dispatcher_lifecycle`
 
 ## 29. kanban-stall-wake
 
@@ -774,9 +688,20 @@ Proof:
 - `tests/gateway/test_kanban_stall_wake.py::test_a_stalled_card_is_claimed_once`
 - `tests/gateway/test_kanban_stall_wake.py::test_a_stalled_card_wakes_the_chat_that_follows_it_with_the_stall_and_its_next_step`
 
+## Dropped 2026-11-03
+
+Topic ids stay stable; these numbers are retired.
+
+- 5 search-rg-pgid: upstream 4f92c11 records rg's process group itself.
+- 23 process-command-hash: unused; the compatibility commit's process-registry move went with it, so `tools/process_registry*.py` match upstream.
+- 26 kanban-worker-tool-identity: unused and conflict-prone; `agent/delegation_context.py`, `tools/code_execution_env.py`, `tools/code_kernel.py`, `tools/environments/*` match upstream.
+- 28 card-channel-read: no consumer.
+
+Their proof tests (`tests/tools/test_search_rg_pgid.py`, `tests/tools/test_process_command_echo.py`, `tests/tools/test_kanban_worker_tool_identity.py`) are gone and left hermes-local's `CORE_TESTS`.
+
 ## Requested additions
 
-These additions supplement the 29 kept topics.
+These additions supplement the 25 kept topics.
 
 ### tools-always-full-schema
 
@@ -884,7 +809,7 @@ Proof:
 
 - `tests/agent/test_background_review_reasoning_warning.py::test_same_model_reasoning_warning_fires_once_across_agent_instances`
 
-## Verification
+## Verification (2026-10-27 rebuild on 085f562af5)
 
 Each source commit passes its touched test files before commit.
 Behavior tests fail before their corresponding fixes. The test-only cleanup has no behavior change.
@@ -1012,3 +937,24 @@ Errors:
 ## Added 2026-10-31
 
 - **kanban-lifecycle-edit**: `hermes kanban edit <id> --goal-mode on|off --clear-stale-block --authorization-comment <id> --reason <why>` changes goal mode and clears a block record the card no longer waits on, with operator authorization (workers refused) and one audited `edited` event; `show --json` adds `goal_mode` and `block_recurrences`. Files: `hermes_cli/kanban_lifecycle_edit.py`, `hermes_cli/kanban.py`, `hermes_cli/kanban_parser.py`, `hermes_cli/kanban_output.py`, `website/docs/user-guide/features/kanban.md`. Test: `tests/hermes_cli/test_kanban_lifecycle_edit.py`.
+
+## Replayed 2026-11-03 on 9935fc27a8
+
+All kept source commits cherry-picked in live first-parent order; the delivery and upstream merges were not replayed (the 2026-10-27 upstream merge was a clean auto-merge).
+Conflicts and resolutions:
+
+- `tests/conftest.py`: both sides added a pytest marker; kept upstream `allow_network` and the patch `real_pr_state_lookup`.
+- `gateway/config.py`, `website/docs/user-guide/messaging/index.md`: `ChannelOverride` keeps upstream `allow_silence` and the patch `service_tier`.
+- `agent/context_compressor_window.py`: kept upstream's `tail_cut_progress_floor` import beside the landing imports.
+- `cron/executions.py`: `finish_execution` status is `cancelled` first (upstream), then `unknown` for an unknown delivery (patch), then completed/failed.
+- `hermes_cli/config_defaults.py`: kept upstream's `_aux` import and the patch's `KANBAN_DEFAULTS` import; upstream's kanban block was unchanged since 085f562af5, so `config_defaults_kanban.py` stays complete.
+- Compatibility commit `c569d345`: its `tools/process_registry*.py` move served the dropped process-command-hash topic; those files stay upstream.
+
+Verification (runtime proof on the `mini` host, the same path `check_runtime.py` uses):
+
+- CORE_TESTS: 35 files, 585 passed, 0 failed, 1 skipped.
+- Every test file this branch adds or changes (37 files): 642 passed, 0 failed, 2 skipped.
+- hermes-local suites: tests 309 OK, operations/tests 548 OK (3 skipped), ~/.hermes/scripts/tests 114 OK, mikebot-texting 1 OK.
+- hermes-local `tests/test_skill_links.py` fails independently of this branch: `profile-workflows/references/cards.md` names `supervise/references/model-prompting.md`, which the installed supervise skill lacks.
+- Local test runs on this Mac are killed mid-run (whole process tree, also on pure upstream); the mini is the verification host.
+
