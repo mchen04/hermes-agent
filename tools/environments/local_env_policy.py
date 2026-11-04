@@ -326,6 +326,19 @@ def _is_hermes_internal_secret(key: str) -> bool:
     return upper.startswith("GATEWAY_RELAY_") and upper.endswith(("_SECRET", "_KEY", "_TOKEN"))
 
 
+_SECRET_NAME_SUFFIXES = ("_PASSWORD", "_SECRET", "_API_KEY", "_TOKEN", "_PRIVATE_KEY")
+_SECRET_NAME_INFIXES = ("SECRET", "PASSWORD")
+_SECRET_NAME_ALLOWLIST = frozenset({"CLAUDE_CODE_OAUTH_TOKEN", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"})
+_SECRET_NAME_ALLOW_PREFIXES = ("HERMES_",)
+
+
+def _is_secret_named_env(name: str) -> bool:
+    upper = name.upper()
+    if upper in _SECRET_NAME_ALLOWLIST or upper.startswith(_SECRET_NAME_ALLOW_PREFIXES):
+        return False
+    return upper.endswith(_SECRET_NAME_SUFFIXES) or any(infix in upper for infix in _SECRET_NAME_INFIXES)
+
+
 # Authorization gates: the env names platform adapters read to decide WHO may talk to the
 # agent (allow/deny lists, allow-all opt-ins, bot policy, channel scoping). Not credentials, so
 # no secret scrub touches them, and most profiles' ``.env`` files do not define them, so the

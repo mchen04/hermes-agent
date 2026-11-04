@@ -106,6 +106,8 @@ MSGRAPH_WEBHOOK_CLIENT_STATE MSGRAPH_CLIENT_SECRET
 # they reach the terminal like any other variable, and passthrough can forward them.
 OPERATOR_SECRETS = ["MY_APP_KEY", "DEPLOY_WEBHOOK_SECRET", "SLACK_USER_TOKEN", "LOCAL_LLM_API_KEY",
                     "GATEWAY_API_KEY"]
+# Secret-shaped operator names are scrubbed by shape until passthrough admits them; MY_APP_KEY is plain.
+SECRET_SHAPED_OPERATOR = OPERATOR_SECRETS[1:]
 
 
 @pytest.mark.parametrize("builder", ["foreground", "background", "nonterminal"])
@@ -124,7 +126,8 @@ def test_adapter_and_provider_profile_secrets_never_reach_children(child_env, mo
         "nonterminal": local.hermes_subprocess_env,
     }
     observed = observe_child(factories[builder](), sorted(secrets | set(OPERATOR_SECRETS)))
-    assert observed == {**dict.fromkeys(secrets), **{k: "fake-" + k for k in OPERATOR_SECRETS}}
+    assert observed == {**dict.fromkeys(secrets), **dict.fromkeys(SECRET_SHAPED_OPERATOR),
+                        "MY_APP_KEY": "fake-MY_APP_KEY"}
     # Skill passthrough is what forwards a name into docker/ssh/modal and execute_code children.
     register_env_passthrough(sorted(secrets | set(OPERATOR_SECRETS)))
     assert not any(is_env_passthrough(name) for name in secrets)
@@ -357,7 +360,7 @@ def test_runtime_adapter_secret_follows_the_bound_profiles_registry(child_env, m
     home_a, home_b = child_env / "hermes", child_env / "profile-b"
     home_a.mkdir(exist_ok=True)
     home_b.mkdir()
-    name = "ACME_CHAT_SIGNING_SECRET"  # declared by a user adapter; no OPTIONAL_ENV_VARS entry
+    name = "ACME_CHAT_SIGNING_KEY"  # declared by a user adapter; no OPTIONAL_ENV_VARS entry
     monkeypatch.setenv(name, "fake-secret")
     monkeypatch.setenv("MY_APP_KEY", "operator")
     scope_a = platform_registry.current_scope_key()
