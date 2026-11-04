@@ -26,7 +26,7 @@ from gateway.bridged_env import BRIDGED_ENV_MARKER_PREFIX, bridged_env_digest, d
 from tools.environments.local_env_policy import (
     _ALWAYS_STRIP_FOLDED, _ALWAYS_STRIP_KEYS, _HERMES_PROVIDER_ENV_BLOCKLIST,
     _HERMES_PROVIDER_ENV_FORCE_PREFIX,
-    _is_hermes_internal_secret, _is_provider_env_blocklisted, _is_terminal_first_party_env,
+    _is_hermes_internal_secret, _is_provider_env_blocklisted, _is_secret_named_env, _is_terminal_first_party_env,
     _home_adapter_secret_env, _home_declared_key_env, _matches_terminal_first_party_prefix,
     _plugin_terminal_env_strip_keys,
     _registered_adapter_secret_env, _registry_adapter_secret_env, _secret_source_bootstrap_env,
@@ -302,7 +302,8 @@ def _filter_secret_env(
             continue
         first_party = _is_terminal_first_party_env(key)
         passthrough = is_env_passthrough(key)
-        if _is_provider_env_blocklisted(key, registered) and not (passthrough or first_party):
+        if ((_is_provider_env_blocklisted(key, registered) or _is_secret_named_env(key))
+                and not (passthrough or first_party)):
             continue
         if passthrough and not first_party:
             value = resolve_passthrough_value(key, value)
@@ -388,7 +389,8 @@ def _scrub_credentials(env: dict, *, inherit_credentials: bool) -> dict:
     drop_bridge_markers(env)
     for key in list(env):
         if (key.upper() in strip_folded
-                or (not inherit_credentials and _is_provider_env_blocklisted(key, registered))
+                or (not inherit_credentials
+                    and (_is_provider_env_blocklisted(key, registered) or _is_secret_named_env(key)))
                 or key.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX)
                 or _is_hermes_internal_secret(key)):
             del env[key]
