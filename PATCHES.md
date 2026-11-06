@@ -710,11 +710,13 @@ Proof:
 
 ## 31. pre-update-snapshot-complete
 
-Commits: `0714ca89bfe9dbf1ff0dffa4406d85937d2fd091`, `1934148f045df4663c8bc550b04e39ed5b200e7b`, `cfbaa60eaebaf08889799430f8bd056b5d3bf8c2`, `d5725e32d9893b64a5b110884c13e427d4b51b2e`, `244f6ed1fa00fb31e11efa87ef7c6e3bb04b23b0`.
+Commits: `0714ca89bfe9dbf1ff0dffa4406d85937d2fd091`, `1934148f045df4663c8bc550b04e39ed5b200e7b`, `cfbaa60eaebaf08889799430f8bd056b5d3bf8c2`, `d5725e32d9893b64a5b110884c13e427d4b51b2e`, `244f6ed1fa00fb31e11efa87ef7c6e3bb04b23b0`, `d08226eb68f50b02dda27a3342ce6aa774811c12`, `5fa4108100b0d1457f2784e949b58043665e3562`.
 
 Pre-update snapshots copy every database whatever its size; the update no longer passes the 1 GiB per-file cap.
 `hermes_cli/backup_snapshot_skip.py` skips a database only when the copy plus the `hermes_state_repair._disk_budget` headroom (256 MiB or 2% of the volume) does not fit on the snapshot's own disk, or that free space cannot be read.
 The disk is read at the staging directory, so a `state-snapshots` symlink to another volume is budgeted against that volume.
+Directory walks such as `kanban/boards` leave out SQLite `-wal`, `-shm` and `-journal` files, as full backups do.
+A copied database already holds its committed WAL data, and a skipped database leaves none of its files behind.
 The skip lands in `oversized_skipped`, so pruning stays off and the health check still reports the incomplete snapshot.
 `max_file_size` stays for old updater callers.
 
@@ -734,6 +736,7 @@ Proof:
 - `tests/hermes_cli/test_pre_update_snapshot_complete.py::test_update_snapshot_copies_profile_databases_larger_than_the_old_cap`
 - `tests/hermes_cli/test_pre_update_snapshot_complete.py::test_snapshot_without_disk_headroom_records_skipped_databases_and_prunes_nothing`
 - `tests/hermes_cli/test_pre_update_snapshot_complete.py::test_snapshot_budgets_space_on_the_destination_volume`
+- `tests/hermes_cli/test_pre_update_snapshot_complete.py::test_snapshot_excludes_board_sidecars_and_preserves_committed_wal_rows`
 
 ## Dropped 2026-11-03
 
