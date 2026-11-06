@@ -1310,7 +1310,11 @@ def _create_quick_snapshot_locked(
                 # Skip heavy, regenerable per-board subtrees (scratch
                 # workspaces and task attachments can be large); we only need
                 # the board databases + their metadata to restore a board.
-                if "/workspaces/" in f"/{sub_rel}/" or "/attachments/" in f"/{sub_rel}/":
+                if (
+                    "/workspaces/" in f"/{sub_rel}/"
+                    or "/attachments/" in f"/{sub_rel}/"
+                    or sub.name.endswith(_SQLITE_SIDECAR_SUFFIXES)
+                ):
                     continue
                 if snapshot_skips(sub, sub_rel, staging_dir, max_file_size):
                     if sub.suffix == ".db":
