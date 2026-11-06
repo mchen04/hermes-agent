@@ -3,7 +3,7 @@
 Upstream base: `9935fc27a8a7665257b7aae4e68099fa919d6ac0`.
 Live predecessor: `ae1dad38596ab65737bcc99e07596b0a7368936e` (tag `pre-update-20261103`).
 Delivery branch: `update-candidate-20261103`, replayed on 2026-11-03 from the 2026-10-27 rebuild (base `085f562af5`).
-Kept topics: **27**, from **29** source commits in first-parent order, plus the requested additions and the 2026-10-30/31 patches.
+Kept topics: **27**, from **32** source commits in first-parent order, plus the requested additions and the 2026-10-30/31 patches.
 Use this manifest instead of searching historical `LOCAL-PATCH` subjects.
 Every replayed commit keeps the original author metadata and gains a `(cherry picked from ...)` footer naming its live-branch source.
 The swap merge makes upstream and the live predecessor both ancestors.
@@ -710,23 +710,30 @@ Proof:
 
 ## 31. pre-update-snapshot-complete
 
-Commits: `0714ca89bfe9dbf1ff0dffa4406d85937d2fd091`, `1934148f045df4663c8bc550b04e39ed5b200e7b`.
+Commits: `0714ca89bfe9dbf1ff0dffa4406d85937d2fd091`, `1934148f045df4663c8bc550b04e39ed5b200e7b`, `cfbaa60eaebaf08889799430f8bd056b5d3bf8c2`, `d5725e32d9893b64a5b110884c13e427d4b51b2e`, `244f6ed1fa00fb31e11efa87ef7c6e3bb04b23b0`.
 
 Pre-update snapshots copy every database whatever its size; the update no longer passes the 1 GiB per-file cap.
-A quick snapshot skips a database only when the copy plus the `hermes_state_repair._disk_budget` headroom (256 MiB or 2% of the volume) does not fit, or free space cannot be read.
+`hermes_cli/backup_snapshot_skip.py` skips a database only when the copy plus the `hermes_state_repair._disk_budget` headroom (256 MiB or 2% of the volume) does not fit on the snapshot's own disk, or that free space cannot be read.
+The disk is read at the staging directory, so a `state-snapshots` symlink to another volume is budgeted against that volume.
 The skip lands in `oversized_skipped`, so pruning stays off and the health check still reports the incomplete snapshot.
 `max_file_size` stays for old updater callers.
 
 Files:
 
 - `hermes_cli/backup.py`
+- `hermes_cli/backup_snapshot_skip.py`
+- `hermes_state_repair.py`
 - `hermes_cli/update_cmd_maint.py`
 - `tests/hermes_cli/test_pre_update_snapshot_complete.py`
+- `website/docs/getting-started/updating.md`
+- `website/docs/user-guide/configuration.md`
+- `website/docs/developer-guide/cli-internals.md`
 
 Proof:
 
 - `tests/hermes_cli/test_pre_update_snapshot_complete.py::test_update_snapshot_copies_profile_databases_larger_than_the_old_cap`
 - `tests/hermes_cli/test_pre_update_snapshot_complete.py::test_snapshot_without_disk_headroom_records_skipped_databases_and_prunes_nothing`
+- `tests/hermes_cli/test_pre_update_snapshot_complete.py::test_snapshot_budgets_space_on_the_destination_volume`
 
 ## Dropped 2026-11-03
 
