@@ -21,8 +21,11 @@ it guards. `plan → snapshot → apply → restart-per-kind → verify → repo
   first-class: `git` updates in place; `docker`/`nix`/`apt` are NOT in-place-updatable and the
   updater reports the correct external command instead of fighting the deployment model.
 - **Snapshot** (`backup.py`): pre-update quick snapshot for EVERY profile (the code swap + fleet
-  restart touch all of them), each into its own `state-snapshots/`, identical file set, 1 GiB
-  per-file cap, keep=1. **Never add a partial/tiered snapshot set** — mixed coverage creates
+  restart touch all of them), each into its own `state-snapshots/`, identical file set,
+  keep=1, databases copied whatever their size. `backup_snapshot_skip.py` skips a database only
+  when the snapshot's disk lacks room for the copy plus headroom (the larger of 256 MiB and 2%)
+  or its free space is unreadable; that marks the snapshot incomplete, so pruning stays off.
+  **Never add a partial/tiered snapshot set** — mixed coverage creates
   torn-restore states across schema generations. Quick snapshots are FILE-LOSS RECOVERY (the
   per-profile cron-jobs safety net restores from them), NOT code-rollback insurance; `--backup`
   full mode owns rollback.
