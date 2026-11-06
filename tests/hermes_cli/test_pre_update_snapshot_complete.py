@@ -95,3 +95,32 @@ def test_snapshot_without_disk_headroom_records_skipped_databases_and_prunes_not
     assert {s["id"] for s in backup.list_quick_snapshots(hermes_home=home)} == {older, newer}
     assert _rows(home / "state-snapshots" / older / "state.db") == 3
     assert _rows(home / "state-snapshots" / older / "kanban" / "boards" / "ops" / "kanban.db") == 2
+
+
+@pytest.mark.parametrize("destination_free,source_free,copied", [
+    (300 * GIB, 0, True),
+    (0, 300 * GIB, False),
+], ids=["destination-has-room", "destination-has-no-room"])
+def test_snapshot_budgets_space_on_the_destination_volume(
+        tmp_path, monkeypatch, destination_free, source_free, copied):
+    home = tmp_path / "home"
+    destination = tmp_path / "backup-volume"
+    home.mkdir()
+    destination.mkdir()
+    (home / "state-snapshots").symlink_to(destination, target_is_directory=True)
+    (home / "config.yaml").write_text("model: {}\n")
+    _db(home / "state.db", 3)
+
+    def disk_usage(path):
+        resolved = Path(path).resolve()
+        free = destination_free if resolved.is_relative_to(destination.resolve()) else source_free
+        return _Usage(400 * GIB, 400 * GIB - free, free)
+
+    monkeypatch.setattr(shutil, "disk_usage", disk_usage)
+
+    snapshot_id = backup.create_quick_snapshot(label="pre-update", hermes_home=home)
+
+    manifest = _manifest(home, snapshot_id)
+    assert ("state.db" in manifest["files"]) == copied
+    assert (destination / snapshot_id / "state.db").is_file() == copied
+    assert manifest["oversized_skipped"] == ([] if copied else ["state.db"])
