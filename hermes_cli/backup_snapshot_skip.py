@@ -1,10 +1,23 @@
 import logging
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 from hermes_cli.sizefmt import format_bytes
+from hermes_state_holders import read_only_db_uri
 from hermes_state_repair import _disk_budget
 
 logger = logging.getLogger(__name__)
+
+
+def _database_image_size(src: Path) -> int | None:
+    try:
+        with closing(sqlite3.connect(read_only_db_uri(src), uri=True, timeout=0.0)) as conn:
+            page_count = conn.execute("PRAGMA page_count").fetchone()[0]
+            page_size = conn.execute("PRAGMA page_size").fetchone()[0]
+            return page_count * page_size
+    except sqlite3.Error:
+        return None
 
 
 def snapshot_skips(src: Path, rel_name: str, destination: Path, max_file_size: int | None) -> bool:
@@ -20,9 +33,13 @@ def snapshot_skips(src: Path, rel_name: str, destination: Path, max_file_size: i
         error, need, free, headroom = _disk_budget(src, "snapshot copy", destination)
         if error is not None:
             reason = error
-        elif free - need < headroom:
-            reason = (f"needs {format_bytes(need)} plus {format_bytes(headroom)} headroom, "
-                      f"{format_bytes(free)} free")
+        else:
+            image_size = _database_image_size(src)
+            if image_size is not None:
+                need = image_size
+            if free - need < headroom:
+                reason = (f"needs {format_bytes(need)} plus {format_bytes(headroom)} headroom, "
+                          f"{format_bytes(free)} free")
     if reason is None:
         return False
     print(f"  ⚠ Snapshot: skipping {rel_name} ({reason})")
