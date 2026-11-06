@@ -124,3 +124,46 @@ def test_snapshot_budgets_space_on_the_destination_volume(
     assert ("state.db" in manifest["files"]) == copied
     assert (destination / snapshot_id / "state.db").is_file() == copied
     assert manifest["oversized_skipped"] == ([] if copied else ["state.db"])
+
+
+@pytest.mark.parametrize("free,copied", [
+    (300 * GIB, True),
+    (GIB // 4, False),
+], ids=["database-copied", "database-skipped"])
+def test_snapshot_excludes_board_sidecars_and_preserves_committed_wal_rows(
+        tmp_path, monkeypatch, free, copied):
+    home = tmp_path / "home"
+    board_rel = "kanban/boards/ops/kanban.db"
+    board = _db(home / board_rel, 2)
+    (home / "config.yaml").write_text("model: {}\n")
+    monkeypatch.setattr(shutil, "disk_usage", lambda _path: _Usage(400 * GIB, 400 * GIB - free, free))
+    live = sqlite3.connect(board)
+    try:
+        live.execute("PRAGMA wal_autocheckpoint=0")
+        live.executemany("INSERT INTO t(body) VALUES (?)", [("wal row 1",), ("wal row 2",)])
+        live.commit()
+        wal = board.with_name("kanban.db-wal")
+        assert wal.is_file()
+        assert wal.stat().st_size > 0
+
+        snapshot_id = backup.create_quick_snapshot(label="pre-update", hermes_home=home)
+
+        snapshot = home / "state-snapshots" / snapshot_id
+        manifest = _manifest(home, snapshot_id)
+        sidecars = (".db-wal", ".db-shm", ".db-journal")
+        assert not [path for path in snapshot.rglob("*") if path.name.endswith(sidecars)]
+        assert not [name for name in manifest["files"] if name.endswith(sidecars)]
+        assert (board_rel in manifest["files"]) == copied
+        assert (snapshot / board_rel).is_file() == copied
+        assert manifest["oversized_skipped"] == ([] if copied else [board_rel])
+        if copied:
+            standalone = tmp_path / "standalone.db"
+            shutil.copy2(snapshot / board_rel, standalone)
+            assert _rows(standalone) == 4
+            restored = sqlite3.connect(standalone)
+            try:
+                assert restored.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
+            finally:
+                restored.close()
+    finally:
+        live.close()
