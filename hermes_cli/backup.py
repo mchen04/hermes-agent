@@ -23,10 +23,10 @@ from hermes_constants import (
 )
 from hermes_state_dbfile import RETIRED_GENERATION_DIR_SUFFIX
 from hermes_state_holders import read_only_db_uri
-from hermes_state_repair import _disk_budget
 
 from agent.provider_media import GENERATED_SUBDIR
 from hermes_cli.archive_safe import normalize_archive_parts
+from hermes_cli.backup_snapshot_skip import snapshot_skips
 from hermes_cli.backup_sqlite import _close_quietly, _safe_copy_db
 from hermes_cli.config_backend import require_file_tooling, supports_file_tooling
 from hermes_cli.home_data_layout import PM_RUNTIME_ROOT_DIRS, SECRET_CACHE_FILES, profile_root_entry
@@ -1270,40 +1270,6 @@ def _create_quick_snapshot_locked(
     home = hermes_home or get_hermes_home()
     root = _quick_snapshot_root(home)
 
-    def _too_large(path: Path, rel_name: str) -> bool:
-        """True (and warn) when ``path`` exceeds the max_file_size cap."""
-        if max_file_size is None:
-            return False
-        try:
-            size = path.stat().st_size
-        except OSError:
-            return False
-        if size <= max_file_size:
-            return False
-        print(
-            f"  ⚠ Snapshot: skipping {rel_name} "
-            f"({_format_size(size)} exceeds {_format_size(max_file_size)} limit)"
-        )
-        logger.warning(
-            "Quick snapshot skipped %s: %d bytes exceeds %d byte limit",
-            rel_name,
-            size,
-            max_file_size,
-        )
-        return True
-
-    def _no_room(path: Path, rel_name: str) -> bool:
-        if path.suffix != ".db":
-            return False
-        error, need, free, headroom = _disk_budget(path, "snapshot copy")
-        if error is None and free - need >= headroom:
-            return False
-        reason = error or (f"needs {_format_size(need)} plus {_format_size(headroom)} headroom, "
-                           f"{_format_size(free)} free")
-        print(f"  ⚠ Snapshot: skipping {rel_name} ({reason})")
-        logger.warning("Quick snapshot skipped %s: %s", rel_name, reason)
-        return True
-
     ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
     base_snap_id = f"{ts}-{label}" if label else ts
     snap_id = base_snap_id
@@ -1346,7 +1312,7 @@ def _create_quick_snapshot_locked(
                 # the board databases + their metadata to restore a board.
                 if "/workspaces/" in f"/{sub_rel}/" or "/attachments/" in f"/{sub_rel}/":
                     continue
-                if _too_large(sub, sub_rel) or _no_room(sub, sub_rel):
+                if snapshot_skips(sub, sub_rel, staging_dir, max_file_size):
                     if sub.suffix == ".db":
                         oversized_skipped.append(sub_rel)
                     continue
@@ -1379,7 +1345,7 @@ def _create_quick_snapshot_locked(
         if not src.is_file():
             continue
 
-        if _too_large(src, rel) or _no_room(src, rel):
+        if snapshot_skips(src, rel, staging_dir, max_file_size):
             if src.suffix == ".db":
                 oversized_skipped.append(rel)
             continue

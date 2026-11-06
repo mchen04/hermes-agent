@@ -249,15 +249,16 @@ def _repair_backup_headroom_bytes(total_bytes: int) -> int:
     return max(_REPAIR_BACKUP_MIN_FREE_BYTES, int(total_bytes * _REPAIR_BACKUP_FREE_FRACTION))
 
 
-def _disk_budget(db_path: Path, refusal: str) -> tuple[Optional[str], int, int, int]:
-    """``(error, bundle_bytes, free_bytes, headroom_bytes)`` for *db_path*'s volume (main file plus every PRESENT
+def _disk_budget(db_path: Path, refusal: str, volume: Optional[Path] = None) -> tuple[Optional[str], int, int, int]:
+    """``(error, bundle_bytes, free_bytes, headroom_bytes)`` for *volume* or *db_path*'s parent (main file plus every PRESENT
     sidecar); *error* is set (and the sizes zero) on stat()/disk_usage() failure. Fails CLOSED: the nearly-full
     volume these guards exist for is exactly where they are most likely to fail."""
+    volume = volume or db_path.parent
     try:
         need = db_path.stat().st_size + sum(p.stat().st_size for p in _sidecars(db_path) if p.exists())
-        usage = shutil.disk_usage(db_path.parent)
+        usage = shutil.disk_usage(volume)
     except OSError as exc:
-        return (f"could not determine free space on {db_path.parent} ({exc}); refusing the {refusal} rather than risk "
+        return (f"could not determine free space on {volume} ({exc}); refusing the {refusal} rather than risk "
                 "filling the volume"), 0, 0, 0
     return None, need, usage.free, _repair_backup_headroom_bytes(usage.total)
 
