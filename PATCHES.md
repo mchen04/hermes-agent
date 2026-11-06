@@ -3,7 +3,7 @@
 Upstream base: `9935fc27a8a7665257b7aae4e68099fa919d6ac0`.
 Live predecessor: `ae1dad38596ab65737bcc99e07596b0a7368936e` (tag `pre-update-20261103`).
 Delivery branch: `update-candidate-20261103`, replayed on 2026-11-03 from the 2026-10-27 rebuild (base `085f562af5`).
-Kept topics: **26**, from **27** source commits in first-parent order, plus the requested additions and the 2026-10-30/31 patches.
+Kept topics: **27**, from **29** source commits in first-parent order, plus the requested additions and the 2026-10-30/31 patches.
 Use this manifest instead of searching historical `LOCAL-PATCH` subjects.
 Every replayed commit keeps the original author metadata and gains a `(cherry picked from ...)` footer naming its live-branch source.
 The swap merge makes upstream and the live predecessor both ancestors.
@@ -707,6 +707,26 @@ Proof:
 - `tests/tools/test_env_scrub_suffixes.py::test_terminal_child_observes_secret_shape_policy`
 - `tests/tools/test_env_scrub_suffixes.py::test_passthrough_registration_still_admits_operator_secret`
 - `tests/tools/test_env_scrub_suffixes.py::test_inheriting_child_keeps_secret_shaped_names`
+
+## 31. pre-update-snapshot-complete
+
+Commits: `0714ca89bfe9dbf1ff0dffa4406d85937d2fd091`, `1934148f045df4663c8bc550b04e39ed5b200e7b`.
+
+Pre-update snapshots copy every database whatever its size; the update no longer passes the 1 GiB per-file cap.
+A quick snapshot skips a database only when the copy plus the `hermes_state_repair._disk_budget` headroom (256 MiB or 2% of the volume) does not fit, or free space cannot be read.
+The skip lands in `oversized_skipped`, so pruning stays off and the health check still reports the incomplete snapshot.
+`max_file_size` stays for old updater callers.
+
+Files:
+
+- `hermes_cli/backup.py`
+- `hermes_cli/update_cmd_maint.py`
+- `tests/hermes_cli/test_pre_update_snapshot_complete.py`
+
+Proof:
+
+- `tests/hermes_cli/test_pre_update_snapshot_complete.py::test_update_snapshot_copies_profile_databases_larger_than_the_old_cap`
+- `tests/hermes_cli/test_pre_update_snapshot_complete.py::test_snapshot_without_disk_headroom_records_skipped_databases_and_prunes_nothing`
 
 ## Dropped 2026-11-03
 
