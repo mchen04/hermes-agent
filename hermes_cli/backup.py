@@ -23,6 +23,7 @@ from hermes_constants import (
 )
 from hermes_state_dbfile import RETIRED_GENERATION_DIR_SUFFIX
 from hermes_state_holders import read_only_db_uri
+from hermes_state_repair import _disk_budget
 
 from agent.provider_media import GENERATED_SUBDIR
 from hermes_cli.archive_safe import normalize_archive_parts
@@ -1261,13 +1262,7 @@ def _create_quick_snapshot_locked(
 
     Args:
         max_file_size: When set, individual files larger than this many bytes
-            are skipped (with a printed warning) instead of copied. Used by
-            the pre-update safety snapshot so a multi-GB ``state.db`` can
-            never stall ``hermes update`` or silently eat disk — the small
-            pairing/cron/config files the snapshot exists to protect are
-            always captured. ``None`` (default) copies everything, which
-            preserves manual ``/snapshot`` and ``hermes backup --quick``
-            behavior.
+            are skipped (with a printed warning) instead of copied.
 
     Returns:
         Snapshot ID (timestamp-based), or None if no files found.
@@ -1295,6 +1290,18 @@ def _create_quick_snapshot_locked(
             size,
             max_file_size,
         )
+        return True
+
+    def _no_room(path: Path, rel_name: str) -> bool:
+        if path.suffix != ".db":
+            return False
+        error, need, free, headroom = _disk_budget(path, "snapshot copy")
+        if error is None and free - need >= headroom:
+            return False
+        reason = error or (f"needs {_format_size(need)} plus {_format_size(headroom)} headroom, "
+                           f"{_format_size(free)} free")
+        print(f"  ⚠ Snapshot: skipping {rel_name} ({reason})")
+        logger.warning("Quick snapshot skipped %s: %s", rel_name, reason)
         return True
 
     ts = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
@@ -1339,7 +1346,7 @@ def _create_quick_snapshot_locked(
                 # the board databases + their metadata to restore a board.
                 if "/workspaces/" in f"/{sub_rel}/" or "/attachments/" in f"/{sub_rel}/":
                     continue
-                if _too_large(sub, sub_rel):
+                if _too_large(sub, sub_rel) or _no_room(sub, sub_rel):
                     if sub.suffix == ".db":
                         oversized_skipped.append(sub_rel)
                     continue
@@ -1372,7 +1379,7 @@ def _create_quick_snapshot_locked(
         if not src.is_file():
             continue
 
-        if _too_large(src, rel):
+        if _too_large(src, rel) or _no_room(src, rel):
             if src.suffix == ".db":
                 oversized_skipped.append(rel)
             continue
