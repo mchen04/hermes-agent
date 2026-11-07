@@ -56,6 +56,9 @@ def respawn_guard_verdict(
         "ORDER BY ended_at DESC LIMIT 1",
         (task_id,),
     ).fetchone()
+    # LOCAL-PATCH kanban-restart-interrupt
+    if latest_run is not None and latest_run["outcome"] == "interrupted":
+        return None, {}
     if latest_run is not None and latest_run["outcome"] == "spawn_failed":
         if rl_cooldown > 0 and _kb._json_dict(latest_run["metadata"]).get("infrastructure"):
             ended_at = _kb._to_epoch(latest_run["ended_at"])
