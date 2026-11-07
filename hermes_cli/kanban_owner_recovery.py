@@ -6,6 +6,9 @@ import sqlite3
 import time
 import psutil
 
+RESTART_CAUSE = "gateway_restart"
+RESTART_ERROR = "interrupted by a gateway restart"
+
 
 def _owner_receipt(conn, task_id):
     """The parsed ``owner_admitted`` receipt of the task's CURRENT run, or None.
@@ -225,6 +228,15 @@ def apply_attempt_note(conn, task_id, pid, dead) -> None:
     if not note:
         return
     dead.event_payload["attempt_note"] = note
+    if lost.get("cause") == RESTART_CAUSE:
+        # LOCAL-PATCH kanban-restart-interrupt
+        dead.interrupted = True
+        dead.protocol_violation = False
+        dead.event_kind = "interrupted"
+        dead.error_text = RESTART_ERROR
+        dead.event_payload.pop("protocol_violation", None)
+        dead.event_payload.update(worker_lost=lost, cause=RESTART_CAUSE)
+        return
     if lost:
         dead.event_payload["worker_lost"] = lost
         if dead.protocol_violation:

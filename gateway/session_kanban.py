@@ -318,7 +318,7 @@ def _record_worker_result(context, code, last_output):
                  'last_output': last_output}, run_id=context['run_id'])
 
 
-def record_worker_loss(policy, reason, *, pid=None, bound=False):
+def record_worker_loss(policy, reason, *, pid=None, bound=False, cause=None):
     """Append a run-scoped ``worker_lost`` event for this attempt to the card's board.
 
     Dropped when the card has moved past the run (it says nothing about the current attempt).
@@ -338,7 +338,8 @@ def record_worker_loss(policy, reason, *, pid=None, bound=False):
                 return
             kb._append_event(conn, context['task_id'], 'worker_lost',
                              {'reason': str(reason)[:200], 'claim_lock': context['claim_lock'],
-                              'run_id': run_id, 'pid': pid, 'bound': bool(bound)},
+                              'run_id': run_id, 'pid': pid, 'bound': bool(bound),
+                              **({'cause': cause} if cause else {})},
                              run_id=run_id)
     except Exception:
         import logging

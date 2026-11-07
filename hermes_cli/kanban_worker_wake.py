@@ -9,6 +9,8 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 _QUIET_KINDS = ("heartbeat",)
+RESTART_LINE = ("The gateway restarted during your last turn; nothing failed. "
+                "Read the card sheet with cardstatus state and continue from it.")
 _OWN_START_KINDS = frozenset({"claimed", "spawned", "owner_admitted", "worker_bound"})
 
 
@@ -111,6 +113,8 @@ def build_worker_wake(conn: Any, task: Any, settings: dict, *, now: Optional[flo
     lines = [f"{legacy_query(task.id)}: {task.title}",
              f"Run {task.current_run_id}. Your previous run {previous['id']} ended "
              f"{previous['outcome'] or previous['status']} {_age(now, previous['ended_at'])} ago."]
+    if previous["outcome"] == "interrupted":
+        lines.insert(0, RESTART_LINE)
     body = (task.body or "").strip()
     if body and len(body) <= int(settings.get("brief_chars") or 6000):
         lines += ["", "Brief (the card body, unchanged unless an edit is listed below):", body]

@@ -559,10 +559,14 @@ def _record_lost_attempt(authority, policy, exc, reason, scope):
     if (not getattr(policy, 'kanban_json', None) or isinstance(exc, asyncio.CancelledError)
             or reason in ('managed_worker_stopped', 'stale_generation')):
         return None
+    from gateway.drain_control import restart_wait_open
     from gateway.session_kanban import record_worker_loss
     from gateway.session_runtime_workers import track_mutation
+    # LOCAL-PATCH kanban-restart-interrupt
+    cause = 'gateway_restart' if restart_wait_open(getattr(authority, 'runner', None)) else None
     return track_mutation(authority, asyncio.to_thread(partial(record_worker_loss, policy, reason,
-                                                               pid=(scope or {}).get('pid'), bound=scope is not None)))
+                                                               pid=(scope or {}).get('pid'), bound=scope is not None,
+                                                               cause=cause)))
 
 
 async def _settle_lost(authority, row, scope, recording):
