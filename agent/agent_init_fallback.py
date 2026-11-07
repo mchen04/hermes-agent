@@ -19,6 +19,24 @@ def _fallback_entries(fallback_model) -> list[dict[str, Any]]:
     ]
 
 
+def _drop_benched(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    # LOCAL-PATCH provider-bench
+    try:
+        from agent.provider_bench import benched, current_profile, route_key
+        out = benched(current_profile())
+    except Exception:
+        logger.debug("provider bench read failed; keeping the whole fallback chain", exc_info=True)
+        return entries
+    if not out:
+        return entries
+    kept = [f for f in entries if route_key(f.get("provider"), f.get("model"), f.get("base_url")) not in out]
+    for f in entries:
+        if f not in kept:
+            logger.info("Fallback %s (%s) benched: %s", f.get("model"), f.get("provider"),
+                        out[route_key(f.get("provider"), f.get("model"), f.get("base_url"))])
+    return kept
+
+
 def _init_fallback_chain(agent, fallback_model):
     # Stable pool-entry identity: OAuth refreshes can replace the token before a failed
     # request is recovered, so the key value alone can't attribute the failure.
@@ -26,7 +44,7 @@ def _init_fallback_chain(agent, fallback_model):
     sync_credential_pool_entry_id(agent)
 
     # Ordered backups tried when the primary is exhausted (legacy single-dict or list).
-    agent._fallback_chain = _fallback_entries(fallback_model)
+    agent._fallback_chain = _drop_benched(_fallback_entries(fallback_model))
     agent._fallback_index = 0
     agent._fallback_activated = getattr(agent, "_fallback_activated", False)
     # Legacy attribute kept for backward compat (tests, external callers)

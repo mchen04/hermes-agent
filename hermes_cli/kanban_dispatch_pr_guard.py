@@ -42,6 +42,11 @@ def respawn_guard_verdict(
     if row is None:
         return None, {}
 
+    # LOCAL-PATCH provider-bench
+    rejected = _credential_rejected(conn, task_id)
+    if rejected is not None:
+        return "credential_rejected", rejected
+
     now = int(time.time())
 
     # 1. Rate-limit cooldown — see docstring for why this precedes blocker_auth.
@@ -136,6 +141,29 @@ def respawn_guard_verdict(
         return "pr_state_unknown", {"unknown_prs": sorted(u for u, st in states.items() if st == "unknown")}
 
     return None, {}
+
+
+def _credential_rejected(conn: sqlite3.Connection, task_id: str) -> Optional[dict]:
+    row = conn.execute("SELECT assignee FROM tasks WHERE id = ?", (task_id,)).fetchone()
+    profile = row["assignee"] if row is not None else None
+    if not profile:
+        return None
+    try:
+        from agent.provider_bench import verdict
+        checked = verdict(profile)
+    except Exception:
+        import logging
+        logging.getLogger(__name__).debug("kanban provider bench failed for %s", profile, exc_info=True)
+        return None
+    if checked.benched and not checked.usable:
+        return {"profile": profile, "benched": dict(checked.benched)}
+    return None
+
+
+def credential_rejected_comment(detail: dict) -> str:
+    routes = "; ".join(f"{key} ({reason})" for key, reason in sorted(detail.get("benched", {}).items()))
+    return (f"Credential rejected on every route of profile {detail.get('profile')}: {routes}. "
+            "The card waits without a failure counted; the dispatcher re-probes within 30 minutes.")
 
 
 def _guarded_pr_comments(conn: sqlite3.Connection, task_id: str, now: int) -> list[dict]:

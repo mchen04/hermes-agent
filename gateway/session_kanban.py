@@ -7,6 +7,7 @@ import threading
 import json
 from pathlib import Path
 import sqlite3
+import time
 
 from hermes_state_runtime import RuntimeStoreError
 
@@ -54,10 +55,17 @@ def build_kanban_policy(connection, params, config):
         if value:
             params_policy[name] = value
     private = {}
+    # LOCAL-PATCH provider-bench
+    rerouted = None if task.model_override or task.provider_override else _benched_primary_reroute(task.assignee)
+    if rerouted is not None:
+        params_policy.update(rerouted[0])
     policy = build_policy(params_policy, config, private_secrets=private)
     if policy.model is None:
         from gateway.run import _resolve_gateway_model
         policy = replace(policy, model=_resolve_gateway_model(policy.config()))
+    if rerouted is not None:
+        with connect_closing_board(path) as writer:
+            kb.add_comment(writer, task.id, 'dispatcher', rerouted[1])
     context = dict(params, workspace=cwd, branch=task.branch_name, tenant=task.tenant,
         profile=task.assignee, workspaces_root=str(kb.workspaces_root(board=board).resolve()),
         skills=skills, goal_mode=task.goal_mode, goal_max_turns=task.goal_max_turns,
@@ -68,6 +76,42 @@ def build_kanban_policy(connection, params, config):
     request.update(source='kanban', board=board, task_id=task.id, run_id=task.current_run_id)
     return replace(policy, source='kanban', platform='cli', toolsets=tuple(sorted(set(policy.toolsets) | {'kanban'})),
                    request_json=json.dumps(request, sort_keys=True), kanban_json=json.dumps(context)), private
+
+
+def connect_closing_board(path):
+    from hermes_cli.kanban_db_connect import connect_closing
+    return connect_closing(Path(path))
+
+
+def _benched_primary_reroute(profile):
+    """``(policy params, board comment)`` for the first usable route when the profile's primary is benched."""
+    try:
+        from agent.provider_bench import entry_for, verdict
+        checked = verdict(profile, refresh_after=None)
+        if not checked.benched or not checked.usable or any(route.primary for route in checked.usable):
+            return None
+        route = checked.usable[0]
+        params = {'model': route.model, 'provider': route.provider}
+        if route.base_url:
+            params['base_url'] = route.base_url
+        entry = entry_for(profile, route.key)
+        if entry is not None:
+            from hermes_cli.fallback_config import resolve_entry_api_key
+            try:
+                key = resolve_entry_api_key(entry)
+            except Exception:
+                key = None
+            if key:
+                params['api_key'] = key
+        primary = next(iter(checked.benched))
+        when = time.strftime('%Y-%m-%d %H:%M', time.localtime(checked.checked_at))
+        comment = (f"Primary {primary.split('/', 1)[0]} rejected the credential at {when}; "
+                   f"this run uses {route.provider}.")
+        return params, comment
+    except Exception:
+        import logging
+        logging.getLogger(__name__).debug('kanban provider bench reroute failed for %s', profile, exc_info=True)
+        return None
 
 
 async def run_task(connection, params):
@@ -284,7 +328,8 @@ def _run_worker_turns(agent, frame, history):
     code, last_output = 1, ''
     try:
         result = _run_task_turns(agent, frame, history, context)
-        code = turn_exit_code(result, kanban_worker=True)
+        from agent.provider_bench import failed_route
+        code = turn_exit_code(result, kanban_worker=True, **failed_route(agent, result))
         last_output = str(result.get('final_response') or '')[-500:] if isinstance(result, dict) else ''
         return result
     except Exception as exc:

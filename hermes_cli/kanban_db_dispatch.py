@@ -2025,11 +2025,15 @@ def _append_event_unless_repeat(conn: sqlite3.Connection, task_id: str, kind: st
     """Append a per-tick diagnostic only when the card's latest event is not the same one: a repeat
     is written again only after something else happened on the card (reassign, comment, spawn)."""
     with _kb.write_txn(conn):
-        last = conn.execute(
-            "SELECT kind, payload FROM task_events WHERE task_id = ? "
-            "ORDER BY created_at DESC, id DESC LIMIT 1", (task_id,)).fetchone()
-        if last is None or last["kind"] != kind or last["payload"] != _kb._json_or_null(payload):
+        if _latest_event_differs(conn, task_id, kind, payload):
             _kb._append_event(conn, task_id, kind, payload)
+
+
+def _latest_event_differs(conn: sqlite3.Connection, task_id: str, kind: str, payload: dict) -> bool:
+    last = conn.execute(
+        "SELECT kind, payload FROM task_events WHERE task_id = ? "
+        "ORDER BY created_at DESC, id DESC LIMIT 1", (task_id,)).fetchone()
+    return last is None or last["kind"] != kind or last["payload"] != _kb._json_or_null(payload)
 
 
 def _dispatch_lane_task(
@@ -2091,10 +2095,17 @@ def _dispatch_lane_task(
             # LOCAL-PATCH kanban-pr-state-guard: a PR hold names the URLs that hold
             # (lookups are cached, so the second evaluation costs no GitHub call).
             detail = {}
-            if guard_reason in ("active_pr", "pr_state_unknown"):
+            if guard_reason in ("active_pr", "pr_state_unknown", "credential_rejected"):
                 verdict = respawn_guard_verdict(conn, task_id, lane=lane)
                 detail = verdict[1] if verdict[0] == guard_reason else {}
-            _append_event_unless_repeat(conn, task_id, "respawn_guarded", {"reason": guard_reason, **detail})
+            payload = {"reason": guard_reason, **detail}
+            with _kb.write_txn(conn):
+                if _latest_event_differs(conn, task_id, "respawn_guarded", payload):
+                    if guard_reason == "credential_rejected":
+                        # LOCAL-PATCH provider-bench
+                        from hermes_cli.kanban_dispatch_pr_guard import credential_rejected_comment
+                        _kb._insert_comment(conn, task_id, "dispatcher", credential_rejected_comment(detail), int(time.time()))
+                    _kb._append_event(conn, task_id, "respawn_guarded", payload)
         return False
 
     def _count_spawn(name: str) -> None:
