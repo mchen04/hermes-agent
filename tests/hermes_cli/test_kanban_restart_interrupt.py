@@ -1,6 +1,3 @@
-"""LOCAL-PATCH kanban-restart-interrupt: a managed worker lost while a gateway restart wait is
-open books ``interrupted``, not ``crashed``, and the card respawns at once."""
-
 from __future__ import annotations
 
 import json

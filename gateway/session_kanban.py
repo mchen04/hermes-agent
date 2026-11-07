@@ -84,7 +84,6 @@ def connect_closing_board(path):
 
 
 def _benched_primary_reroute(profile):
-    """``(policy params, board comment)`` for the first usable route when the profile's primary is benched."""
     try:
         from agent.provider_bench import entry_for, verdict
         checked = verdict(profile, refresh_after=None)
