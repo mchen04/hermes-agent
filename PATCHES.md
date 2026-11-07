@@ -744,7 +744,7 @@ Proof:
 
 ## 32. kanban-restart-interrupt
 
-Commits: `01d55150864e1cce4028c66a48b971baad1683e7`.
+Commits: `01d55150864e1cce4028c66a48b971baad1683e7`, `405b6f41375c2dbf0dc04727678f15507776100b`.
 
 A managed card worker lost while the gateway's restart wait is open ends its run `interrupted`, not `crashed`.
 The owner's loss handler stamps `cause: gateway_restart` on the `worker_lost` event when `drain_control.restart_wait_open(authority.runner)` is true.
@@ -773,7 +773,7 @@ Proof:
 
 ## 33. provider-bench
 
-Commits: `75ce6e346c5ae88f4cf9ef3bddbe0de2d97506d5`.
+Commits: `75ce6e346c5ae88f4cf9ef3bddbe0de2d97506d5`, `405b6f41375c2dbf0dc04727678f15507776100b`.
 
 `agent/provider_bench.py` probes each of a profile's routes (the configured primary and every `fallback_providers` entry) with the profile's own credential before a card is dispatched, instead of a daily GET `/models`.
 A probe is one chat completion with `max_tokens: 1` and a 10 s timeout, resolved through `resolve_runtime_provider` under the profile's secret scope (the same path the agent uses for `key_env` entries and the primary), so no secret is read or printed by the module.
