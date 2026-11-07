@@ -742,6 +742,68 @@ Proof:
 - `tests/hermes_cli/test_pre_update_snapshot_complete.py::test_snapshot_budgets_the_committed_database_image`
 - `tests/hermes_cli/test_pre_update_snapshot_complete.py::test_snapshot_excludes_board_sidecars_and_preserves_committed_wal_rows`
 
+## 32. kanban-restart-interrupt
+
+Commits: `01d55150864e1cce4028c66a48b971baad1683e7`.
+
+A managed card worker lost while the gateway's restart wait is open ends its run `interrupted`, not `crashed`.
+The owner's loss handler stamps `cause: gateway_restart` on the `worker_lost` event when `drain_control.restart_wait_open(authority.runner)` is true.
+The crash sweep reads that cause, books the run `interrupted` with the error `interrupted by a gateway restart`, returns the card to ready at once, and leaves `consecutive_failures`, `last_failure_error` and the crash fingerprints alone.
+The `on_kanban_worker_exited` payload carries `outcome: "interrupted"` and the `run_id`.
+`respawn_guard_verdict` lets an interrupted latest run respawn immediately, past the success window and any stamped blocker text.
+`build_worker_wake` opens the respawned worker's first message with the restart line, so it continues from the card sheet instead of treating the last turn as a failure.
+Before this, every restart on this Mac booked each running card as a crash, charged its failure budget, and three cards lost in one tick tripped the sticky systemic block.
+
+Files:
+
+- `gateway/session_managed_worker.py`
+- `gateway/session_kanban.py`
+- `hermes_cli/kanban_owner_recovery.py`
+- `hermes_cli/kanban_db_dispatch.py`
+- `hermes_cli/kanban_dispatch_pr_guard.py`
+- `hermes_cli/kanban_worker_wake.py`
+- `tests/hermes_cli/test_kanban_restart_interrupt.py`
+
+Proof:
+
+- `tests/hermes_cli/test_kanban_restart_interrupt.py::test_a_worker_lost_during_a_restart_wait_is_interrupted_and_respawns_at_once`
+- `tests/hermes_cli/test_kanban_restart_interrupt.py::test_the_same_loss_outside_a_restart_wait_still_books_a_crash`
+- `tests/hermes_cli/test_kanban_restart_interrupt.py::test_many_interrupted_cards_in_one_tick_never_trip_the_systemic_breaker`
+- Shown able to fail: with the drain predicate forced false the first and third tests go red (`crashed`, three crashes in one tick).
+
+## 33. provider-bench
+
+Commits: `75ce6e346c5ae88f4cf9ef3bddbe0de2d97506d5`.
+
+`agent/provider_bench.py` probes each of a profile's routes (the configured primary and every `fallback_providers` entry) with the profile's own credential before a card is dispatched, instead of a daily GET `/models`.
+A probe is one chat completion with `max_tokens: 1` and a 10 s timeout, resolved through `resolve_runtime_provider` under the profile's secret scope (the same path the agent uses for `key_env` entries and the primary), so no secret is read or printed by the module.
+401 or 403 benches the route for 30 minutes, 2xx clears it, any other status or a connection failure leaves the record alone.
+Records live in `<HERMES_HOME>/state/provider-bench.json`, one per profile and route key, and a route is re-probed at most every 15 minutes, so the dispatch lock pays one file read per tick.
+`respawn_guard_verdict` consults the verdict before the claim and holds the card as `respawn_guarded credential_rejected` when no route is usable, with one board comment naming each route and status; the card keeps its failure budget.
+`build_kanban_policy` takes the first usable route as the admission model when the configured primary is benched and comments `Primary <provider> rejected the credential at <time>; this run uses <provider>.`
+`_init_fallback_chain` drops benched entries from the agent's chain (cache read only).
+`turn_exit_code` benches a route that rejected the credential mid-turn: a fallback route exits 75 (requeue, no failure), and 78 stays only for a rejected primary with no usable fallback.
+Before this, a 401 from the fallback router mid-turn blocked a card with a sticky terminal-provider trip while the primary was healthy.
+
+Files:
+
+- `agent/provider_bench.py`
+- `agent/agent_init_fallback.py`
+- `gateway/session_kanban.py`
+- `hermes_cli/kanban_db_dispatch.py`
+- `hermes_cli/kanban_dispatch_pr_guard.py`
+- `hermes_cli/turn_exit.py`
+- `tests/agent/test_provider_bench.py`
+
+Proof:
+
+- `tests/agent/test_provider_bench.py::test_a_rejected_fallback_is_benched_and_the_run_stays_on_the_primary`
+- `tests/agent/test_provider_bench.py::test_a_rejected_primary_routes_the_run_to_the_fallback_with_one_comment`
+- `tests/agent/test_provider_bench.py::test_both_rejected_holds_the_card_without_counting_a_failure`
+- `tests/agent/test_provider_bench.py::test_an_unreachable_probe_leaves_the_record_alone`
+- `tests/agent/test_provider_bench.py::test_a_credential_failure_on_a_fallback_benches_it_and_requeues`
+- `tests/agent/test_provider_bench.py::test_a_rejected_primary_requeues_only_while_a_fallback_is_usable`
+
 ## Dropped 2026-11-03
 
 Topic ids stay stable; these numbers are retired.
@@ -1012,3 +1074,7 @@ Verification (runtime proof on the `mini` host, the same path `check_runtime.py`
 - hermes-local `tests/test_skill_links.py` fails independently of this branch: `profile-workflows/references/cards.md` names `supervise/references/model-prompting.md`, which the installed supervise skill lacks.
 - Local test runs on this Mac are killed mid-run (whole process tree, also on pure upstream); the mini is the verification host.
 
+
+## Added 2026-11-06
+
+- **kanban-restart-interrupt** (topic 32) and **provider-bench** (topic 33): a worker lost to a gateway restart books `interrupted` and respawns at once; credentials are probed per route when a card is dispatched, benched on 401/403, and a fallback credential failure exits 75. Tests: `tests/hermes_cli/test_kanban_restart_interrupt.py`, `tests/agent/test_provider_bench.py`.
