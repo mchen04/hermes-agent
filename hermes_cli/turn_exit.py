@@ -13,10 +13,14 @@ TERMINAL_PROVIDER_REASONS = frozenset({
 })
 
 
+CREDENTIAL_REASONS = frozenset({"auth", "auth_permanent"})
+
+
 def turn_exit_code(
     result, *, kanban_worker: bool, credentials_rate_limited: bool = False,
     credentials_terminal: bool = False,
     transient_reasons=TRANSIENT_PROVIDER_REASONS, terminal_reasons=TERMINAL_PROVIDER_REASONS,
+    profile: str | None = None, route: str | None = None, fallback: bool = False,
 ) -> int:
     """Preserve completion, interruption and retryable/terminal provider outcomes."""
     if not isinstance(result, dict):
@@ -38,8 +42,21 @@ def turn_exit_code(
             return KANBAN_RATE_LIMIT_EXIT_CODE
         if reason in terminal_reasons:
             from hermes_cli.kanban_db import KANBAN_TERMINAL_PROVIDER_EXIT_CODE
+            # LOCAL-PATCH provider-bench
+            if reason in CREDENTIAL_REASONS and profile and route and _bench_leaves_a_route(profile, route, reason, fallback):
+                from hermes_cli.kanban_db import KANBAN_RATE_LIMIT_EXIT_CODE
+                return KANBAN_RATE_LIMIT_EXIT_CODE
             return KANBAN_TERMINAL_PROVIDER_EXIT_CODE
     return 1
+
+
+def _bench_leaves_a_route(profile: str, route: str, reason: str, fallback: bool) -> bool:
+    from agent.provider_bench import bench, verdict
+    try:
+        bench(profile, route, reason)
+        return fallback or bool(verdict(profile, refresh_after=None).usable)
+    except Exception:
+        return False
 
 
 def credential_failure_flags(exc) -> dict:
