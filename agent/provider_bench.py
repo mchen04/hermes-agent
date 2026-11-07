@@ -1,5 +1,4 @@
-"""LOCAL-PATCH provider-bench: probe each of a profile's routes before a card is dispatched."""
-
+# LOCAL-PATCH provider-bench
 from __future__ import annotations
 
 import json
@@ -105,7 +104,8 @@ def failed_route(agent: Any, result: Any) -> dict[str, Any]:
         base_url = result.get("base_url") if isinstance(result, dict) else getattr(agent, "base_url", None)
         return {"profile": current_profile(), "route": route_key(provider, model, base_url), "fallback": True}
     if isinstance(result, dict) and result.get("provider") and result.get("model"):
-        return {"profile": current_profile(), "route": route_key(result["provider"], result["model"], result.get("base_url")),
+        provider = getattr(agent, "requested_provider", None) or result["provider"]
+        return {"profile": current_profile(), "route": route_key(provider, result["model"], result.get("base_url")),
                 "fallback": False}
     return {}
 

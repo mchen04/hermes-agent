@@ -1,7 +1,3 @@
-"""LOCAL-PATCH provider-bench: a profile's routes are probed with their own credential before a
-card is dispatched; a rejected route is benched, the run takes a usable one, and a card with no
-usable route waits without a failure counted."""
-
 from __future__ import annotations
 
 import json
