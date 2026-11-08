@@ -188,8 +188,13 @@ def ultrafast_offered_for(cli: Any, model: Any) -> bool:
 def negotiate_request_tier(agent: Any, overrides: dict[str, Any]) -> None:
     """Resolve the current credential on each build without mutating user preference."""
     from agent.codex_headers import is_official_codex_base_url
+    from hermes_cli.models import _fast_mode_route_supported
     requested = overrides.get("service_tier")
     base_url = str(getattr(agent, "base_url", "") or "")
+    model = overrides.get("model", getattr(agent, "model", ""))
+    if requested == "ultrafast" and not _fast_mode_route_supported(model, getattr(agent, "provider", None), None):
+        overrides.pop("service_tier", None)
+        return
     if (requested not in {"ultrafast", "priority"}
             or getattr(agent, "api_mode", None) != "codex_responses"
             or getattr(agent, "provider", None) != "openai-codex"
@@ -198,7 +203,6 @@ def negotiate_request_tier(agent: Any, overrides: dict[str, Any]) -> None:
     token = getattr(agent, "api_key", None)
     if not isinstance(token, str) or not token:
         return
-    model = overrides.get("model", getattr(agent, "model", ""))
     supported = _tiers_for_model(token, base_url, model)
     if supported is None:
         return

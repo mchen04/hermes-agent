@@ -804,6 +804,21 @@ Proof:
 - `tests/agent/test_provider_bench.py::test_a_credential_failure_on_a_fallback_benches_it_and_requeues`
 - `tests/agent/test_provider_bench.py::test_a_rejected_primary_requeues_only_while_a_fallback_is_usable`
 
+## 34. fallback-drops-codex-tier
+
+`negotiate_request_tier` drops `service_tier: "ultrafast"` on any provider that is not first-party OpenAI (`_fast_mode_route_supported` by provider), so a profile's `ultrafast` preference never reaches a fallback router. The preference itself is unchanged; `priority` still passes through third-party routers as upstream intends.
+Before this, a Codex 401 moved Forge workers to michael-router, which answered `HTTP 400: Invalid service_tier argument`, and two cards crashed (2026-11-07 17:28).
+
+Files:
+
+- `agent/codex_service_tiers.py`
+- `tests/agent/test_codex_service_tiers.py`
+
+Proof:
+
+- `tests/agent/test_codex_service_tiers.py::test_a_fallback_to_a_custom_router_drops_ultrafast_without_changing_the_preference` (fails without the change)
+- Live: `hermes -p forge chat --provider custom --base-url https://michael-router.vercel.app/v1 --model claude-opus-5-5` ran a shell tool and answered.
+
 ## Dropped 2026-11-03
 
 Topic ids stay stable; these numbers are retired.

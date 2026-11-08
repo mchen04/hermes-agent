@@ -138,3 +138,15 @@ def test_ultrafast_is_offered_on_the_codex_plan_only_when_its_catalog_lists_it(m
     assert ultrafast_offered("gpt-6.1-sol", provider="openai-api", base_url="https://api.openai.com/v1")
     monkeypatch.setattr(mm.model_metadata_http, "get", lambda url, **kw: SimpleNamespace(status_code=503, json=dict))
     assert ultrafast_offered("gpt-6.1-sol", **codex, access_token=token("C"))
+
+
+def test_a_fallback_to_a_custom_router_drops_ultrafast_without_changing_the_preference():
+    from agent.fast_mode import effective_request_overrides
+
+    agent = SimpleNamespace(provider="custom", api_mode="chat_completions",
+                            base_url="https://michael-router.vercel.app/v1", api_key="router-key",
+                            model="gpt-6.1-sol", request_overrides={"service_tier": "ultrafast"})
+    assert "service_tier" not in effective_request_overrides(agent)
+    assert agent.request_overrides == {"service_tier": "ultrafast"}
+    agent.request_overrides = {"service_tier": "priority"}
+    assert effective_request_overrides(agent)["service_tier"] == "priority"
