@@ -69,7 +69,7 @@ def test_operator_cli_ends_goal_mode_and_clears_a_stale_capacity_block_so_the_wo
         assert kb.task_waits_on(kb.get_task(conn, tid)) is None
         (blocked,) = conn.execute("SELECT id FROM task_events WHERE task_id=? AND kind='blocked'", (tid,))
     as_worker(monkeypatch, tid)
-    assert "goal_mode" in json.loads(kt._handle_schedule({"reason": "SCHEDULED_UNTIL=2026-11-01T03:00:00-07:00"}))["error"]
+    assert "goal_mode" in json.loads(kt._handle_schedule({"reason": "waiting for capacity"}))["error"]
     monkeypatch.delenv("HERMES_KANBAN_TASK")
 
     out = kc.run_slash(f"edit {tid} --goal-mode off --clear-stale-block "
