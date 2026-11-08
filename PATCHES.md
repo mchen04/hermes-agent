@@ -819,6 +819,21 @@ Proof:
 - `tests/agent/test_codex_service_tiers.py::test_a_fallback_to_a_custom_router_drops_ultrafast_without_changing_the_preference` (fails without the change)
 - Live: `hermes -p forge chat --provider custom --base-url https://michael-router.vercel.app/v1 --model claude-opus-5-5` ran a shell tool and answered.
 
+## 35. goal-mode-timed-wait
+
+`kanban_schedule` lets a goal_mode worker park when its reason starts `SCHEDULED_UNTIL=<ISO time>`. Other goal_mode schedules are still refused. Card wake resumes the card into the same goal loop, so `kanban_complete` still goes through the completion judge.
+Before this, a goal_mode card waiting on an outside worker (Dot) could only block; each block went through triage and a root turn in #general, then a fresh worker. Cite: Dot t_5faca859, 16 refusals and ~400M Forge tokens in 60 h (2026-11-05..07).
+
+Files:
+
+- `tools/kanban_tools.py`
+- `tests/tools/test_kanban_tools.py`
+
+Proof:
+
+- `tests/tools/test_kanban_tools.py::test_schedule_goal_mode_parks_on_a_timed_machine_wait` (fails without the change)
+- `tests/tools/test_kanban_tools.py::test_schedule_goal_mode_refused` still holds for an untimed reason.
+
 ## Dropped 2026-11-03
 
 Topic ids stay stable; these numbers are retired.

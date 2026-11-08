@@ -571,6 +571,25 @@ def test_schedule_goal_mode_refused(monkeypatch, tmp_path):
         conn.close()
 
 
+def test_schedule_goal_mode_parks_on_a_timed_machine_wait(monkeypatch, tmp_path):
+    """A goal_mode worker waiting on an outside worker parks with SCHEDULED_UNTIL
+    instead of blocking; the card wake resumes it and the judge still gates completion."""
+    from tools import kanban_tools as kt
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+
+    tid = _make_goal_mode_worker_env(monkeypatch, tmp_path)
+    reason = "SCHEDULED_UNTIL=2026-11-08T12:00:00-08:00 waiting on the Dot's round"
+    d = json.loads(kt._handle_schedule({"reason": reason}))
+    assert d.get("status") == "scheduled", d
+
+    conn = kbc.connect()
+    try:
+        assert kb.get_task(conn, tid).status == "scheduled"
+    finally:
+        conn.close()
+
+
 def test_schedule_exposed_to_codex_runtime_workers():
     """Codex app-server workers only reach Hermes tools named in EXPOSED_TOOLS."""
     from agent.transports.hermes_tools_mcp_server import EXPOSED_TOOLS
