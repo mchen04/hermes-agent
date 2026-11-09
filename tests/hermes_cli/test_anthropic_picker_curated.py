@@ -41,3 +41,23 @@ def test_anthropic_falls_back_to_curated_when_live_unavailable():
         result = M.provider_model_ids("anthropic")
 
     assert result == list(M._PROVIDER_MODELS["anthropic"])
+
+
+def _fable_spellings(models, version):
+    return [m for m in models if m.replace(".", "-").startswith(f"claude-fable-{version}")]
+
+
+def test_offline_anthropic_picker_leads_with_fable_5_2_and_drops_5_1():
+    with patch.object(M, "_fetch_anthropic_models", return_value=None):
+        result = M.provider_model_ids("anthropic")
+
+    assert result[0] == "claude-fable-5-2"
+    assert _fable_spellings(result, "5-1") == []
+
+
+def test_live_fable_5_2_merges_into_one_entry_and_live_5_1_stays_reachable():
+    with patch.object(M, "_fetch_anthropic_models", return_value=["claude-fable-5-2", "claude-fable-5-1"]):
+        result = M.provider_model_ids("anthropic")
+
+    assert _fable_spellings(result, "5-2") == ["claude-fable-5-2"]
+    assert "claude-fable-5-1" in result

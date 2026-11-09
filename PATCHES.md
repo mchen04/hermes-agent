@@ -834,6 +834,22 @@ Proof:
 - `tests/tools/test_kanban_tools.py::test_schedule_goal_mode_parks_on_a_timed_machine_wait` (fails without the change)
 - `tests/tools/test_kanban_tools.py::test_schedule_goal_mode_refused` still holds for an untimed reason.
 
+## 36. anthropic-fable-5-2-catalog
+
+The curated Anthropic list offers `claude-fable-5-2` in place of `claude-fable-5.1`, at the same first position. Michael asked to swap Fable 5.1 for Fable 5.2 everywhere it is active (card t_b78426e2). A real Claude request on 2026-11-09 returned `claude-fable-5-2` as the served model, and a made-up Fable id returned 404.
+The dashed spelling matches what `/v1/models` returns, so the curated-first merge keeps one Fable 5.2 row instead of a dotted and a dashed one. No 5.1 compatibility row is kept: live discovery still appends `claude-fable-5-1` while Anthropic serves it.
+The OpenRouter and Nous Fable rows stay upstream-owned: their pickers read the remote manifest first, and no OpenRouter Fable 5.2 id was verified.
+
+Files:
+
+- `hermes_cli/models_catalog_static.py`
+- `tests/hermes_cli/test_anthropic_picker_curated.py`
+
+Proof:
+
+- `tests/hermes_cli/test_anthropic_picker_curated.py::test_offline_anthropic_picker_leads_with_fable_5_2_and_drops_5_1` (fails without the change)
+- `tests/hermes_cli/test_anthropic_picker_curated.py::test_live_fable_5_2_merges_into_one_entry_and_live_5_1_stays_reachable` (fails with the dotted `claude-fable-5.2` spelling)
+
 ## Dropped 2026-11-03
 
 Topic ids stay stable; these numbers are retired.
