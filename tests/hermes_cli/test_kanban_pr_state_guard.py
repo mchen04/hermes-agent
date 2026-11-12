@@ -177,6 +177,91 @@ def test_reclaim_exception_is_narrow(kanban_home, github, monkeypatch):
         assert kbd.check_respawn_guard(conn, foreign) == "active_pr"
 
 
+WAIT = "SCHEDULED_UNTIL=2030-01-01T00:00:00+00:00 waiting on the PR checks"
+
+
+def _park_then_wake(conn, tid):
+    assert kb.claim_task(conn, tid) is not None
+    assert kb.schedule_task(conn, tid, reason=WAIT)
+    assert kb.unblock_task(conn, tid)
+    assert conn.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()[0] == "ready"
+
+
+def _end_runs_relative_to_comment(conn, tid, cid, seconds):
+    with kb.write_txn(conn):
+        conn.execute(
+            "UPDATE task_runs SET ended_at = (SELECT created_at FROM task_comments WHERE id = ?) + ? "
+            "WHERE task_id = ? AND ended_at IS NOT NULL", (cid, seconds, tid))
+
+
+def _crash(conn, tid):
+    kbd._record_task_failure(conn, tid, "worker died", outcome="crashed", release_claim=True, end_run=True)
+
+
+def _expire_claim(conn, tid):
+    with kb.write_txn(conn):
+        conn.execute("UPDATE tasks SET claim_expires = 1 WHERE id = ?", (tid,))
+    assert kb.release_stale_claims(conn, signal_fn=lambda *a: None) == 1
+
+
+def test_own_timed_wait_after_own_worker_open_pr_respawns_on_every_wake(kanban_home, github, monkeypatch):
+    spawned, spawn = _spawn_log()
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="t", assignee="forge")
+        _run_as_worker(monkeypatch, conn, tid, f"opened draft {OPEN}")
+        assert kbd.respawn_guard_verdict(conn, tid) == ("active_pr", {"open_prs": [OPEN]})
+        _park_then_wake(conn, tid)
+        assert kbd.respawn_guard_verdict(conn, tid) == (None, {})
+        res = kbd.dispatch_once(conn, spawn_fn=spawn)
+        assert spawned == [tid] and res.respawn_guarded == [], res
+        assert kb.schedule_task(conn, tid, reason=WAIT)
+        assert kb.unblock_task(conn, tid)
+        assert kbd.respawn_guard_verdict(conn, tid) == (None, {})
+        assert _guard_events(conn, tid) == []
+
+
+@pytest.mark.parametrize("seconds_after_comment, held", [(1, None), (0, "active_pr"), (-1, "active_pr")])
+def test_own_wait_lifts_only_when_the_run_ended_after_the_pr_comment(
+        kanban_home, github, monkeypatch, seconds_after_comment, held):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="t", assignee="forge")
+        cid = _run_as_worker(monkeypatch, conn, tid, f"opened draft {OPEN}")
+        _park_then_wake(conn, tid)
+        _end_runs_relative_to_comment(conn, tid, cid, seconds_after_comment)
+        assert kbd.check_respawn_guard(conn, tid) == held
+
+
+@pytest.mark.parametrize("lose_worker", [_crash, _expire_claim])
+def test_a_worker_lost_after_the_wake_still_holds(kanban_home, github, monkeypatch, lose_worker):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="t", assignee="forge")
+        cid = _run_as_worker(monkeypatch, conn, tid, f"opened draft {OPEN}")
+        _park_then_wake(conn, tid)
+        _end_runs_relative_to_comment(conn, tid, cid, 1)
+        assert kbd.check_respawn_guard(conn, tid) is None
+        assert kb.claim_task(conn, tid) is not None
+        lose_worker(conn, tid)
+        assert conn.execute("SELECT status FROM tasks WHERE id=?", (tid,)).fetchone()[0] == "ready"
+        assert kbd.respawn_guard_verdict(conn, tid) == ("active_pr", {"open_prs": [OPEN]})
+
+
+def test_own_wait_after_someone_elses_pr_comment_still_holds(kanban_home, github):
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="t", assignee="forge")
+        _backdate(conn, kb.add_comment(conn, tid, author="default", body=f"related work in {OPEN}"))
+        _park_then_wake(conn, tid)
+        assert kbd.respawn_guard_verdict(conn, tid) == ("active_pr", {"open_prs": [OPEN]})
+
+
+def test_own_wait_with_an_unanswered_pr_lookup_still_holds(kanban_home, github, monkeypatch):
+    github.states[OPEN] = subprocess.TimeoutExpired(["gh"], 8)
+    with kbc.connect() as conn:
+        tid = kb.create_task(conn, title="t", assignee="forge")
+        _run_as_worker(monkeypatch, conn, tid, f"opened draft {OPEN}")
+        _park_then_wake(conn, tid)
+        assert kbd.respawn_guard_verdict(conn, tid) == ("pr_state_unknown", {"unknown_prs": [OPEN]})
+
+
 @pytest.mark.real_pr_state_lookup
 def test_github_lookup_reads_state_with_a_short_timeout(monkeypatch):
     seen = []
