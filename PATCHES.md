@@ -850,6 +850,31 @@ Proof:
 - `tests/hermes_cli/test_anthropic_picker_curated.py::test_offline_anthropic_picker_leads_with_fable_5_2_and_drops_5_1` (fails without the change)
 - `tests/hermes_cli/test_anthropic_picker_curated.py::test_live_fable_5_2_merges_into_one_entry_and_live_5_1_stays_reachable` (fails with the dotted `claude-fable-5.2` spelling)
 
+## 37. kanban-own-wait-pr-resume
+
+A card that parked itself after its own worker linked an open PR resumes on wake, with no operator receipt.
+`respawn_guard_verdict` lifts `active_pr` when this card's own worker wrote every holding PR comment, and the card's latest ended run has outcome `scheduled` and ended strictly after the newest of those comments.
+A park is a deliberate pause, not a lost worker. The woken worker reads the PR on the card, so it is no duplicate-PR risk.
+An operator who parks the card from the dashboard writes the same run outcome and gets the same result.
+Still held: a run that ended in the same second as the PR comment or before it, a worker lost after the wake (crash, expired claim), a PR comment from anyone else, and a failed PR lookup (`pr_state_unknown`, which clears on the next good lookup).
+Before this, ZergBoard card t_b16e2f4a stalled at both wakes on 2026-11-12, for 25 and 36 minutes, until an operator recorded `authorized_pr_resume`. That receipt binds to the last run id, so every new wait needed a new receipt.
+
+Files:
+
+- `hermes_cli/kanban_dispatch_pr_guard.py`
+- `tests/hermes_cli/test_kanban_pr_state_guard.py` (already in hermes-local `CORE_TESTS`)
+- `website/docs/user-guide/features/kanban.md`
+
+Proof:
+
+- `tests/hermes_cli/test_kanban_pr_state_guard.py::test_own_timed_wait_after_own_worker_open_pr_respawns_on_every_wake` (fails without the change)
+- `tests/hermes_cli/test_kanban_pr_state_guard.py::test_own_wait_lifts_only_when_the_run_ended_after_the_pr_comment`
+- `tests/hermes_cli/test_kanban_pr_state_guard.py::test_a_worker_lost_after_the_wake_still_holds`
+- `tests/hermes_cli/test_kanban_pr_state_guard.py::test_own_wait_after_someone_elses_pr_comment_still_holds`
+- `tests/hermes_cli/test_kanban_pr_state_guard.py::test_own_wait_with_an_unanswered_pr_lookup_still_holds`
+- Shown able to fail: with each condition of the exception removed in turn, one of the last four tests goes red.
+- Replay on a scratch copy of the live board, with the PR read as open: the base holds t_b16e2f4a as `active_pr` at both 2026-11-12 wakes, and the change returns no hold.
+
 ## Dropped 2026-11-03
 
 Topic ids stay stable; these numbers are retired.
