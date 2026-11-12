@@ -135,6 +135,9 @@ def respawn_guard_verdict(
         # card, so it is no duplicate risk. A crash reclaim is not manual.
         if _manual_reclaim_after_own_pr(conn, task_id, holding):
             return None, {}
+        # LOCAL-PATCH kanban-own-wait-pr-resume
+        if "unknown" not in states.values() and _own_wait_after_own_pr(conn, task_id, holding, latest_run):
+            return None, {}
         open_prs = sorted(u for u, st in states.items() if st == "open")
         if open_prs:
             return "active_pr", {"open_prs": open_prs}
@@ -234,6 +237,18 @@ def _manual_reclaim_after_own_pr(conn: sqlite3.Connection, task_id: str, holding
     manual (operator) reclaim came strictly after the newest of them."""
     from hermes_cli.kanban_db_dispatch import (_kb, _rows_since)
 
+    if not _own_worker_wrote_all(conn, task_id, holding):
+        return False
+    newest = max(c["created_at"] for c in holding)
+    for _, e in _rows_since(conn, "task_events", task_id, newest, "AND kind = 'reclaimed'", cols=", payload", strict=True):
+        if _kb._json_dict(e["payload"]).get("manual") is True:
+            return True
+    return False
+
+
+def _own_worker_wrote_all(conn: sqlite3.Connection, task_id: str, holding: list[dict]) -> bool:
+    from hermes_cli.kanban_db_dispatch import (_kb)
+
     own: set[int] = set()
     for e in conn.execute(
         "SELECT payload FROM task_events WHERE task_id = ? AND kind = 'commented'", (task_id,),
@@ -242,11 +257,19 @@ def _manual_reclaim_after_own_pr(conn: sqlite3.Connection, task_id: str, holding
         if (data.get("origin") == "worker" and data.get("worker_task_id") == task_id
                 and type(data.get("comment_id")) is int):
             own.add(data["comment_id"])
-    if not all(c["id"] in own for c in holding):
+    return all(c["id"] in own for c in holding)
+
+
+# LOCAL-PATCH kanban-own-wait-pr-resume
+def _own_wait_after_own_pr(
+    conn: sqlite3.Connection, task_id: str, holding: list[dict], latest_run: Optional[sqlite3.Row],
+) -> bool:
+    from hermes_cli.kanban_db_dispatch import (_kb)
+
+    if latest_run is None or latest_run["outcome"] != "scheduled":
         return False
-    newest = max(c["created_at"] for c in holding)
-    for _, e in _rows_since(conn, "task_events", task_id, newest, "AND kind = 'reclaimed'", cols=", payload", strict=True):
-        if _kb._json_dict(e["payload"]).get("manual") is True:
-            return True
-    return False
+    ended_at = _kb._to_epoch(latest_run["ended_at"])
+    if ended_at is None or ended_at <= max(c["created_at"] for c in holding):
+        return False
+    return _own_worker_wrote_all(conn, task_id, holding)
 
