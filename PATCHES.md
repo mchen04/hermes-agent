@@ -3,7 +3,8 @@
 Upstream base: `d83644895181dffc82ba7924b8a04dfe32376eb4`.
 Live predecessor: `614789da47a94702e32475741497e087ad70a9e9`.
 Delivery branch: `candidate/update-20261116`, replayed on 2026-11-16 from the live first-parent history.
-Kept topics: **32** numbered, plus the requested additions and the 2026-10-30/31 patches, from **56** source commits and **2** adaptation commits.
+Kept topics: **31** numbered, plus the requested additions and the 2026-10-30/31 patches, from **56** source commits and **2** adaptation commits.
+Three follow-up commits on the same day drop topic 32 and fix topic 24. See "Follow-up 2026-11-16".
 Use this manifest instead of searching historical `LOCAL-PATCH` subjects.
 Every replayed commit keeps the original author metadata and gains a `(cherry picked from ...)` footer naming its live-branch source.
 The swap merge makes upstream and the live predecessor both ancestors.
@@ -548,7 +549,7 @@ Proof:
 
 ## 24. compaction-landing
 
-Commits: `1b5bcdff059c1708730d4bdd2b8d0bffbdf38a19`, `19b6a446a9c452287c9c0047589248eb0c2714b9`.
+Commits: `1b5bcdff059c1708730d4bdd2b8d0bffbdf38a19`, `19b6a446a9c452287c9c0047589248eb0c2714b9`, `cb04f74a1d1a62b3bafcc0eae0be77a1044ffafe`, `17f6e05c6b7ae27adfd4d05ae3df3be2596db862`.
 
 Aim compaction at real prompt tokens and cap the summary.
 
@@ -556,6 +557,9 @@ The shared planner serves inline and prepared summaries.
 It uses provider token readings, the landing target, and the summary cap.
 An over-target protected floor returns `floor_exceeds_target` and logs the floor name once.
 A prepared summary that exceeds the target after tail growth is discarded.
+A tail the plan shrank gives its opening assistant reply to the summary when the summary would otherwise fold into that reply.
+It does so only when the summary then gets a row of its own and the newest visible reply stays in the tail.
+A cut at the default budget is upstream's and is left alone.
 
 Files:
 
@@ -576,6 +580,9 @@ Proof:
 - `tests/agent/test_compaction_landing.py::test_a_capped_prompt_asks_for_no_action_log_and_a_size_limit`
 - `tests/agent/test_compaction_landing.py::test_a_capped_summary_keeps_constraints_and_decisions_and_drops_the_logs`
 - `tests/agent/test_compaction_landing.py::test_a_landing_target_makes_one_compaction_land_under_it`
+- `tests/agent/test_compaction_landing.py::test_a_shrunk_tail_leaves_the_summary_a_row_of_its_own` (13 fixed prompt costs; 6 fail without the change)
+- `tests/agent/test_compaction_landing.py::test_a_shrunk_tail_never_gives_up_the_newest_reply_for_a_summary_row`
+- `tests/agent/test_compaction_landing.py::test_a_shrunk_tail_that_opens_on_a_user_turn_keeps_the_summary_on_that_turn`
 - `tests/agent/test_compaction_landing.py::test_a_stale_anchor_leaves_the_ratio_alone`
 - `tests/agent/test_compaction_landing.py::test_an_uncapped_prompt_keeps_the_upstream_template`
 - `tests/agent/test_compaction_landing.py::test_an_uncapped_summary_is_unchanged`
@@ -746,35 +753,6 @@ Proof:
 - `tests/hermes_cli/test_pre_update_snapshot_complete.py::test_snapshot_budgets_the_committed_database_image`
 - `tests/hermes_cli/test_pre_update_snapshot_complete.py::test_snapshot_excludes_board_sidecars_and_preserves_committed_wal_rows`
 
-## 32. kanban-restart-interrupt
-
-Commits: `1a4ae618fecb11b04fa9ef850f85e46d3de043ad`, `23bfb4d9895c5b477792f30bc10a73db8a733b9a`.
-
-A managed card worker lost while the gateway's restart wait is open ends its run `interrupted`, not `crashed`.
-The owner's loss handler stamps `cause: gateway_restart` on the `worker_lost` event when `drain_control.restart_wait_open(authority.runner)` is true.
-The crash sweep reads that cause, books the run `interrupted` with the error `interrupted by a gateway restart`, returns the card to ready at once, and leaves `consecutive_failures`, `last_failure_error` and the crash fingerprints alone.
-The `on_kanban_worker_exited` payload carries `outcome: "interrupted"` and the `run_id`.
-`respawn_guard_verdict` lets an interrupted latest run respawn immediately, past the success window and any stamped blocker text.
-`build_worker_wake` opens the respawned worker's first message with the restart line, so it continues from the card sheet instead of treating the last turn as a failure.
-Before this, every restart on this Mac booked each running card as a crash, charged its failure budget, and three cards lost in one tick tripped the sticky systemic block.
-
-Files:
-
-- `gateway/session_managed_worker.py`
-- `gateway/session_kanban.py`
-- `hermes_cli/kanban_owner_recovery.py`
-- `hermes_cli/kanban_db_dispatch.py`
-- `hermes_cli/kanban_dispatch_pr_guard.py`
-- `hermes_cli/kanban_worker_wake.py`
-- `tests/hermes_cli/test_kanban_restart_interrupt.py`
-
-Proof:
-
-- `tests/hermes_cli/test_kanban_restart_interrupt.py::test_a_worker_lost_during_a_restart_wait_is_interrupted_and_respawns_at_once`
-- `tests/hermes_cli/test_kanban_restart_interrupt.py::test_the_same_loss_outside_a_restart_wait_still_books_a_crash`
-- `tests/hermes_cli/test_kanban_restart_interrupt.py::test_many_interrupted_cards_in_one_tick_never_trip_the_systemic_breaker`
-- Shown able to fail: with the drain predicate forced false the first and third tests go red (`crashed`, three crashes in one tick).
-
 ## 33. provider-bench
 
 Commits: `c0c927c536e184b6c9457c1f0e8eccf9f0392bc8`, `23bfb4d9895c5b477792f30bc10a73db8a733b9a`.
@@ -886,16 +864,12 @@ Their proof tests (`tests/tools/test_search_rg_pgid.py`, `tests/tools/test_proce
 - PM membership compatibility: `PythonDeclaration.is_member` had one reader, hermes-local `tests/test_mnemosyne_plugin.py:24`. Upstream `installs_packages` holds the same value.
 - Same-model review warning: upstream warns once per agent. The patch changed only the wording and the once-per-process gate.
 - spawn-refusal-linux-only: a skip marker on one upstream test. The test fails on macOS on pure upstream too.
+- 32 kanban-restart-interrupt: its trigger never fires on this base. The patch stamped `cause: gateway_restart` only while `drain_control.restart_wait_open` was true. Upstream `d836448951` defines `open_restart_wait` in `gateway/drain_control.py` and calls it only from tests; the live core called it from `gateway/run_shutdown.py`. Upstream `579565e0e1` (restart when idle) waits for card workers on a normal restart, so nothing is lost there. Commit `08c69500c8f18bf0adfac1ef388048b828adaea6` reverts `1a4ae618fe`; `gateway/session_managed_worker.py` and `hermes_cli/kanban_owner_recovery.py` match upstream again.
 
-Their tests (`tests/pm/test_plugin_declaration_membership.py`, `tests/agent/test_background_review_reasoning_warning.py`) are gone.
+Their tests (`tests/pm/test_plugin_declaration_membership.py`, `tests/agent/test_background_review_reasoning_warning.py`, `tests/hermes_cli/test_kanban_restart_interrupt.py`) are gone.
+`tests/hermes_cli/test_kanban_restart_interrupt.py` must leave hermes-local's `CORE_TESTS` in the same swap.
 
-## Kept with a caveat 2026-11-16
-
-Topic 32 kanban-restart-interrupt stays, but its trigger no longer fires.
-Upstream `579565e0e1` (restart when idle) waits for card workers on a normal restart, so nothing is lost there.
-The patch stamps `cause: gateway_restart` only while `drain_control.restart_wait_open` is true, and upstream no longer calls `open_restart_wait` outside tests.
-A forced restart (`hermes gateway restart --yes`, `hermes update --force`) still stops live workers. Read from the code, not run: the worker exits 130, and `_exit_code_kind` books any nonzero code as a crash.
-Covering forced restarts needs a new trigger on the owner's stop cause. Until then, forced restarts charge each running card one failure.
+Not covered by any patch: a forced restart (`hermes gateway restart --yes`, `hermes update --force`) still stops live workers. Read from the code, not run: the worker exits 130, and `_exit_code_kind` books any nonzero code as a crash, so each running card is charged one failure. Covering that needs a new trigger on the owner's stop cause.
 
 ## Requested additions
 
@@ -1038,5 +1012,24 @@ Wide run (every test file that names a patched module, 8 workers):
 - Candidate: 758 files, 11,582 passed, 22 failed, 442 errors. Baseline: 728 files, 10,791 passed, 16 failed, 92 errors.
 - 16 failures and 92 errors are common to both. 350 candidate errors are `Too many open files` in `tests/tui_gateway/test_tui_gateway_server.py`; run alone on one Mac, that file fails the same 6 tests on both trees.
 - Candidate only, by design: 4 tests in `tests/tools/test_profile_key_env_scrub.py`. Upstream expects `MY_CUSTOM_API_KEY` and an unpointed `CORP_LLM_TOKEN` to reach children; topic 30 scrubs both.
-- Candidate only, open: `tests/agent/test_compression_stall_deterministic_fallback.py::test_over_window_request_commits_the_deterministic_fallback_on_the_first_stall`. It passes on the live predecessor and on pure upstream. Upstream's new tail budget and the topic 24 landing plan together start the tail on an assistant row, so the fallback summary merges into that row. The test expects a row of its own.
+- Candidate only, fixed in the follow-up below: `tests/agent/test_compression_stall_deterministic_fallback.py::test_over_window_request_commits_the_deterministic_fallback_on_the_first_stall`. It passes on the live predecessor and on pure upstream.
 - `tests/hermes_cli/test_kanban_db.py::test_infrastructure_spawn_refusal_never_charges_the_card` fails on macOS without the dropped skip marker.
+
+## Follow-up 2026-11-16
+
+Commits: `08c69500c8f18bf0adfac1ef388048b828adaea6`, `cb04f74a1d1a62b3bafcc0eae0be77a1044ffafe`, `17f6e05c6b7ae27adfd4d05ae3df3be2596db862`.
+
+- Topic 32 dropped. See "Dropped 2026-11-16".
+- Topic 24 fixed. Upstream's tool schemas cost 7,939 rough tokens in the stall test; the live core's cost 9,308. The landing plan subtracts that cost, so its shrunk tail budget rose from 4,070 to 4,617 tokens and the tail gained one row. It opened on assistant row 33 where the live core opened on user row 34. After a head that ends on a user turn, the summary had no role that alternates and was folded into row 33.
+- The live core has the same dependence on the fixed prompt cost: its first, larger budget also cut on an assistant row (29). It passed the test because the second budget landed on a user row.
+- The fix moves a shrunk tail past its opening assistant reply when the summary then stands alone. The stall test now ends with the same rows as on the live core.
+
+Verification (same runtime proof on the `mini` host, on tree `17f6e05c6b7ae27adfd4d05ae3df3be2596db862`, hermes-local branch `rebuild/w4-core-compat` at `8c0f1eb`):
+
+- `CORE_TESTS`: 39 files, 651 passed, 0 failed, 1 skipped. Before: 40 files, 639 passed. The change is 3 removed topic 32 tests and 15 new topic 24 tests.
+- hermes-local `tests`: 502 run, 0 failed. `operations/tests`: 1165 run, 11 failed. `~/.hermes/scripts/tests`: 44 run, 1 failed. mikebot-texting: 1 passed.
+- The same hermes-local branch on the live core `614789da47`: `CORE_TESTS` 39 files, 640 passed, 0 failed. `tests`: 502 run, 0 failed. `operations/tests`: 1165 run, 12 failed. `~/.hermes/scripts/tests`: 44 run, 0 failed.
+- Every `operations/tests` failure on both cores is in `test_log_posters`, as before.
+- The `~/.hermes/scripts/tests` failure on the candidate is `test_script_imports`. Five installed feed copies under `~/.hermes/scripts/feed-compact/` still import `tools.send_message_targets`. It clears when the feed posters are reinstalled from the hermes-local branch and the old copies are pruned.
+- Wide run, 8 workers: 757 files, 11,595 passed, 21 failed, 442 errors. Before: 758 files, 11,582 passed, 22 failed, 442 errors. The stall test left the failed set; nothing joined it. The error set is unchanged (`Too many open files`).
+- Neighbours of topics 24 and 32 that the wide list lacks, 4 workers: 97 files, 737 passed, 6 failed on the candidate and on pure upstream, with the same 6 failures.
