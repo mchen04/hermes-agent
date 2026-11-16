@@ -235,18 +235,18 @@ def test_the_task_snapshot_reads_the_words_after_a_skill_scaffold():
 
 def test_a_capped_prompt_asks_for_no_action_log_and_a_size_limit():
     compressor = _compressor(summary_max_chars=CAP)
-    fresh = compressor._build_summary_prompt("[USER]: hi", 2000, None, "", True)
+    fresh = "\n".join(m["content"] for m in compressor._build_summary_prompt("[USER]: hi", 2000, None, "", True))
     assert "## Completed Actions" not in fresh and "Detailed Session Log" not in fresh
     assert "Keep the whole summary under" in fresh and "## Key Decisions" in fresh
     compressor._previous_summary = "## Goal\nold"
-    update = compressor._build_summary_prompt("[USER]: hi", 2000, None, "", True)
+    update = "\n".join(m["content"] for m in compressor._build_summary_prompt("[USER]: hi", 2000, None, "", True))
     assert "ADD new completed actions" not in update and "Rewrite the summary" in update
 
 
 def test_an_uncapped_prompt_keeps_the_upstream_template():
     compressor = _compressor()
     compressor._previous_summary = "## Goal\nold"
-    prompt = compressor._build_summary_prompt("[USER]: hi", 2000, None, "", True)
+    prompt = "\n".join(m["content"] for m in compressor._build_summary_prompt("[USER]: hi", 2000, None, "", True))
     assert "ADD new completed actions to the numbered list (continue numbering)." in prompt
     assert "## Completed Actions" in prompt and "## Detailed Session Log (oldest first)" in prompt
 

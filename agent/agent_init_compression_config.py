@@ -8,7 +8,7 @@ if TYPE_CHECKING:
 
 def _parse_compression_config(agent, _agent_cfg) -> CompressionSettings:
     """Parse the ``compression`` section. Defaults here MUST match DEFAULT_CONFIG."""
-    from agent.agent_init import (CompressionSettings)
+    from agent.agent_init import (CompressionSettings, DEFAULT_CONFIG, _cfg_dict, _cfg_flag, _compression_codex_settings, _compression_threshold, _parse_config_int, _positive_int, cfg_get, is_truthy_value)
 
     cfg = _cfg_dict(_agent_cfg, "compression")
     threshold, autoraise_notice_enabled = _compression_threshold(agent, cfg)

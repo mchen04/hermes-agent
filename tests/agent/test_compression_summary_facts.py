@@ -42,6 +42,10 @@ _LONG_GH = {"output": "log line\n" * 900 + json.dumps({"number": 21, "state": "M
 _TESTS = {"output": "collected 97 items\n...\n===== 97 passed in 4.10s =====\n", "exit_code": 0}
 
 
+def _prompt_text(messages):
+    return "\n".join(str(m.get("content") or "") for m in messages)
+
+
 def _turns():
     return [
         {"role": "user", "content": "Merge PR 21 and tell me if the tests pass."},
@@ -58,7 +62,7 @@ def test_facts_from_the_elided_middle_reach_the_prompt_and_the_summary(compresso
     seen = {}
 
     def fake_llm(prompt, started):
-        seen["prompt"] = prompt
+        seen["prompt"] = _prompt_text(prompt)
         return "## Active State\nNo merge is evidenced.\n"
     monkeypatch.setattr(compressor, "_call_summary_llm", fake_llm)
     summary = compressor._generate_summary(turns)
@@ -87,11 +91,11 @@ def test_plain_prose_is_not_a_fact():
 def test_configured_language_replaces_the_follow_the_user_rule(compressor, monkeypatch):
     import hermes_cli.config as cfgmod
     monkeypatch.setattr(cfgmod, "load_config", lambda *a, **k: {"compression": {"summary_language": "English"}})
-    prompt = compressor._build_summary_prompt("[USER]: Привет", 500, None, "", True)
+    prompt = _prompt_text(compressor._build_summary_prompt("[USER]: Привет", 500, None, "", True))
     assert "Write the summary in English, whatever language the turns use" in prompt
     assert "do not translate or switch to English" not in prompt
     monkeypatch.setattr(cfgmod, "load_config", lambda *a, **k: {"compression": {}})
-    prompt = compressor._build_summary_prompt("[USER]: Привет", 500, None, "", True)
+    prompt = _prompt_text(compressor._build_summary_prompt("[USER]: Привет", 500, None, "", True))
     assert "do not translate or switch to English" in prompt
 
 
@@ -111,11 +115,12 @@ def test_unanswered_question_is_labelled_and_answered_one_is_not(compressor, mon
 
     seen = {}
     monkeypatch.setattr(compressor, "_call_summary_llm",
-                        lambda prompt, started: seen.setdefault("prompt", prompt) and "## Goal\nx\n")
+                        lambda prompt, started: seen.setdefault("prompt", _prompt_text(prompt)) and "## Goal\nx\n")
     scan = type("Scan", (), {"previous_summary_before": None, "has_user_turn_before": None})()
     compressor._summarize_window(messages, messages, scan, None, "", False)
     assert f"{cc._NO_REPLY_LABEL}: what's it waiting on?" in seen["prompt"]
-    assert "[USER]: is PR 21 merged?" in seen["prompt"]
+    assert "is PR 21 merged?" in seen["prompt"]
+    assert f"{cc._NO_REPLY_LABEL}: is PR 21 merged?" not in seen["prompt"]
     assert "Never list them under Resolved Questions" in seen["prompt"]
     assert compressor._summary_unanswered_ids == set()  # per-call state does not leak
 
@@ -157,7 +162,7 @@ def test_a_question_answered_in_the_kept_tail_is_labelled_answered(compressor, m
     messages = window + [{"role": "assistant", "content": "No, nothing waits on you."}]
     seen = {}
     monkeypatch.setattr(compressor, "_call_summary_llm",
-                        lambda prompt, started: seen.setdefault("prompt", prompt) and "## Goal\nx\n")
+                        lambda prompt, started: seen.setdefault("prompt", _prompt_text(prompt)) and "## Goal\nx\n")
     scan = type("Scan", (), {"previous_summary_before": None, "has_user_turn_before": None})()
     compressor._summarize_window(messages, window, scan, None, "", False)
     assert f"{cc._LATER_REPLY_LABEL}: anything needed from me?" in seen["prompt"]
