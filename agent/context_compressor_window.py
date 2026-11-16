@@ -87,6 +87,21 @@ class CompactionWindowMixin:
                 compress_end = bridge_idx
         return compress_start, compress_end
 
+    def _summary_merges_into_tail(self, messages: list[dict[str, Any]], start: int, end: int) -> bool:
+        return self._summary_placement(messages[:start], messages[end:], start)[1]
+
+    def _shrunk_tail_cut(self, messages: list[dict[str, Any]], start: int, end: int) -> int:
+        past_first_reply = self._align_boundary_forward(messages, end + 1)
+        if (
+            start < end and past_first_reply < len(messages)
+            and messages[end].get("role") == "assistant"
+            and self._summary_merges_into_tail(messages, start, end)
+            and not self._summary_merges_into_tail(messages, start, past_first_reply)
+            and self._ensure_last_assistant_message_in_tail(messages, past_first_reply, start) == past_first_reply
+        ):
+            return past_first_reply
+        return end
+
     def _plan_landing(self, messages: list[dict[str, Any]]) -> LandingPlan:
         target = self.landing_target_tokens
         reserve = self._summary_reserve_tokens(messages)
@@ -100,6 +115,8 @@ class CompactionWindowMixin:
             )
             pruned = self._drop_blank_echoes(pruned)
             start, end = self._compress_window(pruned, None if budget == self.tail_token_budget else budget)
+            if budget != self.tail_token_budget:
+                end = self._shrunk_tail_cut(pruned, start, end)
             if start < end and getattr(self, "tail_mode", "lean") == "lean":
                 pruned = self._demote_stale_tail_tools(pruned, end)
             projected = self._landing_tokens(self._messages_rough(pruned[:start] + pruned[end:]) + reserve) if target else 0
