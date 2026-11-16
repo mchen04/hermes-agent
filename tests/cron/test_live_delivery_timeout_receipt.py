@@ -57,7 +57,7 @@ def test_timeout_stays_unknown_until_the_adapter_receipt(success, receipt_before
             caplog.at_level("INFO"),
             patch("gateway.config.load_gateway_config", return_value=config),
             patch("cron.scheduler.load_config", return_value={"cron": {"wrap_response": False}}),
-            patch("tools.send_message_tool._send_to_platform", standalone),
+            patch("gateway.outbound.send._send_to_platform", standalone),
         ):
             if via_queue:
                 from cron import delivery_queue
