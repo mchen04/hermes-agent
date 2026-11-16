@@ -321,3 +321,57 @@ def test_prepared_summaries_use_the_shared_landing_plan(grow):
     assert _landed(compressed) <= TARGET
     assert summary_call.call_count == (2 if grow else 1)
     assert compressed[-1]["content"] == messages[-1]["content"]
+
+
+CHAT_TARGET = 27_200
+
+
+def _chat_row(i):
+    return {"role": "user" if i % 2 == 0 else "assistant", "content": f"turn {i}: " + "lorem ipsum " * 300}
+
+
+def _own_summary_rows(compressed):
+    return [m for m in compressed if str(m.get("content")).startswith(cc.SUMMARY_PREFIX)]
+
+
+@pytest.mark.parametrize("fixed_prompt_tokens", range(6_000, 12_001, 500))
+def test_a_shrunk_tail_leaves_the_summary_a_row_of_its_own(fixed_prompt_tokens):
+    compressor = _compressor(
+        protect_first_n=3, post_compaction_target_tokens=CHAT_TARGET, summary_max_chars=CAP,
+        request_overhead_tokens=fixed_prompt_tokens,
+    )
+    messages = [_chat_row(i) for i in range(40)]
+    compressed = _compress(compressor, messages)
+    assert len(_own_summary_rows(compressed)) == 1
+    assert [m["content"] for m in compressed[-2:]] == [m["content"] for m in messages[-2:]]
+    assert fixed_prompt_tokens + estimate_messages_tokens_rough(compressed) <= CHAT_TARGET
+
+
+def test_a_shrunk_tail_never_gives_up_the_newest_reply_for_a_summary_row():
+    compressor = _compressor(
+        protect_first_n=3, post_compaction_target_tokens=CHAT_TARGET, summary_max_chars=CAP,
+        request_overhead_tokens=20_000,
+    )
+    newest_reply = "the full report: " + "lorem ipsum " * 800
+    messages = [_chat_row(i) for i in range(39)] + [
+        {"role": "assistant", "content": newest_reply},
+        {"role": "user", "content": "now check the board"},
+        {"role": "assistant", "content": "", "tool_calls": [
+            {"id": "call_board", "type": "function", "function": {"name": "terminal", "arguments": "{}"}}]},
+        {"role": "tool", "tool_call_id": "call_board", "content": "board output"},
+    ]
+    compressed = _compress(compressor, messages)
+    assert any(newest_reply in str(m.get("content")) for m in compressed)
+    assert compressed[-3]["content"] == "now check the board"
+
+
+def test_a_shrunk_tail_that_opens_on_a_user_turn_keeps_the_summary_on_that_turn():
+    compressor = _compressor(
+        protect_first_n=2, post_compaction_target_tokens=CHAT_TARGET, summary_max_chars=CAP,
+        request_overhead_tokens=9_000,
+    )
+    messages = [_chat_row(i) for i in range(40)]
+    compressed = _compress(compressor, messages)
+    carrier = next(m for m in compressed if cc._SUMMARY_END_MARKER in str(m.get("content")))
+    assert carrier["role"] == "user"
+    assert any(m["content"] in carrier["content"] for m in messages if m["role"] == "user")
